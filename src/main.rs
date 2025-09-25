@@ -6,9 +6,10 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
+    crossterm::cursor::position,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use sqlx::{
     FromRow,
@@ -19,6 +20,12 @@ use std::io;
 use std::time::Duration;
 
 const DB_URL: &str = "sqlite:todo.db";
+
+// Enum to hold represent application state
+enum InputMode {
+    Normal,
+    Editing,
+}
 
 // A struct to hold our task data from the database
 #[derive(Clone, FromRow)]
@@ -33,6 +40,8 @@ struct App {
     db_pool: SqlitePool,
     tasks: Vec<Task>,
     selected: usize,
+    input_mode: InputMode,
+    input_buffer: String,
 }
 
 impl App {
@@ -51,6 +60,8 @@ impl App {
             db_pool,
             tasks: vec![],
             selected: 0,
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
         })
     }
 
@@ -77,6 +88,7 @@ impl App {
         self.load_tasks().await?;
         Ok(())
     }
+    // Delete a selected task from the database
     async fn delete_task(&mut self) -> Result<(), sqlx::Error> {
         if self.tasks.is_empty() {
             // Do nothing
@@ -89,6 +101,27 @@ impl App {
             .bind(task_id)
             .execute(&self.db_pool)
             .await?;
+        self.load_tasks().await?;
+        Ok(())
+    }
+    // Toggle the completion status of the currently selected task
+    async fn toggle_completed(&mut self) -> Result<(), sqlx::Error> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+
+        // Get the selected task and its new status
+        let task = &self.tasks[self.selected];
+        let new_status = !task.completed; // Flip the boolean status
+
+        // Update the task in the database
+        sqlx::query("UPDATE tasks SET completed = ? WHERE id = ?")
+            .bind(new_status)
+            .bind(task.id)
+            .execute(&self.db_pool)
+            .await?;
+
+        // Reload tasks to reflect the change in the UI
         self.load_tasks().await?;
         Ok(())
     }
@@ -127,29 +160,54 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
-        {
-            match key.code {
-                KeyCode::Char('q') => return Ok(()),
-                KeyCode::Char('a') => {
-                    app.add_task("A new task!").await.unwrap();
-                }
-                KeyCode::Char('x') => {
-                    app.delete_task().await.unwrap();
-                }
-                KeyCode::Char('k') => {
-                    app.selected = app.selected.saturating_sub(1);
-                }
-                KeyCode::Char('j') => {
-                    if !app.tasks.is_empty() {
-                        let max_index = app.tasks.len() - 1;
-                        if app.selected < max_index {
-                            app.selected += 1;
+        if let Event::Key(key) = event::read()? {
+            match app.input_mode {
+                // Normal Mode
+                InputMode::Normal => match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('a') => {
+                        // Switch to editing mode and clear the buffer
+                        app.input_mode = InputMode::Editing;
+                        app.input_buffer.clear();
+                    }
+                    KeyCode::Char('x') => app.delete_task().await.unwrap(),
+                    KeyCode::Enter => app.toggle_completed().await.unwrap(),
+                    KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
+                    KeyCode::Char('j') => {
+                        if !app.tasks.is_empty() {
+                            let max = app.tasks.len() - 1;
+                            if app.selected < max {
+                                app.selected += 1;
+                            }
                         }
                     }
-                }
-                _ => {} // Do nothing on other key presses
+                    _ => {}
+                },
+
+                // Editing Mode
+                InputMode::Editing => match key.code {
+                    KeyCode::Enter => {
+                        // Save the new task and return to normal mode
+                        let description = app.input_buffer.trim().to_string();
+                        if !description.is_empty() {
+                            app.add_task(&description).await.unwrap();
+                        }
+                        app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Char(c) => {
+                        // Add character to the input buffer
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        // Remove the last character
+                        app.input_buffer.pop();
+                    }
+                    KeyCode::Esc => {
+                        // Cancel and return to normal mode
+                        app.input_mode = InputMode::Normal;
+                    }
+                    _ => {}
+                },
             }
         }
     }
@@ -159,7 +217,7 @@ fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Percentage(100)].as_ref())
+        .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
         .split(f.area());
 
     let items: Vec<ListItem> = app
@@ -179,7 +237,7 @@ fn ui(f: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("To-Do (q: quit, a: add, x: delete, ↑/↓: move)"),
+                .title("To-Do (q: quit, a: add, x: delete, k/j: move, ENTER: check's task on/off)"),
         )
         .highlight_style(
             Style::default()
@@ -189,4 +247,23 @@ fn ui(f: &mut Frame, app: &App) {
         .highlight_symbol("> "); // Symbol to show next to the selected item
 
     f.render_stateful_widget(tasks_list, chunks[0], &mut state);
+
+    if let InputMode::Editing = app.input_mode {
+        let input_box = Paragraph::new(app.input_buffer.as_str())
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("New Task (Enter to save, Esc to cancel)"),
+            );
+        f.render_widget(input_box, chunks[1]);
+
+        f.set_cursor_position(
+            // The new method takes a Position struct
+            ratatui::layout::Position {
+                x: chunks[1].x + app.input_buffer.chars().count() as u16 + 1,
+                y: chunks[1].y + 1,
+            },
+        );
+    }
 }
