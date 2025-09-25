@@ -8,7 +8,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 use sqlx::{
     FromRow,
@@ -32,6 +32,7 @@ struct Task {
 struct App {
     db_pool: SqlitePool,
     tasks: Vec<Task>,
+    selected: usize,
 }
 
 impl App {
@@ -49,6 +50,7 @@ impl App {
         Ok(Self {
             db_pool,
             tasks: vec![],
+            selected: 0,
         })
     }
 
@@ -58,6 +60,9 @@ impl App {
             sqlx::query_as::<_, Task>("SELECT id, description, completed FROM tasks ORDER BY id")
                 .fetch_all(&self.db_pool)
                 .await?;
+        if self.selected >= self.tasks.len() {
+            self.selected = self.tasks.len().saturating_sub(1);
+        }
         Ok(())
     }
 
@@ -73,7 +78,17 @@ impl App {
         Ok(())
     }
     async fn delete_task(&mut self) -> Result<(), sqlx::Error> {
-        //TODO: Finish the functionality for deleting a task
+        if self.tasks.is_empty() {
+            // Do nothing
+            return Ok(());
+        }
+
+        let task_id = self.tasks[self.selected].id;
+
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .execute(&self.db_pool)
+            .await?;
         self.load_tasks().await?;
         Ok(())
     }
@@ -115,13 +130,27 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
         {
-            if KeyCode::Char('q') == key.code {
-                return Ok(());
+            match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('a') => {
+                    app.add_task("A new task!").await.unwrap();
+                }
+                KeyCode::Char('x') => {
+                    app.delete_task().await.unwrap();
+                }
+                KeyCode::Char('k') => {
+                    app.selected = app.selected.saturating_sub(1);
+                }
+                KeyCode::Char('j') => {
+                    if !app.tasks.is_empty() {
+                        let max_index = app.tasks.len() - 1;
+                        if app.selected < max_index {
+                            app.selected += 1;
+                        }
+                    }
+                }
+                _ => {} // Do nothing on other key presses
             }
-            if KeyCode::Char('a') == key.code {
-                app.add_task("A new task from the TUI!").await.unwrap();
-            }
-            if KeyCode::Char('x') == key.code {}
         }
     }
 }
@@ -143,17 +172,21 @@ fn ui(f: &mut Frame, app: &App) {
         })
         .collect();
 
+    let mut state = ListState::default();
+    state.select(Some(app.selected));
+
     let tasks_list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("To-Do List (q to quit, a to add)"),
+                .title("To-Do (q: quit, a: add, x: delete, ↑/↓: move)"),
         )
         .highlight_style(
             Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
-        );
+        )
+        .highlight_symbol("> "); // Symbol to show next to the selected item
 
-    f.render_widget(tasks_list, chunks[0]);
+    f.render_stateful_widget(tasks_list, chunks[0], &mut state);
 }
