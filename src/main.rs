@@ -6,7 +6,6 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
-    crossterm::cursor::position,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
@@ -17,7 +16,6 @@ use sqlx::{
     sqlite::{Sqlite, SqlitePool},
 };
 use std::io;
-use std::time::Duration;
 
 const DB_URL: &str = "sqlite:todo.db";
 
@@ -33,6 +31,7 @@ struct Task {
     id: i64,
     description: String,
     completed: bool,
+    item_order: Option<i64>,
 }
 
 // App holds the state of our application
@@ -67,27 +66,64 @@ impl App {
 
     // Load tasks from the database into app state
     async fn load_tasks(&mut self) -> Result<(), sqlx::Error> {
-        self.tasks =
-            sqlx::query_as::<_, Task>("SELECT id, description, completed FROM tasks ORDER BY id")
-                .fetch_all(&self.db_pool)
-                .await?;
+        self.tasks = sqlx::query_as::<_, Task>(
+            "SELECT id, description, completed, item_order FROM tasks ORDER BY item_order ASC",
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
         if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len().saturating_sub(1);
         }
         Ok(())
     }
 
-    // Add a new task to the database
+    // Add a new task to the database according to position (selecting a task using the cursor)
     async fn add_task(&mut self, description: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO tasks (description, completed) VALUES (?, ?)")
+        let new_order: i64;
+
+        if self.tasks.is_empty() {
+            new_order = 0;
+        } else if self.selected == 0 {
+            sqlx::query("UPDATE tasks SET item_order = item_order + 1 WHERE item_order >= 0")
+                .execute(&self.db_pool)
+                .await?;
+            new_order = 0;
+        } else {
+            let current_order = self.tasks[self.selected]
+                .item_order
+                .unwrap_or(self.tasks.len() as i64);
+
+            // Shift all tasks that come after the current one.
+            sqlx::query("UPDATE tasks SET item_order = item_order + 1 WHERE item_order > ?")
+                .bind(current_order)
+                .execute(&self.db_pool)
+                .await?;
+
+            new_order = current_order + 1;
+        }
+
+        // Insert the new task with its calculated order.
+        sqlx::query("INSERT INTO tasks (description, completed, item_order) VALUES (?, ?, ?)")
             .bind(description)
-            .bind(false) // New tasks are not completed
+            .bind(false)
+            .bind(new_order)
             .execute(&self.db_pool)
             .await?;
 
+        // Reload tasks from the database.
         self.load_tasks().await?;
+
+        // Find the new position of the inserted task and update the cursor.
+        self.selected = self
+            .tasks
+            .iter()
+            .position(|t| t.item_order == Some(new_order))
+            .unwrap_or(0);
+
         Ok(())
     }
+
     // Delete a selected task from the database
     async fn delete_task(&mut self) -> Result<(), sqlx::Error> {
         if self.tasks.is_empty() {
