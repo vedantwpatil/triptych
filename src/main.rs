@@ -1,9 +1,12 @@
 mod app;
+mod cli;
 mod ui;
 
 use crate::app::InputMode;
 use crate::ui::ui;
 use app::App;
+use clap::Parser;
+use cli::Cli;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -17,6 +20,19 @@ use std::io;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli_args = Cli::parse();
+
+    let mut app = App::build().await?;
+
+    if let Some(description) = cli_args.task {
+        // A task was provided, so add it and exit
+        match app.add_task(&description).await {
+            Ok(_) => println!("Successfully added task: \"{}\"", description),
+            Err(e) => eprintln!("Error adding task: {}", e),
+        }
+        return Ok(()); // Exit gracefully
+    }
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -25,7 +41,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create and run app
-    let mut app = App::build().await?;
     app.load_tasks().await?;
     run_app(&mut terminal, app).await?;
 
