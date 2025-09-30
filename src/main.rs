@@ -6,7 +6,7 @@ use crate::app::InputMode;
 use crate::ui::ui;
 use app::App;
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Commands};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -21,30 +21,106 @@ use std::io;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli_args = Cli::parse();
-
     let mut app = App::build().await?;
 
-    if let Some(description) = cli_args.task {
-        // A task was provided, so add it and exit
-        match app.add_task(&description).await {
-            Ok(_) => println!("Successfully added task: \"{}\"", description),
-            Err(e) => eprintln!("Error adding task: {}", e),
+    // Check if a subcommand was provided
+    if let Some(command) = cli_args.command {
+        // A subcommand was provided - handle it and exit
+        match command {
+            Commands::Add { description } => match app.add_task(&description).await {
+                Ok(_) => println!("✓ Added task: \"{}\"", description),
+                Err(e) => {
+                    eprintln!("✗ Error adding task: {}", e);
+                    std::process::exit(1);
+                }
+            },
+
+            Commands::List => {
+                app.load_tasks().await?;
+                if app.tasks.is_empty() {
+                    println!(
+                        "📝 No tasks yet! Add one with: {} add \"Your task description\"",
+                        std::env::args()
+                            .next()
+                            .unwrap_or_else(|| "todo".to_string())
+                    );
+                } else {
+                    println!("📋 Current Tasks:");
+                    for task in &app.tasks {
+                        let status = if task.completed { "✓" } else { "○" };
+                        let description = if task.completed {
+                            format!("\x1b[9m{}\x1b[0m", task.description) // Strike-through for completed
+                        } else {
+                            task.description.clone()
+                        };
+                        println!("  {} {} (ID: {})", status, description, task.id);
+                    }
+                }
+            }
+
+            Commands::Done { id } => match app.complete_task_by_id(id).await {
+                Ok(true) => {
+                    if let Ok(Some(task)) = app.get_task_by_id(id).await {
+                        println!("✓ Marked task as done: \"{}\"", task.description);
+                    } else {
+                        println!("✓ Marked task {} as done", id);
+                    }
+                }
+                Ok(false) => {
+                    eprintln!("✗ Task with ID {} not found", id);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("✗ Error completing task: {}", e);
+                    std::process::exit(1);
+                }
+            },
+
+            Commands::Rm { id } => match app.remove_task_by_id(id).await {
+                Ok(true) => println!("✓ Removed task with ID {}", id),
+                Ok(false) => {
+                    eprintln!("✗ Task with ID {} not found", id);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("✗ Error removing task: {}", e);
+                    std::process::exit(1);
+                }
+            },
+
+            Commands::Clear => match app.clear_completed_tasks().await {
+                Ok(count) => {
+                    if count == 0 {
+                        println!("🧹 No completed tasks to clear");
+                    } else {
+                        println!(
+                            "🧹 Cleared {} completed task{}",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("✗ Error clearing completed tasks: {}", e);
+                    std::process::exit(1);
+                }
+            },
         }
-        return Ok(()); // Exit gracefully
+
+        // Exit after handling CLI command - don't start the TUI
+        return Ok(());
     }
 
-    // Setup terminal
+    // No subcommand was provided - start the TUI
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create and run app
     app.load_tasks().await?;
     run_app(&mut terminal, app).await?;
 
-    // Restore terminal
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

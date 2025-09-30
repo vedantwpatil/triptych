@@ -152,4 +152,56 @@ impl App {
         self.load_tasks().await?;
         Ok(())
     }
+
+    /// Mark a task as completed by its database ID
+    pub async fn complete_task_by_id(&mut self, id: i64) -> Result<bool, sqlx::Error> {
+        let rows_affected = sqlx::query("UPDATE tasks SET completed = true WHERE id = ?")
+            .bind(id)
+            .execute(&self.db_pool)
+            .await?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            Ok(false) // Task with this ID was not found
+        } else {
+            Ok(true) // Task was successfully marked as done
+        }
+    }
+
+    /// Remove a task by its database ID
+    pub async fn remove_task_by_id(&mut self, id: i64) -> Result<bool, sqlx::Error> {
+        let rows_affected = sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(id)
+            .execute(&self.db_pool)
+            .await?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            Ok(false) // Task with this ID was not found
+        } else {
+            Ok(true) // Task was successfully removed
+        }
+    }
+
+    /// Remove all completed tasks from the database
+    pub async fn clear_completed_tasks(&mut self) -> Result<u64, sqlx::Error> {
+        let rows_affected = sqlx::query("DELETE FROM tasks WHERE completed = true")
+            .execute(&self.db_pool)
+            .await?
+            .rows_affected();
+
+        Ok(rows_affected)
+    }
+
+    /// Get a specific task by ID (useful for CLI operations)
+    pub async fn get_task_by_id(&self, id: i64) -> Result<Option<Task>, sqlx::Error> {
+        let task = sqlx::query_as::<_, Task>(
+            "SELECT id, description, completed, item_order FROM tasks WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.db_pool)
+        .await?;
+
+        Ok(task)
+    }
 }
