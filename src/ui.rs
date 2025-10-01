@@ -1,5 +1,4 @@
 use crate::app::{App, InputMode};
-use chrono::Datelike;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
