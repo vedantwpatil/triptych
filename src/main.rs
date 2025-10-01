@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod nlp;
 mod ui;
 
 use crate::app::InputMode;
@@ -36,24 +37,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
 
             Commands::List => {
-                app.load_tasks().await?;
-                if app.tasks.is_empty() {
-                    println!(
-                        "📝 No tasks yet! Add one with: {} add \"Your task description\"",
-                        std::env::args()
-                            .next()
-                            .unwrap_or_else(|| "todo".to_string())
-                    );
-                } else {
-                    println!("📋 Current Tasks:");
-                    for task in &app.tasks {
-                        let status = if task.completed { "✓" } else { "○" };
-                        let description = if task.completed {
-                            format!("\x1b[9m{}\x1b[0m", task.description) // Strike-through for completed
+                match app.get_enhanced_task_list().await {
+                    Ok(enhanced_tasks) => {
+                        if enhanced_tasks.is_empty() {
+                            println!(
+                                "📝 No tasks yet! Add one with: {} add \"Your task description\"",
+                                std::env::args()
+                                    .next()
+                                    .unwrap_or_else(|| "todo".to_string())
+                            );
                         } else {
-                            task.description.clone()
-                        };
-                        println!("  {} {} (ID: {})", status, description, task.id);
+                            println!("📋 Current Tasks:");
+                            for enhanced in &enhanced_tasks {
+                                let task = &enhanced.task;
+                                let status = if task.completed { "✓" } else { "○" };
+
+                                let mut indicators = Vec::new();
+
+                                // Priority indicator
+                                match task.priority {
+                                    3 => indicators.push("[HIGH]".to_string()),
+                                    2 => indicators.push("[MED]".to_string()),
+                                    1 => indicators.push("[LOW]".to_string()),
+                                    _ => {}
+                                }
+
+                                // Schedule indicator
+                                if let Some(scheduled) = task.scheduled_at {
+                                    let now = chrono::Utc::now();
+                                    let scheduled_date = scheduled.date_naive();
+                                    let today = now.date_naive();
+                                    let tomorrow = today + chrono::Duration::days(1);
+
+                                    let date_text = if scheduled_date == today {
+                                        "[TODAY]"
+                                    } else if scheduled_date == tomorrow {
+                                        "[TOMORROW]"
+                                    } else {
+                                        &format!("[{}]", scheduled.format("%m/%d"))
+                                    };
+                                    indicators.push(date_text.to_string());
+                                }
+
+                                let indicators_str = if indicators.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("{} ", indicators.join(" "))
+                                };
+
+                                let tags_display = if !enhanced.tags.is_empty() {
+                                    format!(" #{}", enhanced.tags.join(" #"))
+                                } else {
+                                    String::new()
+                                };
+
+                                let description = if task.completed {
+                                    format!("\x1b[9m{}\x1b[0m", task.description)
+                                } else {
+                                    task.description.clone()
+                                };
+
+                                println!(
+                                    "  {} {}{} (ID: {}){}",
+                                    status, indicators_str, description, task.id, tags_display
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("✗ Error loading tasks: {}", e);
+                        std::process::exit(1);
                     }
                 }
             }
