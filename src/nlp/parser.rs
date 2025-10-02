@@ -1,11 +1,23 @@
 use crate::nlp::ollama_client::OllamaClient;
 use crate::nlp::regex_patterns::RegexParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::time::Instant;
+use strsim::jaro_winkler;
 
 pub struct NLPParser {
     ollama_client: OllamaClient,
     ollama_available: bool,
+    cache: LruCache<String, CachedParse>,
+}
+
+#[derive(Clone)]
+struct CachedParse {
+    item: ParsedItem,
+    strategy: ParseStrategy,
+    confidence: f32,
+    cached_at: Instant,
 }
 
 impl NLPParser {
@@ -20,21 +32,76 @@ impl NLPParser {
         Self {
             ollama_client,
             ollama_available,
+            cache: LruCache::new(NonZeroUsize::new(1000).unwrap()),
         }
     }
 
-    pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
+    pub async fn parse(&mut self, input: &str) -> Result<ParseResult, ParseError> {
         let start = Instant::now();
+
+        // Layer 0: Check exact cache match first
+        if let Some(cached) = self.cache.get(input) {
+            let elapsed = start.elapsed().as_millis() as u64;
+
+            println!("⚡ Exact cache hit!");
+
+            return Ok(ParseResult {
+                item: cached.item.clone(),
+                strategy: ParseStrategy::Cached,
+                confidence: cached.confidence,
+                parse_time_ms: elapsed,
+            });
+        }
+
+        // Layer 0.5: Check similar inputs via fuzzy matching
+        let similarity_threshold = 0.85;
+        for (cached_input, cached_parse) in self.cache.iter() {
+            let similarity = jaro_winkler(input, cached_input);
+
+            if similarity > similarity_threshold {
+                let elapsed = start.elapsed().as_millis() as u64;
+
+                println!(
+                    "🔍 Similar pattern found ({:.0}% match): \"{}\"",
+                    similarity * 100.0,
+                    cached_input
+                );
+
+                // Adjust confidence based on similarity
+                let adjusted_confidence = cached_parse.confidence * similarity as f32;
+
+                return Ok(ParseResult {
+                    item: cached_parse.item.clone(),
+                    strategy: ParseStrategy::Cached,
+                    confidence: adjusted_confidence,
+                    parse_time_ms: elapsed,
+                });
+            }
+        }
 
         // Layer 1: Try regex fast path
         if let Some(item) = RegexParser::try_parse(input) {
             let elapsed = start.elapsed().as_millis() as u64;
-            return Ok(ParseResult {
-                item,
+
+            let result = ParseResult {
+                item: item.clone(),
                 strategy: ParseStrategy::Regex,
                 confidence: 0.95,
                 parse_time_ms: elapsed,
-            });
+            };
+
+            // Cache regex results for future fuzzy matches
+            self.cache.put(
+                input.to_string(),
+                CachedParse {
+                    item,
+                    strategy: ParseStrategy::Regex,
+                    confidence: 0.95,
+                    cached_at: Instant::now(),
+                },
+            );
+
+            return Ok(result);
         }
 
         // Layer 2: Try Ollama for complex parsing
@@ -42,12 +109,26 @@ impl NLPParser {
             match self.ollama_client.parse(input).await {
                 Ok(item) => {
                     let elapsed = start.elapsed().as_millis() as u64;
-                    return Ok(ParseResult {
-                        item,
+
+                    let result = ParseResult {
+                        item: item.clone(),
                         strategy: ParseStrategy::Ollama,
                         confidence: 0.85,
                         parse_time_ms: elapsed,
-                    });
+                    };
+
+                    // Cache Ollama results
+                    self.cache.put(
+                        input.to_string(),
+                        CachedParse {
+                            item,
+                            strategy: ParseStrategy::Ollama,
+                            confidence: 0.85,
+                            cached_at: Instant::now(),
+                        },
+                    );
+
+                    return Ok(result);
                 }
                 Err(e) => {
                     eprintln!("Ollama parsing failed: {}. Falling back.", e);
@@ -55,24 +136,45 @@ impl NLPParser {
             }
         }
 
-        // Layer 3: Fallback - create basic task
+        // Layer 3: Fallback
         let elapsed = start.elapsed().as_millis() as u64;
-        Ok(ParseResult {
-            item: ParsedItem::Task(crate::nlp::types::Task {
-                title: input.to_string(),
-                due_date: None,
-                tags: vec![],
-                priority: crate::nlp::types::Priority::Medium,
-                is_scheduled: false,
-            }),
+
+        let item = ParsedItem::Task(crate::nlp::types::Task {
+            title: input.to_string(),
+            due_date: None,
+            tags: vec![],
+            priority: crate::nlp::types::Priority::Medium,
+            is_scheduled: false,
+        });
+
+        let result = ParseResult {
+            item: item.clone(),
             strategy: ParseStrategy::Fallback,
             confidence: 0.50,
             parse_time_ms: elapsed,
-        })
+        };
+
+        // Cache fallback results
+        self.cache.put(
+            input.to_string(),
+            CachedParse {
+                item,
+                strategy: ParseStrategy::Fallback,
+                confidence: 0.50,
+                cached_at: Instant::now(),
+            },
+        );
+
+        Ok(result)
     }
 
     pub fn is_ollama_available(&self) -> bool {
         self.ollama_available
+    }
+
+    // Cache statistics for debugging
+    pub fn cache_stats(&self) -> (usize, usize) {
+        (self.cache.len(), self.cache.cap().get())
     }
 }
 

@@ -4,4 +4,4 @@ pub mod regex_patterns;
 pub mod types;
 
 pub use parser::NLPParser;
-pub use types::{ParsedItem, Priority};
+pub use types::{ParseStrategy, ParsedItem, Priority};

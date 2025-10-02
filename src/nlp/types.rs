@@ -42,14 +42,15 @@ pub enum Priority {
     Urgent,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ParseStrategy {
     Regex,
     Ollama,
     Fallback,
+    Cached,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParseResult {
     pub item: ParsedItem,
     pub strategy: ParseStrategy,

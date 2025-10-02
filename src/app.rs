@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::nlp::{NLPParser, ParsedItem, Priority};
+use crate::nlp::{NLPParser, ParseStrategy, ParsedItem, Priority};
 use chrono::{DateTime, Utc};
 use sqlx::{
     FromRow,
@@ -138,12 +138,37 @@ impl App {
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {}", e)))?;
 
         // Log parsing performance
-        println!(
-            "📊 Parsed using {:?} in {}ms (confidence: {:.0}%)",
-            parse_result.strategy,
-            parse_result.parse_time_ms,
-            parse_result.confidence * 100.0
-        );
+        match parse_result.strategy {
+            ParseStrategy::Cached => {
+                println!("⚡ Cache hit! Result in {}ms", parse_result.parse_time_ms);
+            }
+            ParseStrategy::Regex => {
+                println!(
+                    "📊 Parsed using Regex in {}ms (confidence: {:.0}%)",
+                    parse_result.parse_time_ms,
+                    parse_result.confidence * 100.0
+                );
+            }
+            ParseStrategy::Ollama => {
+                println!(
+                    "📊 Parsed using Ollama in {}ms (confidence: {:.0}%)",
+                    parse_result.parse_time_ms,
+                    parse_result.confidence * 100.0
+                );
+            }
+            ParseStrategy::Fallback => {
+                println!(
+                    "⚠️  Using fallback in {}ms (confidence: {:.0}%)",
+                    parse_result.parse_time_ms,
+                    parse_result.confidence * 100.0
+                );
+            }
+        }
+        // Show cache stats occasionally
+        let (cache_size, cache_cap) = self.nlp_parser.cache_stats();
+        if cache_size > 0 && cache_size % 5 == 0 {
+            println!("📦 Cache: {}/{} entries", cache_size, cache_cap);
+        }
 
         // Extract task data from the parsed result
         let (task_title, scheduled_at, priority_value, tags_list) = match parse_result.item {
