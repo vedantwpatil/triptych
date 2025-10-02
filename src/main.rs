@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod nlp;
+mod sync;
 mod ui;
 
 use crate::app::InputMode;

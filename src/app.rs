@@ -165,7 +165,7 @@ impl App {
             }
         }
         // Show cache stats occasionally
-        let (cache_size, cache_cap) = self.nlp_parser.cache_stats();
+        let (cache_size, cache_cap) = self.nlp_parser.cache_stats().await;
         if cache_size > 0 && cache_size % 5 == 0 {
             println!("📦 Cache: {}/{} entries", cache_size, cache_cap);
         }
