@@ -29,10 +29,10 @@ use tokio::signal;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli_args = Cli::parse();
 
-    // Handle daemon commands first (don't need app)
+    // Handle daemon commands first
     if let Some(Commands::Daemon) = &cli_args.command {
         let app = App::build().await?;
-        daemon::start_daemon(app.db_pool.clone(), app.nlp_parser_ref()).await?; // Clone here
+        daemon::start_daemon(app.db_pool.clone(), app.nlp_parser_ref()).await?;
         return Ok(());
     }
 
