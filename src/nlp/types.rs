@@ -2,10 +2,18 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseResult {
+    pub item: ParsedItem,
+    pub strategy: ParseStrategy,
+    pub confidence: f32,
+    pub parse_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ParsedItem {
     Task(Task),
     Event(Event),
-    Email(EmailAction),
+    Email(Email),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,14 +35,14 @@ pub struct Event {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmailAction {
-    pub action: String,
-    pub recipient: Option<String>,
-    pub subject: Option<String>,
-    pub scheduled_time: Option<DateTime<Utc>>,
+pub struct Email {
+    pub subject: String,
+    pub sender: String,
+    pub received_at: DateTime<Utc>,
+    pub body_preview: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Priority {
     Low,
     Medium,
@@ -42,18 +50,10 @@ pub enum Priority {
     Urgent,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ParseStrategy {
+    Cached,
     Regex,
     Ollama,
     Fallback,
-    Cached,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParseResult {
-    pub item: ParsedItem,
-    pub strategy: ParseStrategy,
-    pub confidence: f32,
-    pub parse_time_ms: u64,
 }

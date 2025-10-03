@@ -1,31 +1,36 @@
 use clap::{Parser, Subcommand};
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[derive(Parser)]
+#[command(name = "triptych")]
+#[command(about = "Terminal productivity suite", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 pub enum Commands {
-    /// Add a new task to the list
-    Add {
-        /// The description of the task
-        description: String,
-    },
-    /// List all current tasks
+    /// Add a new task
+    Add { description: String },
+
+    /// List all tasks
     List,
-    /// Mark a task as done by its ID
-    Done {
-        /// The ID of the task to mark as done
-        id: i64,
-    },
-    /// Remove a task by its ID
-    Rm {
-        /// The ID of the task to remove
-        id: i64,
-    },
-    /// Clear all completed tasks from the list
+
+    /// Mark a task as done
+    Done { id: i64 },
+
+    /// Remove a task
+    Rm { id: i64 },
+
+    /// Clear completed tasks
     Clear,
+
+    /// Start the background daemon
+    Daemon,
+
+    /// Stop the background daemon
+    Stop,
+
+    /// Check daemon status
+    Status,
 }
