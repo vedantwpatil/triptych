@@ -1,5 +1,5 @@
 use crate::nlp::types::{Event, ParsedItem, Priority, Task};
-use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -15,6 +15,7 @@ static NEXT_WEEK_DAY: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)").unwrap()
 });
 
+// Standalone time pattern (for "at 4:12 PM")
 static SPECIFIC_TIME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)").unwrap());
 
@@ -56,8 +57,8 @@ impl RegexParser {
         // Clean title by removing temporal markers and tags
         let title = Self::clean_title(input);
 
-        // Must have some temporal marker for regex fast path
-        if due_date.is_none() && tags.is_empty() {
+        // Must have some temporal marker or tags for regex fast path
+        if due_date.is_none() && tags.is_empty() && priority == Priority::Medium {
             return None;
         }
 
@@ -85,7 +86,7 @@ impl RegexParser {
         Some(Event {
             title,
             start_time,
-            end_time: None, // Can be enhanced with duration parsing
+            end_time: None,
             location: None,
             tags,
         })
@@ -101,12 +102,9 @@ impl RegexParser {
                 .get(2)
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(0);
-            let is_pm = caps
-                .get(3)
-                .map(|s| s.as_str().to_lowercase() == "pm")
-                .unwrap_or(false);
+            let am_pm = caps.get(3).map(|s| s.as_str().to_lowercase());
 
-            let adjusted_hour = if is_pm && hour != 12 { hour + 12 } else { hour };
+            let adjusted_hour = Self::convert_to_24h(hour, am_pm.as_deref())?;
 
             let tomorrow = now + Duration::days(1);
             return Local
@@ -129,13 +127,28 @@ impl RegexParser {
                 .get(2)
                 .and_then(|m| m.as_str().parse::<u32>().ok())
                 .unwrap_or(0);
-            let is_pm = caps
-                .get(3)
-                .map(|s| s.as_str().to_lowercase() == "pm")
-                .unwrap_or(false);
+            let am_pm = caps.get(3).map(|s| s.as_str().to_lowercase());
 
-            let adjusted_hour = if is_pm && hour != 12 { hour + 12 } else { hour };
+            let adjusted_hour = Self::convert_to_24h(hour, am_pm.as_deref())?;
 
+            return Local
+                .with_ymd_and_hms(now.year(), now.month(), now.day(), adjusted_hour, minute, 0)
+                .single()
+                .map(|dt| dt.with_timezone(&Utc));
+        }
+
+        // Try standalone time pattern (e.g., "at 4:12 PM" without today/tomorrow)
+        if let Some(caps) = SPECIFIC_TIME.captures(input) {
+            let hour = caps.get(1)?.as_str().parse::<u32>().ok()?;
+            let minute = caps
+                .get(2)
+                .and_then(|m| m.as_str().parse::<u32>().ok())
+                .unwrap_or(0);
+            let am_pm = caps.get(3).map(|s| s.as_str().to_lowercase());
+
+            let adjusted_hour = Self::convert_to_24h(hour, am_pm.as_deref())?;
+
+            // Default to today
             return Local
                 .with_ymd_and_hms(now.year(), now.month(), now.day(), adjusted_hour, minute, 0)
                 .single()
@@ -162,6 +175,25 @@ impl RegexParser {
         }
 
         None
+    }
+
+    /// Convert 12-hour time to 24-hour format
+    /// Returns None if hour is invalid
+    fn convert_to_24h(hour: u32, am_pm: Option<&str>) -> Option<u32> {
+        match (hour, am_pm) {
+            // 12 AM = 0:00 (midnight)
+            (12, Some("am")) => Some(0),
+            // 1-11 AM = 1-11
+            (h, Some("am")) if h >= 1 && h <= 11 => Some(h),
+            // 12 PM = 12:00 (noon)
+            (12, Some("pm")) => Some(12),
+            // 1-11 PM = 13-23
+            (h, Some("pm")) if h >= 1 && h <= 11 => Some(h + 12),
+            // No AM/PM specified - assume 24-hour format if <= 23
+            (h, None) if h <= 23 => Some(h),
+            // Invalid hour
+            _ => None,
+        }
     }
 
     fn days_until_next_weekday(day: &str) -> Option<i64> {
@@ -255,5 +287,16 @@ mod tests {
         if let Some(ParsedItem::Task(task)) = result {
             assert_eq!(task.priority, Priority::Urgent);
         }
+    }
+
+    #[test]
+    fn test_12hour_conversion() {
+        assert_eq!(RegexParser::convert_to_24h(12, Some("am")), Some(0)); // Midnight
+        assert_eq!(RegexParser::convert_to_24h(1, Some("am")), Some(1));
+        assert_eq!(RegexParser::convert_to_24h(11, Some("am")), Some(11));
+        assert_eq!(RegexParser::convert_to_24h(12, Some("pm")), Some(12)); // Noon
+        assert_eq!(RegexParser::convert_to_24h(1, Some("pm")), Some(13));
+        assert_eq!(RegexParser::convert_to_24h(4, Some("pm")), Some(16)); // 4 PM = 16:00
+        assert_eq!(RegexParser::convert_to_24h(11, Some("pm")), Some(23));
     }
 }

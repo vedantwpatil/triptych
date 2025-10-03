@@ -1,7 +1,8 @@
 use crate::nlp::types::{Event, ParsedItem, Priority, Task};
+use chrono::Duration;
 use reqwest::{Client, Error as ReqwestError};
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, timeout};
+use tokio::time::timeout;
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const OLLAMA_TIMEOUT_MS: u64 = 15000;
@@ -52,9 +53,9 @@ impl OllamaClient {
             format: "json".to_string(),
         };
 
-        // Apply timeout to prevent hanging
+        // Apply timeout to prevent hanging (use std::time::Duration for tokio)
         let response = timeout(
-            Duration::from_millis(OLLAMA_TIMEOUT_MS),
+            std::time::Duration::from_millis(OLLAMA_TIMEOUT_MS),
             self.client
                 .post(format!("{}/api/generate", OLLAMA_BASE_URL))
                 .json(&request)
@@ -71,20 +72,36 @@ impl OllamaClient {
     }
 
     fn build_prompt(&self, input: &str) -> String {
+        // Get current date for context
+        let now = chrono::Local::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let tomorrow = (now + Duration::days(1)).format("%Y-%m-%d").to_string();
+
         format!(
-            r#"Parse the following natural language input into structured JSON. 
-Extract: type (task/event), title, datetime (ISO 8601), tags (array), priority (low/medium/high/urgent).
+            r#"Today is {}. Parse the following natural language input into structured JSON.
+
+CRITICAL TIME PARSING RULES:
+- "4:12 PM" or "4:12 pm" → use 16:12:00 (afternoon)
+- "4:12 AM" or "4:12 am" → use 04:12:00 (morning)  
+- "12:00 PM" → use 12:00:00 (noon)
+- "12:00 AM" → use 00:00:00 (midnight)
+- Always output datetime in ISO 8601 format with timezone: YYYY-MM-DDTHH:MM:SS+00:00
+
+Extract: type (task/event), title, datetime (ISO 8601 with UTC timezone), tags (array), priority (low/medium/high/urgent).
 
 Examples:
 Input: "Submit report tomorrow at 3pm #work"
-Output: {{"type": "task", "title": "Submit report", "datetime": "2025-10-02T15:00:00Z", "tags": ["work"], "priority": "medium"}}
+Output: {{"type": "task", "title": "Submit report", "datetime": "{}T15:00:00+00:00", "tags": ["work"], "priority": "medium"}}
 
-Input: "Team meeting next Monday 10am"
-Output: {{"type": "event", "title": "Team meeting", "datetime": "2025-10-07T10:00:00Z", "tags": [], "priority": "medium"}}
+Input: "Meeting at 4:12 PM #important"
+Output: {{"type": "task", "title": "Meeting", "datetime": "{}T16:12:00+00:00", "tags": ["important"], "priority": "medium"}}
+
+Input: "Call John at 9:30 AM tomorrow"
+Output: {{"type": "task", "title": "Call John", "datetime": "{}T09:30:00+00:00", "tags": [], "priority": "medium"}}
 
 Now parse: "{}"
-Output:"#,
-            input
+Output (ONLY valid JSON, no explanations):"#,
+            today, tomorrow, today, tomorrow, input
         )
     }
 

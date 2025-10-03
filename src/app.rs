@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+use std::sync::Arc;
+
 use crate::nlp::{NLPParser, ParseStrategy, ParsedItem, Priority};
 use chrono::{DateTime, Utc};
 use sqlx::{
@@ -79,13 +81,13 @@ pub struct App {
     pub selected: usize,
     pub input_mode: InputMode,
     pub input_buffer: String,
-    nlp_parser: NLPParser,
+    nlp_parser: Arc<NLPParser>,
 }
 
 impl App {
     pub async fn new(pool: SqlitePool) -> Self {
-        // Initialize NLP parser asynchronously
-        let nlp_parser = NLPParser::new().await;
+        // Initalize the nlp parser asynchronously
+        let nlp_parser = Arc::new(NLPParser::new().await);
 
         Self {
             db_pool: pool,
@@ -114,6 +116,10 @@ impl App {
         }
 
         Ok(app)
+    }
+
+    pub fn nlp_parser_ref(&self) -> Arc<NLPParser> {
+        Arc::clone(&self.nlp_parser) // Cheap Arc clone
     }
 
     pub async fn load_tasks(&mut self) -> Result<(), sqlx::Error> {

@@ -40,50 +40,58 @@ impl NLPParser {
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
         let start = Instant::now();
 
-        // Layer 0: Check exact cache match first
-        {
+        // Layer 0: Check exact cache match first (hold lock briefly)
+        let cache_hit = {
             let mut cache = self.cache.lock().await;
-            if let Some(cached) = cache.get(input) {
-                let elapsed = start.elapsed().as_millis() as u64;
+            cache.get(input).cloned() // Clone while lock is held
+        };
 
-                println!("⚡ Exact cache hit!");
-
-                return Ok(ParseResult {
-                    item: cached.item.clone(),
-                    strategy: ParseStrategy::Cached,
-                    confidence: cached.confidence,
-                    parse_time_ms: elapsed,
-                });
-            }
+        if let Some(cached) = cache_hit {
+            let elapsed = start.elapsed().as_millis() as u64;
+            eprintln!("⚡ Exact cache hit!"); // Changed to eprintln!
+            return Ok(ParseResult {
+                item: cached.item,
+                strategy: ParseStrategy::Cached,
+                confidence: cached.confidence,
+                parse_time_ms: elapsed,
+            });
         }
 
-        // Layer 0.5: Check similar inputs via fuzzy matching
+        // Layer 0.5: Check similar inputs via fuzzy matching (optimized)
         let similarity_threshold = 0.85;
-        {
+        let fuzzy_match = {
             let cache = self.cache.lock().await;
-            for (cached_input, cached_parse) in cache.iter() {
-                let similarity = jaro_winkler(input, cached_input);
 
-                if similarity > similarity_threshold {
-                    let elapsed = start.elapsed().as_millis() as u64;
-
-                    println!(
-                        "🔍 Similar pattern found ({:.0}% match): \"{}\"",
-                        similarity * 100.0,
-                        cached_input
-                    );
-
-                    // Adjust confidence based on similarity
-                    let adjusted_confidence = cached_parse.confidence * similarity as f32;
-
-                    return Ok(ParseResult {
-                        item: cached_parse.item.clone(),
-                        strategy: ParseStrategy::Cached,
-                        confidence: adjusted_confidence,
-                        parse_time_ms: elapsed,
-                    });
-                }
+            // Early exit optimization: don't check if input is very short
+            if input.len() < 3 {
+                None
+            } else {
+                cache.iter().find_map(|(cached_input, cached_parse)| {
+                    let similarity = jaro_winkler(input, cached_input);
+                    if similarity > similarity_threshold {
+                        Some((cached_input.clone(), cached_parse.clone(), similarity))
+                    } else {
+                        None
+                    }
+                })
             }
+        };
+
+        if let Some((matched_input, cached_parse, similarity)) = fuzzy_match {
+            let elapsed = start.elapsed().as_millis() as u64;
+            eprintln!(
+                "🔍 Similar pattern found ({:.0}% match): \"{}\"",
+                similarity * 100.0,
+                matched_input
+            );
+
+            let adjusted_confidence = cached_parse.confidence * similarity as f32;
+            return Ok(ParseResult {
+                item: cached_parse.item,
+                strategy: ParseStrategy::Cached,
+                confidence: adjusted_confidence,
+                parse_time_ms: elapsed,
+            });
         }
 
         // Layer 1: Try regex fast path
@@ -97,7 +105,7 @@ impl NLPParser {
                 parse_time_ms: elapsed,
             };
 
-            // Cache regex results for future fuzzy matches
+            // Cache result
             {
                 let mut cache = self.cache.lock().await;
                 cache.put(
@@ -139,7 +147,7 @@ impl NLPParser {
                                 cached_at: Instant::now(),
                             },
                         );
-                    } // Lock released here
+                    }
 
                     return Ok(result);
                 }
@@ -179,7 +187,7 @@ impl NLPParser {
                     cached_at: Instant::now(),
                 },
             );
-        } // Lock released here
+        }
 
         Ok(result)
     }
@@ -188,7 +196,6 @@ impl NLPParser {
         self.ollama_available
     }
 
-    // Cache statistics for debugging
     pub async fn cache_stats(&self) -> (usize, usize) {
         let cache = self.cache.lock().await;
         (cache.len(), cache.cap().get())
