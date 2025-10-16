@@ -61,7 +61,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // No subcommand - start the TUI (with sync daemon)
-    let sync_config = SyncConfig::default();
+    let sync_config = SyncConfig::from_env();
+    eprintln!(
+        "DEBUG: Email sync enabled: {}",
+        sync_config.email_sync_enabled
+    );
+    eprintln!("DEBUG: IMAP config: {:?}", sync_config.imap_config);
     let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), sync_config).await?;
 
     enable_raw_mode()?;
