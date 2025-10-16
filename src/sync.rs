@@ -5,6 +5,5 @@ mod daemon;
 mod email;
 mod ollama;
 
-// Re-export public API
 pub use config::SyncConfig;
 pub use daemon::SyncDaemon;

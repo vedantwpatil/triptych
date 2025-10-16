@@ -47,13 +47,14 @@ impl SyncDaemon {
         }
 
         // Task 3: Email sync with IMAP IDLE
-        if config.email_sync_enabled {
+        if config.email_sync_enabled
+            && let Some(imap_config) = config.imap_config.clone()
+        {
             let shutdown_rx = shutdown_tx.subscribe();
             let db_clone = db.clone();
-            let interval_secs = config.email_check_interval_secs;
 
             tasks.push(tokio::spawn(async move {
-                email::email_sync_worker(db_clone, shutdown_rx, interval_secs).await
+                email::email_sync_worker(db_clone, shutdown_rx, imap_config).await
             }));
         }
 
