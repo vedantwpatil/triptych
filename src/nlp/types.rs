@@ -57,3 +57,11 @@ pub enum ParseStrategy {
     Ollama,
     Fallback,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskClassification {
+    pub category: String, // "deepwork", "admin", "learning", "social", etc.
+    pub estimated_duration: Option<u32>, // minutes
+    pub energy_level: String, // "high", "medium", "low"
+    pub best_time_of_day: String, // "morning", "afternoon", "evening", "flexible"
+}

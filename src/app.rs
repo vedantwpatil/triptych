@@ -34,6 +34,23 @@ pub struct Event {
     pub calendar_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewMode {
+    TodoList,
+    Calendar,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct ScheduleBlock {
+    pub id: i64,
+    pub day_of_week: i32,
+    pub start_time: String,
+    pub end_time: String,
+    pub block_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: i32,
+}
 
 #[derive(Clone, FromRow, Debug)]
 pub struct Email {
@@ -80,6 +97,9 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub selected: usize,
     pub input_mode: InputMode,
+    pub view_mode: ViewMode,
+    pub calendar_week_offset: i32,
+    pub selected_day: usize,
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
 }
@@ -94,9 +114,78 @@ impl App {
             tasks: Vec::new(),
             selected: 0,
             input_mode: InputMode::Normal,
+            view_mode: ViewMode::TodoList,
+            calendar_week_offset: 0,
+            selected_day: 0,
             input_buffer: String::new(),
             nlp_parser,
         }
+    }
+
+    pub fn toggle_to_calendar(&mut self) {
+        self.view_mode = ViewMode::Calendar;
+    }
+
+    pub fn toggle_to_todo(&mut self) {
+        self.view_mode = ViewMode::TodoList;
+    }
+
+    pub fn classify_task(&self, description: &str) -> &str {
+        let lower = description.to_lowercase();
+
+        if lower.contains("leetcode")
+            || lower.contains("project")
+            || lower.contains("code")
+            || lower.contains("implement")
+            || lower.contains("study")
+            || lower.contains("homework")
+        {
+            return "deepwork";
+        }
+
+        if lower.contains("email")
+            || lower.contains("schedule")
+            || lower.contains("call")
+            || lower.contains("quick")
+        {
+            return "admin";
+        }
+
+        if lower.contains("read")
+            || lower.contains("watch")
+            || lower.contains("learn")
+            || lower.contains("review")
+        {
+            return "learning";
+        }
+
+        "general"
+    }
+
+    pub async fn get_week_schedule(
+        &self,
+        week_offset: i32,
+    ) -> Result<Vec<(i32, Vec<ScheduleBlock>)>, sqlx::Error> {
+        let mut schedule_by_day = Vec::new();
+
+        for day in 0..7 {
+            let blocks = sqlx::query_as::<_, ScheduleBlock>(
+                r#"
+            SELECT id, day_of_week, start_time, end_time, 
+                   block_type, title, description, priority
+            FROM schedule_blocks
+            WHERE day_of_week = ?
+            ORDER BY start_time
+            "#,
+            )
+            .bind(day)
+            .fetch_all(&self.db_pool)
+            .await?;
+
+            schedule_by_day.push((day, blocks));
+        }
+
+        Ok(schedule_by_day)
     }
 
     pub async fn build() -> Result<Self, sqlx::Error> {

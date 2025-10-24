@@ -7,6 +7,7 @@ mod ui;
 
 use crate::app::InputMode;
 use crate::ui::ui;
+mod migrations;
 use app::App;
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -17,6 +18,7 @@ use crossterm::{
 };
 use daemon::{DaemonRequest, DaemonResponse};
 use futures::StreamExt;
+use migrations::run_calendar_migration;
 use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
@@ -53,6 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build app for other commands
     let mut app = App::build().await?;
+
+    if let Err(e) = run_calendar_migration(&app.db_pool).await {
+        eprintln!("⚠️  Calendar migration failed: {}", e);
+        eprintln!("   Calendar features will be disabled");
+    }
 
     // Check if a subcommand was provided
     if let Some(command) = cli_args.command {
