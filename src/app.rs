@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 use std::sync::Arc;
+use tokio::runtime::Handle;
+
+// ADD THESE IMPORTS AT THE TOP
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 
 use crate::nlp::{NLPParser, ParseStrategy, ParsedItem, Priority};
-use chrono::{DateTime, Utc};
 use sqlx::{
     FromRow,
     migrate::MigrateDatabase,
@@ -34,6 +37,7 @@ pub struct Event {
     pub calendar_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
     TodoList,
@@ -67,7 +71,6 @@ pub struct Email {
     pub is_flagged: bool,
 }
 
-// Your database Task struct (rename to avoid conflict with NLP Task)
 #[derive(Clone, FromRow, Debug)]
 pub struct Task {
     pub id: i64,
@@ -98,16 +101,19 @@ pub struct App {
     pub selected: usize,
     pub input_mode: InputMode,
     pub view_mode: ViewMode,
-    pub calendar_week_offset: i32,
+    pub calendar_week_offset: Option<i64>,
     pub selected_day: usize,
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
+    pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
+    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, String)>,
+    runtime_handle: Handle,
 }
 
 impl App {
     pub async fn new(pool: SqlitePool) -> Self {
-        // Initalize the nlp parser asynchronously
         let nlp_parser = Arc::new(NLPParser::new().await);
+        let runtime_handle = Handle::current();
 
         Self {
             db_pool: pool,
@@ -115,11 +121,98 @@ impl App {
             selected: 0,
             input_mode: InputMode::Normal,
             view_mode: ViewMode::TodoList,
-            calendar_week_offset: 0,
+            calendar_week_offset: None,
             selected_day: 0,
             input_buffer: String::new(),
             nlp_parser,
+            cached_schedule_blocks: Vec::new(),
+            cached_scheduled_tasks: Vec::new(),
+            runtime_handle,
         }
+    }
+
+    pub fn refresh_calendar_data(&mut self) {
+        let today = chrono::Local::now().naive_local().date();
+        let week_offset = self.calendar_week_offset.unwrap_or(0);
+        let start_of_week = today + Duration::weeks(week_offset)
+            - Duration::days(today.weekday().num_days_from_monday() as i64);
+
+        let days: Vec<NaiveDate> = (0..7).map(|i| start_of_week + Duration::days(i)).collect();
+
+        self.cached_schedule_blocks = self
+            .runtime_handle
+            .block_on(self.get_week_schedule_internal(&days))
+            .unwrap_or_default();
+
+        self.cached_scheduled_tasks = self
+            .runtime_handle
+            .block_on(self.get_scheduled_tasks_internal(&days))
+            .unwrap_or_default();
+    }
+
+    async fn get_week_schedule_internal(
+        &self,
+        days: &[NaiveDate],
+    ) -> Result<Vec<(NaiveDate, ScheduleBlock)>, sqlx::Error> {
+        let blocks = sqlx::query_as::<_, ScheduleBlock>(
+            "SELECT id, day_of_week, start_time, end_time, block_type, title, description, priority FROM schedule_blocks"
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let mut result = Vec::new();
+        for block in blocks {
+            for day in days {
+                if day.weekday().num_days_from_monday() == block.day_of_week as u32 {
+                    result.push((*day, block.clone()));
+                    break;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn get_scheduled_tasks_internal(
+        &self,
+        days: &[NaiveDate],
+    ) -> Result<Vec<(NaiveDate, NaiveTime, String)>, sqlx::Error> {
+        let start = days[0];
+        let end = days[days.len() - 1];
+
+        let tasks = sqlx::query_as::<_, Task>(
+            r#"
+            SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input
+            FROM tasks
+            WHERE scheduled_at >= ? AND scheduled_at <= ?
+            AND completed = 0
+            ORDER BY scheduled_at
+            "#
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        Ok(tasks
+            .iter()
+            .filter_map(|t| {
+                t.scheduled_at
+                    .map(|dt| (dt.date_naive(), dt.time(), t.description.clone()))
+            })
+            .collect())
+    }
+
+    pub fn next_week(&mut self) {
+        let offset = self.calendar_week_offset.unwrap_or(0);
+        self.calendar_week_offset = Some(offset + 1);
+        self.refresh_calendar_data();
+    }
+
+    pub fn prev_week(&mut self) {
+        let offset = self.calendar_week_offset.unwrap_or(0);
+        self.calendar_week_offset = Some(offset - 1);
+        self.refresh_calendar_data();
     }
 
     pub fn toggle_to_calendar(&mut self) {
@@ -164,7 +257,7 @@ impl App {
 
     pub async fn get_week_schedule(
         &self,
-        week_offset: i32,
+        _week_offset: i32,
     ) -> Result<Vec<(i32, Vec<ScheduleBlock>)>, sqlx::Error> {
         let mut schedule_by_day = Vec::new();
 
@@ -208,7 +301,7 @@ impl App {
     }
 
     pub fn nlp_parser_ref(&self) -> Arc<NLPParser> {
-        Arc::clone(&self.nlp_parser) // Cheap Arc clone
+        Arc::clone(&self.nlp_parser)
     }
 
     pub async fn load_tasks(&mut self) -> Result<(), sqlx::Error> {
@@ -225,14 +318,12 @@ impl App {
     }
 
     pub async fn add_task(&mut self, description: &str) -> Result<(), sqlx::Error> {
-        // Parse the natural language input using the async parser
         let parse_result = self
             .nlp_parser
             .parse(description)
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {}", e)))?;
 
-        // Log parsing performance
         match parse_result.strategy {
             ParseStrategy::Cached => {
                 println!("⚡ Cache hit! Result in {}ms", parse_result.parse_time_ms);
@@ -259,13 +350,12 @@ impl App {
                 );
             }
         }
-        // Show cache stats occasionally
+
         let (cache_size, cache_cap) = self.nlp_parser.cache_stats().await;
         if cache_size > 0 && cache_size % 5 == 0 {
             println!("📦 Cache: {}/{} entries", cache_size, cache_cap);
         }
 
-        // Extract task data from the parsed result
         let (task_title, scheduled_at, priority_value, tags_list) = match parse_result.item {
             ParsedItem::Task(nlp_task) => {
                 let priority = match nlp_task.priority {
@@ -277,22 +367,10 @@ impl App {
 
                 (nlp_task.title, nlp_task.due_date, priority, nlp_task.tags)
             }
-            ParsedItem::Event(event) => {
-                // Convert events to scheduled tasks
-                (
-                    event.title,
-                    Some(event.start_time),
-                    1, // Default priority for events
-                    event.tags,
-                )
-            }
-            ParsedItem::Email(_) => {
-                // For now, just create a basic task from email actions
-                (description.to_string(), None, 1, Vec::new())
-            }
+            ParsedItem::Event(event) => (event.title, Some(event.start_time), 1, event.tags),
+            ParsedItem::Email(_) => (description.to_string(), None, 1, Vec::new()),
         };
 
-        // Calculate new task order
         let new_order: i64;
         if self.tasks.is_empty() {
             new_order = 0;
@@ -314,24 +392,22 @@ impl App {
             new_order = current_order + 1;
         }
 
-        // Serialize tags to JSON
         let tags_json = if tags_list.is_empty() {
             None
         } else {
             Some(serde_json::to_string(&tags_list).unwrap_or_default())
         };
 
-        // Insert the new task with NLP-parsed data
         sqlx::query(
             "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
-        .bind(&task_title)          // Use cleaned title from NLP
+        .bind(&task_title)
         .bind(false)
         .bind(new_order)
-        .bind(priority_value)       // Use NLP-detected priority
-        .bind(description)          // Store original input
-        .bind(tags_json)            // Store tags as JSON
-        .bind(scheduled_at)         // Store scheduled time if detected
+        .bind(priority_value)
+        .bind(description)
+        .bind(tags_json)
+        .bind(scheduled_at)
         .execute(&self.db_pool)
         .await?;
 

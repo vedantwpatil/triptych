@@ -5,7 +5,7 @@ mod nlp;
 mod sync;
 mod ui;
 
-use crate::app::InputMode;
+use crate::app::{InputMode, ViewMode};
 use crate::ui::ui;
 mod migrations;
 use app::App;
@@ -280,76 +280,80 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
         // Wait for either keyboard event or shutdown signal
         tokio::select! {
-            // Keyboard event (async, zero lag!)
-            maybe_event = reader.next() => {
-                match maybe_event {
-                    Some(Ok(Event::Key(key))) => {
-                        match app.input_mode {
-                            InputMode::Normal => match key.code {
-                                KeyCode::Char('q') => return Ok(()),
-                                KeyCode::Char('a') => {
-                                    app.input_mode = InputMode::Editing;
-                                    app.input_buffer.clear();
-                                }
-                                KeyCode::Char('x') => {
-                                    if let Err(e) = app.delete_task().await {
-                                        eprintln!("Error deleting task: {}", e);
-                                    }
-                                }
-                                KeyCode::Enter => {
-                                    if let Err(e) = app.toggle_completed().await {
-                                        eprintln!("Error toggling task: {}", e);
-                                    }
-                                }
-                                KeyCode::Char('k') => {
-                                    app.selected = app.selected.saturating_sub(1);
-                                }
-                                KeyCode::Char('j') => {
-                                    if !app.tasks.is_empty() {
-                                        let max = app.tasks.len() - 1;
-                                        if app.selected < max {
-                                            app.selected += 1;
+                    // Keyboard event (async, zero lag!)
+                    maybe_event = reader.next() => {
+                        match maybe_event {
+                            Some(Ok(Event::Key(key))) => {
+                                match app.input_mode {
+                                    InputMode::Normal => match key.code {
+                                        KeyCode::Char('q') => return Ok(()),
+        KeyCode::Char('t') => app.view_mode = ViewMode::TodoList,
+            KeyCode::Char('c') => app.view_mode = ViewMode::Calendar,
+            KeyCode::Char('h') if app.view_mode == ViewMode::Calendar => app.prev_week(),
+            KeyCode::Char('l') if app.view_mode == ViewMode::Calendar => app.next_week(),
+                                        KeyCode::Char('a') => {
+                                            app.input_mode = InputMode::Editing;
+                                            app.input_buffer.clear();
                                         }
-                                    }
-                                }
-                                _ => {}
-                            },
+                                        KeyCode::Char('x') => {
+                                            if let Err(e) = app.delete_task().await {
+                                                eprintln!("Error deleting task: {}", e);
+                                            }
+                                        }
+                                        KeyCode::Enter => {
+                                            if let Err(e) = app.toggle_completed().await {
+                                                eprintln!("Error toggling task: {}", e);
+                                            }
+                                        }
+                                        KeyCode::Char('k') => {
+                                            app.selected = app.selected.saturating_sub(1);
+                                        }
+                                        KeyCode::Char('j') => {
+                                            if !app.tasks.is_empty() {
+                                                let max = app.tasks.len() - 1;
+                                                if app.selected < max {
+                                                    app.selected += 1;
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    },
 
-                            InputMode::Editing => match key.code {
-                                KeyCode::Enter => {
-                                    let description = app.input_buffer.trim().to_string();
-                                    if !description.is_empty()
-                                        && let Err(e) = app.add_task(&description).await {
-                                            eprintln!("Error adding task: {}", e);
+                                    InputMode::Editing => match key.code {
+                                        KeyCode::Enter => {
+                                            let description = app.input_buffer.trim().to_string();
+                                            if !description.is_empty()
+                                                && let Err(e) = app.add_task(&description).await {
+                                                    eprintln!("Error adding task: {}", e);
+                                                }
+                                            app.input_mode = InputMode::Normal;
                                         }
-                                    app.input_mode = InputMode::Normal;
+                                        KeyCode::Char(c) => {
+                                            app.input_buffer.push(c);
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.input_buffer.pop();
+                                        }
+                                        KeyCode::Esc => {
+                                            app.input_mode = InputMode::Normal;
+                                        }
+                                        _ => {}
+                                    },
                                 }
-                                KeyCode::Char(c) => {
-                                    app.input_buffer.push(c);
-                                }
-                                KeyCode::Backspace => {
-                                    app.input_buffer.pop();
-                                }
-                                KeyCode::Esc => {
-                                    app.input_mode = InputMode::Normal;
-                                }
-                                _ => {}
-                            },
+                            }
+                            Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
+                            Some(Err(e)) => {
+                                eprintln!("Error reading event: {}", e);
+                            }
+                            None => break, // Stream ended
                         }
                     }
-                    Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
-                    Some(Err(e)) => {
-                        eprintln!("Error reading event: {}", e);
-                    }
-                    None => break, // Stream ended
-                }
-            }
 
-            // Shutdown signal
-            _ = shutdown_rx.recv() => {
-                return Ok(());
-            }
-        }
+                    // Shutdown signal
+                    _ = shutdown_rx.recv() => {
+                        return Ok(());
+                    }
+                }
     }
 
     Ok(())
