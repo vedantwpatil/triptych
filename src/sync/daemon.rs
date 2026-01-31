@@ -25,7 +25,7 @@ impl SyncDaemon {
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let mut tasks = Vec::new();
 
-        // Task 1: Pre-warm Ollama on startup
+        // Pre-warm Ollama on startup
         if config.ollama_warmup_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
             let nlp = nlp_parser.clone();
@@ -35,7 +35,7 @@ impl SyncDaemon {
             }));
         }
 
-        // Task 2: Preload cache from SQLite
+        // Preload cache from SQLite
         if config.cache_preload_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
             let db_clone = db.clone();
@@ -46,7 +46,8 @@ impl SyncDaemon {
             }));
         }
 
-        // Task 3: Calendar sync
+        // Calendar sync
+        // Not yet finished
         if config.calendar_sync_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
             let db_clone = db.clone();

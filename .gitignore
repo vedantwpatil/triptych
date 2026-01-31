@@ -69,3 +69,6 @@ perf.data*
 app.log
 *.log.*
 logs/
+*.claude
+schedule.toml
+

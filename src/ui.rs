@@ -131,13 +131,13 @@ fn render_todo_view(f: &mut Frame, app: &App) {
             });
         }
         InputMode::Normal => {
-            if let Some((msg, instant)) = &app.status_message {
-                if instant.elapsed() < std::time::Duration::from_secs(3) {
-                    let status = Paragraph::new(msg.as_str())
-                        .style(Style::default().fg(Color::Green))
-                        .block(Block::default().borders(Borders::ALL));
-                    f.render_widget(status, chunks[1]);
-                }
+            if let Some((msg, instant)) = &app.status_message
+                && instant.elapsed() < std::time::Duration::from_secs(3)
+            {
+                let status = Paragraph::new(msg.as_str())
+                    .style(Style::default().fg(Color::Green))
+                    .block(Block::default().borders(Borders::ALL));
+                f.render_widget(status, chunks[1]);
             }
         }
     }
@@ -231,12 +231,10 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
     // Calculate column widths: time column + 7 day columns
     let widths = vec![Constraint::Length(8)]
         .into_iter()
-        .chain(std::iter::repeat(Constraint::Fill(1)).take(7))
+        .chain(std::iter::repeat_n(Constraint::Fill(1), 7))
         .collect::<Vec<_>>();
 
-    let title = format!(
-        "Weekly Calendar (t: todo, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, q: quit)"
-    );
+    let title = "Weekly Calendar (t: todo, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, q: quit)".to_string();
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -378,12 +376,12 @@ fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
 
 fn get_block_style(block_type: &str) -> Style {
     let color = match block_type {
-        "deepwork" => Color::Blue,
+        "deepwork" | "deepwork_input" | "deepwork_output" => Color::Blue,
         "class" => Color::Green,
-        "fitness" => Color::Red,
+        "training" | "fitness" => Color::Red,
         "learning" => Color::Cyan,
         "admin" => Color::Yellow,
-        "meal" => Color::Magenta,
+        "bio-maintenance" | "meal" => Color::Magenta,
         "break" => Color::Gray,
         "social" => Color::LightBlue,
         "planning" => Color::LightYellow,

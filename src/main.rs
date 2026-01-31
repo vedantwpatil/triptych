@@ -10,7 +10,7 @@ use crate::ui::ui;
 mod migrations;
 use app::App;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, ScheduleCommands};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
     execute,
@@ -251,13 +251,46 @@ async fn handle_cli_command(
             }
         },
 
+        Commands::Schedule(schedule_cmd) => match schedule_cmd {
+            ScheduleCommands::Import { file, clear } => {
+                if clear {
+                    app.clear_all_schedule_blocks().await?;
+                    println!("Cleared existing blocks");
+                }
+                match app.import_schedule_from_toml(&file).await {
+                    Ok(count) => println!("✓ Imported {} schedule blocks from {:?}", count, file),
+                    Err(e) => {
+                        eprintln!("✗ Import failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ScheduleCommands::Export { file } => match app.export_schedule_to_toml(&file).await {
+                Ok(count) => println!("✓ Exported {} schedule blocks to {:?}", count, file),
+                Err(e) => {
+                    eprintln!("✗ Export failed: {}", e);
+                    std::process::exit(1);
+                }
+            },
+            ScheduleCommands::Show => {
+                app.print_schedule_summary().await?;
+            }
+            ScheduleCommands::Clear => {
+                let count = app.clear_all_schedule_blocks().await?;
+                println!("🧹 Cleared {} schedule blocks", count);
+            }
+        },
+
         _ => unreachable!("Daemon commands handled earlier"),
     }
 
     Ok(())
 }
 
-async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()>
+where
+    std::io::Error: std::convert::From<<B as ratatui::backend::Backend>::Error>,
+{
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // Spawn Ctrl+C handler
@@ -338,6 +371,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                             KeyCode::Char('a') => {
                                                 app.input_buffer.clear();
                                                 app.calendar_input_mode = CalendarInputMode::TaskInput;
+                                            }
+                                            KeyCode::Char('d') => {
+                                                if let Err(e) = app.delete_block_at_selected_cell().await {
+                                                    eprintln!("Error deleting block: {}", e);
+                                                }
                                             }
                                             _ => {}
                                         },
