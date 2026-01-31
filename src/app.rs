@@ -1,9 +1,6 @@
 #![allow(dead_code)]
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use std::sync::Arc;
-use tokio::runtime::Handle;
-
-// ADD THESE IMPORTS AT THE TOP
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 
 use crate::nlp::{NLPParser, ParseStrategy, ParsedItem, Priority};
 use sqlx::{
@@ -57,21 +54,6 @@ pub struct ScheduleBlock {
 }
 
 #[derive(Clone, FromRow, Debug)]
-pub struct Email {
-    pub id: i64,
-    pub message_id: String,
-    pub subject: String,
-    pub sender: String,
-    pub recipients: String,
-    pub body_text: Option<String>,
-    pub body_html: Option<String>,
-    pub received_at: DateTime<Utc>,
-    pub folder_name: String,
-    pub is_read: bool,
-    pub is_flagged: bool,
-}
-
-#[derive(Clone, FromRow, Debug)]
 pub struct Task {
     pub id: i64,
     pub description: String,
@@ -81,6 +63,7 @@ pub struct Task {
     pub priority: i32,
     pub tags: Option<String>,
     pub natural_language_input: Option<String>,
+    pub task_category: Option<String>,
 }
 
 #[derive(Debug)]
@@ -95,6 +78,83 @@ pub enum InputMode {
     Editing,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CalendarInputMode {
+    Navigate,
+    BlockForm,
+    TaskPicker,
+    TaskInput,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockFormField {
+    BlockType,
+    StartTime,
+    EndTime,
+    Title,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockFormState {
+    pub block_type: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub title: String,
+    pub active_field: BlockFormField,
+}
+
+impl BlockFormState {
+    pub const BLOCK_TYPES: &'static [&'static str] = &[
+        "deepwork", "class", "fitness", "learning", "admin", "meal", "break", "social", "planning",
+        "project",
+    ];
+
+    pub fn new_at(time_slot: usize) -> Self {
+        let start_hour = 7 + time_slot;
+        let end_hour = start_hour + 1;
+        Self {
+            block_type: "deepwork".to_string(),
+            start_time: format!("{:02}:00", start_hour),
+            end_time: format!("{:02}:00", end_hour),
+            title: String::new(),
+            active_field: BlockFormField::BlockType,
+        }
+    }
+
+    pub fn cycle_block_type(&mut self, forward: bool) {
+        let current_idx = Self::BLOCK_TYPES
+            .iter()
+            .position(|t| *t == self.block_type)
+            .unwrap_or(0);
+        let new_idx = if forward {
+            (current_idx + 1) % Self::BLOCK_TYPES.len()
+        } else if current_idx == 0 {
+            Self::BLOCK_TYPES.len() - 1
+        } else {
+            current_idx - 1
+        };
+        self.block_type = Self::BLOCK_TYPES[new_idx].to_string();
+    }
+
+    pub fn next_field(&mut self) {
+        self.active_field = match self.active_field {
+            BlockFormField::BlockType => BlockFormField::StartTime,
+            BlockFormField::StartTime => BlockFormField::EndTime,
+            BlockFormField::EndTime => BlockFormField::Title,
+            BlockFormField::Title => BlockFormField::BlockType,
+        };
+    }
+
+    pub fn prev_field(&mut self) {
+        self.active_field = match self.active_field {
+            BlockFormField::BlockType => BlockFormField::Title,
+            BlockFormField::StartTime => BlockFormField::BlockType,
+            BlockFormField::EndTime => BlockFormField::StartTime,
+            BlockFormField::Title => BlockFormField::EndTime,
+        };
+    }
+}
+
 pub struct App {
     pub db_pool: SqlitePool,
     pub tasks: Vec<Task>,
@@ -103,17 +163,40 @@ pub struct App {
     pub view_mode: ViewMode,
     pub calendar_week_offset: Option<i64>,
     pub selected_day: usize,
+    pub selected_time_slot: usize,
+    pub calendar_input_mode: CalendarInputMode,
+    pub block_form: BlockFormState,
+    pub task_picker_selected: usize,
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
-    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, String)>,
-    runtime_handle: Handle,
+    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, String, i32)>,
+    pub status_message: Option<(String, std::time::Instant)>,
+}
+
+fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
+    if time_str.contains(':') {
+        let parts: Vec<&str> = time_str.split(':').collect();
+        if parts.len() >= 2 {
+            let hour: u32 = parts[0].parse().ok()?;
+            let minute: u32 = parts[1].parse().ok()?;
+            let second: u32 = if parts.len() > 2 {
+                parts[2].parse().ok()?
+            } else {
+                0
+            };
+            NaiveTime::from_hms_opt(hour, minute, second)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 impl App {
     pub async fn new(pool: SqlitePool) -> Self {
         let nlp_parser = Arc::new(NLPParser::new().await);
-        let runtime_handle = Handle::current();
 
         Self {
             db_pool: pool,
@@ -123,15 +206,19 @@ impl App {
             view_mode: ViewMode::TodoList,
             calendar_week_offset: None,
             selected_day: 0,
+            selected_time_slot: 0,
+            calendar_input_mode: CalendarInputMode::Navigate,
+            block_form: BlockFormState::new_at(0),
+            task_picker_selected: 0,
             input_buffer: String::new(),
             nlp_parser,
             cached_schedule_blocks: Vec::new(),
             cached_scheduled_tasks: Vec::new(),
-            runtime_handle,
+            status_message: None,
         }
     }
 
-    pub fn refresh_calendar_data(&mut self) {
+    pub async fn refresh_calendar_data(&mut self) {
         let today = chrono::Local::now().naive_local().date();
         let week_offset = self.calendar_week_offset.unwrap_or(0);
         let start_of_week = today + Duration::weeks(week_offset)
@@ -140,13 +227,13 @@ impl App {
         let days: Vec<NaiveDate> = (0..7).map(|i| start_of_week + Duration::days(i)).collect();
 
         self.cached_schedule_blocks = self
-            .runtime_handle
-            .block_on(self.get_week_schedule_internal(&days))
+            .get_week_schedule_internal(&days)
+            .await
             .unwrap_or_default();
 
         self.cached_scheduled_tasks = self
-            .runtime_handle
-            .block_on(self.get_scheduled_tasks_internal(&days))
+            .get_scheduled_tasks_internal(&days)
+            .await
             .unwrap_or_default();
     }
 
@@ -176,15 +263,18 @@ impl App {
     async fn get_scheduled_tasks_internal(
         &self,
         days: &[NaiveDate],
-    ) -> Result<Vec<(NaiveDate, NaiveTime, String)>, sqlx::Error> {
-        let start = days[0];
-        let end = days[days.len() - 1];
+    ) -> Result<Vec<(NaiveDate, NaiveTime, String, i32)>, sqlx::Error> {
+        let start = days[0].and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let end = days[days.len() - 1]
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            .and_utc();
 
         let tasks = sqlx::query_as::<_, Task>(
             r#"
-            SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input
+            SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category
             FROM tasks
-            WHERE scheduled_at >= ? AND scheduled_at <= ?
+            WHERE scheduled_at >= ? AND scheduled_at < ?
             AND completed = 0
             ORDER BY scheduled_at
             "#
@@ -197,30 +287,40 @@ impl App {
         Ok(tasks
             .iter()
             .filter_map(|t| {
-                t.scheduled_at
-                    .map(|dt| (dt.date_naive(), dt.time(), t.description.clone()))
+                t.scheduled_at.map(|dt| {
+                    (
+                        dt.date_naive(),
+                        dt.time(),
+                        t.description.clone(),
+                        t.priority,
+                    )
+                })
             })
             .collect())
     }
 
-    pub fn next_week(&mut self) {
+    pub async fn next_week(&mut self) {
         let offset = self.calendar_week_offset.unwrap_or(0);
         self.calendar_week_offset = Some(offset + 1);
-        self.refresh_calendar_data();
+        self.refresh_calendar_data().await;
     }
 
-    pub fn prev_week(&mut self) {
+    pub async fn prev_week(&mut self) {
         let offset = self.calendar_week_offset.unwrap_or(0);
         self.calendar_week_offset = Some(offset - 1);
-        self.refresh_calendar_data();
+        self.refresh_calendar_data().await;
     }
 
-    pub fn toggle_to_calendar(&mut self) {
+    pub async fn toggle_to_calendar(&mut self) {
         self.view_mode = ViewMode::Calendar;
+        self.calendar_input_mode = CalendarInputMode::Navigate;
+        let _ = self.load_tasks().await;
+        self.refresh_calendar_data().await;
     }
 
-    pub fn toggle_to_todo(&mut self) {
+    pub async fn toggle_to_todo(&mut self) {
         self.view_mode = ViewMode::TodoList;
+        let _ = self.load_tasks().await;
     }
 
     pub fn classify_task(&self, description: &str) -> &str {
@@ -236,8 +336,7 @@ impl App {
             return "deepwork";
         }
 
-        if lower.contains("email")
-            || lower.contains("schedule")
+        if lower.contains("schedule")
             || lower.contains("call")
             || lower.contains("quick")
         {
@@ -306,7 +405,7 @@ impl App {
 
     pub async fn load_tasks(&mut self) -> Result<(), sqlx::Error> {
         self.tasks = sqlx::query_as::<_, Task>(
-            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input FROM tasks ORDER BY item_order ASC",
+            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks ORDER BY item_order ASC",
         )
         .fetch_all(&self.db_pool)
         .await?;
@@ -368,7 +467,6 @@ impl App {
                 (nlp_task.title, nlp_task.due_date, priority, nlp_task.tags)
             }
             ParsedItem::Event(event) => (event.title, Some(event.start_time), 1, event.tags),
-            ParsedItem::Email(_) => (description.to_string(), None, 1, Vec::new()),
         };
 
         let new_order: i64;
@@ -398,8 +496,10 @@ impl App {
             Some(serde_json::to_string(&tags_list).unwrap_or_default())
         };
 
+        let category = self.classify_task(&task_title).to_string();
+
         sqlx::query(
-            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, task_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&task_title)
         .bind(false)
@@ -408,6 +508,7 @@ impl App {
         .bind(description)
         .bind(tags_json)
         .bind(scheduled_at)
+        .bind(&category)
         .execute(&self.db_pool)
         .await?;
 
@@ -528,12 +629,290 @@ impl App {
 
     pub async fn get_task_by_id(&self, id: i64) -> Result<Option<Task>, sqlx::Error> {
         let task = sqlx::query_as::<_, Task>(
-            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input FROM tasks WHERE id = ?",
+            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.db_pool)
         .await?;
 
         Ok(task)
+    }
+
+    // Calendar navigation methods
+    pub fn calendar_move_up(&mut self) {
+        self.selected_time_slot = self.selected_time_slot.saturating_sub(1);
+    }
+
+    pub fn calendar_move_down(&mut self) {
+        if self.selected_time_slot < 15 {
+            self.selected_time_slot += 1;
+        }
+    }
+
+    pub fn calendar_move_left(&mut self) {
+        self.selected_day = self.selected_day.saturating_sub(1);
+    }
+
+    pub fn calendar_move_right(&mut self) {
+        if self.selected_day < 6 {
+            self.selected_day += 1;
+        }
+    }
+
+    pub fn selected_cell_date(&self) -> NaiveDate {
+        let today = chrono::Local::now().naive_local().date();
+        let week_offset = self.calendar_week_offset.unwrap_or(0);
+        let start_of_week = today + Duration::weeks(week_offset)
+            - Duration::days(today.weekday().num_days_from_monday() as i64);
+        start_of_week + Duration::days(self.selected_day as i64)
+    }
+
+    pub fn selected_cell_time(&self) -> NaiveTime {
+        let hour = 7 + self.selected_time_slot as u32;
+        NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
+    }
+
+    // Schedule block creation
+    pub async fn create_schedule_block(&mut self) -> Result<(), sqlx::Error> {
+        let day_of_week = self.selected_cell_date().weekday().num_days_from_monday() as i32;
+
+        sqlx::query(
+            "INSERT INTO schedule_blocks (day_of_week, start_time, end_time, block_type, title) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(day_of_week)
+        .bind(&self.block_form.start_time)
+        .bind(&self.block_form.end_time)
+        .bind(&self.block_form.block_type)
+        .bind(&self.block_form.title)
+        .execute(&self.db_pool)
+        .await?;
+
+        self.refresh_calendar_data().await;
+        self.calendar_input_mode = CalendarInputMode::Navigate;
+        Ok(())
+    }
+
+    // Task scheduling methods
+    pub fn unscheduled_tasks(&self) -> Vec<&Task> {
+        self.tasks
+            .iter()
+            .filter(|t| !t.completed && t.scheduled_at.is_none())
+            .collect()
+    }
+
+    pub async fn schedule_task_to_selected_cell(&mut self) -> Result<(), sqlx::Error> {
+        let unscheduled: Vec<i64> = self.unscheduled_tasks().iter().map(|t| t.id).collect();
+        if self.task_picker_selected >= unscheduled.len() {
+            return Ok(());
+        }
+
+        let task_id = unscheduled[self.task_picker_selected];
+        let date = self.selected_cell_date();
+        let time = self.selected_cell_time();
+        let datetime = date.and_time(time).and_utc();
+
+        sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
+            .bind(datetime)
+            .bind(task_id)
+            .execute(&self.db_pool)
+            .await?;
+
+        self.load_tasks().await?;
+        self.refresh_calendar_data().await;
+        self.calendar_input_mode = CalendarInputMode::Navigate;
+        self.task_picker_selected = 0;
+        Ok(())
+    }
+
+    pub async fn add_task_at_selected_cell(
+        &mut self,
+        description: &str,
+    ) -> Result<(), sqlx::Error> {
+        let scheduled_at = self
+            .selected_cell_date()
+            .and_time(self.selected_cell_time())
+            .and_utc();
+        let category = self.classify_task(description).to_string();
+        let new_order = self.tasks.len() as i64;
+
+        sqlx::query(
+            "INSERT INTO tasks (description, completed, item_order, priority, scheduled_at, task_category) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(description)
+        .bind(false)
+        .bind(new_order)
+        .bind(1i32)
+        .bind(scheduled_at)
+        .bind(&category)
+        .execute(&self.db_pool)
+        .await?;
+
+        self.load_tasks().await?;
+        self.refresh_calendar_data().await;
+        Ok(())
+    }
+
+    pub async fn auto_schedule_task(&mut self) -> Result<(), sqlx::Error> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+
+        let task = &self.tasks[self.selected];
+
+        // Skip completed or already scheduled tasks
+        if task.completed || task.scheduled_at.is_some() {
+            self.status_message = Some((
+                "Task is already scheduled or completed".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+
+        let task_category = task
+            .task_category
+            .clone()
+            .unwrap_or_else(|| "general".to_string());
+        let task_id = task.id;
+
+        if let Some(slot) = self.find_next_available_slot(&task_category).await? {
+            sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
+                .bind(slot)
+                .bind(task_id)
+                .execute(&self.db_pool)
+                .await?;
+
+            let local_time = slot.with_timezone(&chrono::Local);
+            let msg = format!(
+                "Scheduled for {}",
+                local_time
+                    .format("%a %m/%d %I:%M%p")
+                    .to_string()
+                    .to_lowercase()
+            );
+            self.status_message = Some((msg, std::time::Instant::now()));
+        } else {
+            self.status_message = Some((
+                "No available slot found".to_string(),
+                std::time::Instant::now(),
+            ));
+        }
+
+        self.load_tasks().await?;
+        Ok(())
+    }
+
+    async fn find_next_available_slot(
+        &self,
+        task_category: &str,
+    ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+        let now = chrono::Local::now();
+        let today = now.naive_local().date();
+
+        // Look at current week + next week (14 days)
+        let days: Vec<NaiveDate> = (0..14).map(|i| today + Duration::days(i)).collect();
+
+        // Get all schedule blocks
+        let blocks = sqlx::query_as::<_, ScheduleBlock>(
+            "SELECT id, day_of_week, start_time, end_time, block_type, title, description, priority FROM schedule_blocks"
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        // Get all scheduled tasks in this range
+        let range_start = days[0].and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let range_end = days[days.len() - 1]
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            .and_utc();
+
+        let scheduled_tasks = sqlx::query_as::<_, Task>(
+            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0"
+        )
+        .bind(range_start)
+        .bind(range_end)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let occupied_slots: Vec<(NaiveDate, u32)> = scheduled_tasks
+            .iter()
+            .filter_map(|t| t.scheduled_at.map(|dt| (dt.date_naive(), dt.time().hour())))
+            .collect();
+
+        // Strategy 1: Find a matching block type with a free hour
+        for day in &days {
+            let dow = day.weekday().num_days_from_monday() as i32;
+            for block in &blocks {
+                if block.day_of_week != dow {
+                    continue;
+                }
+                if block.block_type != task_category {
+                    continue;
+                }
+                let start = match parse_time_string(&block.start_time) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let end = match parse_time_string(&block.end_time) {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                let mut hour = start.hour();
+                while hour < end.hour() {
+                    // Skip past hours for today
+                    if *day == today && hour <= now.hour() {
+                        hour += 1;
+                        continue;
+                    }
+                    // Check if slot is free
+                    if !occupied_slots.contains(&(*day, hour)) {
+                        let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+                        return Ok(Some(day.and_time(time).and_utc()));
+                    }
+                    hour += 1;
+                }
+            }
+        }
+
+        // Strategy 2: Find any free hour (7am-11pm) not inside a different-type block
+        for day in &days {
+            let dow = day.weekday().num_days_from_monday() as i32;
+            for hour in 7u32..23 {
+                // Skip past hours for today
+                if *day == today && hour <= now.hour() {
+                    continue;
+                }
+
+                // Check if this hour is inside a different-type block
+                let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+                let in_different_block = blocks.iter().any(|block| {
+                    if block.day_of_week != dow {
+                        return false;
+                    }
+                    if block.block_type == task_category {
+                        return false; // same type is fine
+                    }
+                    if let (Some(start), Some(end)) = (
+                        parse_time_string(&block.start_time),
+                        parse_time_string(&block.end_time),
+                    ) {
+                        start <= time && end > time
+                    } else {
+                        false
+                    }
+                });
+
+                if in_different_block {
+                    continue;
+                }
+
+                // Check if slot is free
+                if !occupied_slots.contains(&(*day, hour)) {
+                    return Ok(Some(day.and_time(time).and_utc()));
+                }
+            }
+        }
+
+        Ok(None)
     }
 }

@@ -198,7 +198,6 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
             (nlp_task.title, nlp_task.due_date, priority, nlp_task.tags)
         }
         ParsedItem::Event(event) => (event.title, Some(event.start_time), 1, event.tags),
-        ParsedItem::Email(_) => (description.to_string(), None, 1, Vec::new()),
     };
 
     let tags_json = if tags_list.is_empty() {

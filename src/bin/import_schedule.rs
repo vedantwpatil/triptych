@@ -61,11 +61,16 @@ async fn main() -> Result<()> {
     ];
 
     for (day, start, end, block_type, title) in schedule {
-        sqlx::query!(
-            "INSERT INTO schedule_blocks (day_of_week, start_time, end_time, block_type, title, priority) 
-             VALUES (?, ?, ?, ?, ?, 1)",
-            day, start, end, block_type, title
-        ).execute(&pool).await?;
+        sqlx::query(
+            "INSERT INTO schedule_blocks (day_of_week, start_time, end_time, block_type, title, priority)
+             VALUES (?, ?, ?, ?, ?, 1)"
+        )
+        .bind(day)
+        .bind(start)
+        .bind(end)
+        .bind(block_type)
+        .bind(title)
+        .execute(&pool).await?;
     }
 
     println!("✅ Schedule imported successfully!");

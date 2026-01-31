@@ -5,7 +5,7 @@ mod nlp;
 mod sync;
 mod ui;
 
-use crate::app::{InputMode, ViewMode};
+use crate::app::{BlockFormState, CalendarInputMode, InputMode, ViewMode};
 use crate::ui::ui;
 mod migrations;
 use app::App;
@@ -69,11 +69,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // No subcommand - start the TUI (with sync daemon)
     let sync_config = SyncConfig::from_env();
-    eprintln!(
-        "DEBUG: Email sync enabled: {}",
-        sync_config.email_sync_enabled
-    );
-    eprintln!("DEBUG: IMAP config: {:?}", sync_config.imap_config);
     let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), sync_config).await?;
 
     enable_raw_mode()?;
@@ -280,17 +275,16 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
 
         // Wait for either keyboard event or shutdown signal
         tokio::select! {
-                    // Keyboard event (async, zero lag!)
-                    maybe_event = reader.next() => {
-                        match maybe_event {
-                            Some(Ok(Event::Key(key))) => {
-                                match app.input_mode {
-                                    InputMode::Normal => match key.code {
+            // Keyboard event (async, zero lag!)
+            maybe_event = reader.next() => {
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) => {
+                        match app.input_mode {
+                            InputMode::Normal => {
+                                match app.view_mode {
+                                    ViewMode::TodoList => match key.code {
                                         KeyCode::Char('q') => return Ok(()),
-        KeyCode::Char('t') => app.view_mode = ViewMode::TodoList,
-            KeyCode::Char('c') => app.view_mode = ViewMode::Calendar,
-            KeyCode::Char('h') if app.view_mode == ViewMode::Calendar => app.prev_week(),
-            KeyCode::Char('l') if app.view_mode == ViewMode::Calendar => app.next_week(),
+                                        KeyCode::Char('c') => { app.toggle_to_calendar().await; }
                                         KeyCode::Char('a') => {
                                             app.input_mode = InputMode::Editing;
                                             app.input_buffer.clear();
@@ -298,6 +292,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         KeyCode::Char('x') => {
                                             if let Err(e) = app.delete_task().await {
                                                 eprintln!("Error deleting task: {}", e);
+                                            }
+                                        }
+                                        KeyCode::Char('s') => {
+                                            if let Err(e) = app.auto_schedule_task().await {
+                                                eprintln!("Error auto-scheduling: {}", e);
                                             }
                                         }
                                         KeyCode::Enter => {
@@ -318,42 +317,165 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                         }
                                         _ => {}
                                     },
-
-                                    InputMode::Editing => match key.code {
-                                        KeyCode::Enter => {
-                                            let description = app.input_buffer.trim().to_string();
-                                            if !description.is_empty()
-                                                && let Err(e) = app.add_task(&description).await {
-                                                    eprintln!("Error adding task: {}", e);
+                                    ViewMode::Calendar => match app.calendar_input_mode {
+                                        CalendarInputMode::Navigate => match key.code {
+                                            KeyCode::Char('q') => return Ok(()),
+                                            KeyCode::Char('t') | KeyCode::Esc => { app.toggle_to_todo().await; }
+                                            KeyCode::Char('j') | KeyCode::Down => app.calendar_move_down(),
+                                            KeyCode::Char('k') | KeyCode::Up => app.calendar_move_up(),
+                                            KeyCode::Char('h') | KeyCode::Left => app.calendar_move_left(),
+                                            KeyCode::Char('l') | KeyCode::Right => app.calendar_move_right(),
+                                            KeyCode::Char('H') => { app.prev_week().await; }
+                                            KeyCode::Char('L') => { app.next_week().await; }
+                                            KeyCode::Char('n') => {
+                                                app.block_form = BlockFormState::new_at(app.selected_time_slot);
+                                                app.calendar_input_mode = CalendarInputMode::BlockForm;
+                                            }
+                                            KeyCode::Char('s') => {
+                                                app.task_picker_selected = 0;
+                                                app.calendar_input_mode = CalendarInputMode::TaskPicker;
+                                            }
+                                            KeyCode::Char('a') => {
+                                                app.input_buffer.clear();
+                                                app.calendar_input_mode = CalendarInputMode::TaskInput;
+                                            }
+                                            _ => {}
+                                        },
+                                        CalendarInputMode::BlockForm => match key.code {
+                                            KeyCode::Esc => {
+                                                app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Tab => app.block_form.next_field(),
+                                            KeyCode::BackTab => app.block_form.prev_field(),
+                                            KeyCode::Enter => {
+                                                if !app.block_form.title.is_empty()
+                                                    && let Err(e) = app.create_schedule_block().await {
+                                                        eprintln!("Error creating block: {}", e);
+                                                    }
+                                            }
+                                            KeyCode::Char(c) => {
+                                                match app.block_form.active_field {
+                                                    crate::app::BlockFormField::BlockType => {
+                                                        if c == 'j' {
+                                                            app.block_form.cycle_block_type(true);
+                                                        } else if c == 'k' {
+                                                            app.block_form.cycle_block_type(false);
+                                                        }
+                                                    }
+                                                    crate::app::BlockFormField::StartTime => {
+                                                        if c.is_ascii_digit() || c == ':' {
+                                                            app.block_form.start_time.push(c);
+                                                        }
+                                                    }
+                                                    crate::app::BlockFormField::EndTime => {
+                                                        if c.is_ascii_digit() || c == ':' {
+                                                            app.block_form.end_time.push(c);
+                                                        }
+                                                    }
+                                                    crate::app::BlockFormField::Title => {
+                                                        app.block_form.title.push(c);
+                                                    }
                                                 }
-                                            app.input_mode = InputMode::Normal;
-                                        }
-                                        KeyCode::Char(c) => {
-                                            app.input_buffer.push(c);
-                                        }
-                                        KeyCode::Backspace => {
-                                            app.input_buffer.pop();
-                                        }
-                                        KeyCode::Esc => {
-                                            app.input_mode = InputMode::Normal;
-                                        }
-                                        _ => {}
+                                            }
+                                            KeyCode::Backspace => {
+                                                match app.block_form.active_field {
+                                                    crate::app::BlockFormField::StartTime => {
+                                                        app.block_form.start_time.pop();
+                                                    }
+                                                    crate::app::BlockFormField::EndTime => {
+                                                        app.block_form.end_time.pop();
+                                                    }
+                                                    crate::app::BlockFormField::Title => {
+                                                        app.block_form.title.pop();
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            _ => {}
+                                        },
+                                        CalendarInputMode::TaskPicker => match key.code {
+                                            KeyCode::Esc => {
+                                                app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Char('j') | KeyCode::Down => {
+                                                let max = app.unscheduled_tasks().len().saturating_sub(1);
+                                                if app.task_picker_selected < max {
+                                                    app.task_picker_selected += 1;
+                                                }
+                                            }
+                                            KeyCode::Char('k') | KeyCode::Up => {
+                                                app.task_picker_selected = app.task_picker_selected.saturating_sub(1);
+                                            }
+                                            KeyCode::Enter => {
+                                                if !app.unscheduled_tasks().is_empty() {
+                                                    if let Err(e) = app.schedule_task_to_selected_cell().await {
+                                                        eprintln!("Error scheduling task: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        },
+                                        CalendarInputMode::TaskInput => match key.code {
+                                            KeyCode::Esc => {
+                                                app.input_buffer.clear();
+                                                app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Enter => {
+                                                let description = app.input_buffer.trim().to_string();
+                                                if !description.is_empty()
+                                                    && let Err(e) = app.add_task_at_selected_cell(&description).await {
+                                                        eprintln!("Error adding task: {}", e);
+                                                    }
+                                                app.input_buffer.clear();
+                                                app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Char(c) => {
+                                                app.input_buffer.push(c);
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.input_buffer.pop();
+                                            }
+                                            _ => {}
+                                        },
                                     },
                                 }
                             }
-                            Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
-                            Some(Err(e)) => {
-                                eprintln!("Error reading event: {}", e);
-                            }
-                            None => break, // Stream ended
+
+                            InputMode::Editing => match key.code {
+                                KeyCode::Enter => {
+                                    let description = app.input_buffer.trim().to_string();
+                                    if !description.is_empty()
+                                        && let Err(e) = app.add_task(&description).await {
+                                            eprintln!("Error adding task: {}", e);
+                                        }
+                                    app.input_mode = InputMode::Normal;
+                                }
+                                KeyCode::Char(c) => {
+                                    app.input_buffer.push(c);
+                                }
+                                KeyCode::Backspace => {
+                                    app.input_buffer.pop();
+                                }
+                                KeyCode::Esc => {
+                                    app.input_mode = InputMode::Normal;
+                                }
+                                _ => {}
+                            },
                         }
                     }
-
-                    // Shutdown signal
-                    _ = shutdown_rx.recv() => {
-                        return Ok(());
+                    Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
+                    Some(Err(e)) => {
+                        eprintln!("Error reading event: {}", e);
                     }
+                    None => break, // Stream ended
                 }
+            }
+
+            // Shutdown signal
+            _ = shutdown_rx.recv() => {
+                return Ok(());
+            }
+        }
     }
 
     Ok(())

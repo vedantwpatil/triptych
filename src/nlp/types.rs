@@ -13,7 +13,6 @@ pub struct ParseResult {
 pub enum ParsedItem {
     Task(Task),
     Event(Event),
-    Email(Email),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,14 +33,6 @@ pub struct Event {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Email {
-    pub subject: String,
-    pub sender: String,
-    pub received_at: DateTime<Utc>,
-    pub body_preview: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Priority {
     Low,
@@ -56,12 +47,4 @@ pub enum ParseStrategy {
     Regex,
     Ollama,
     Fallback,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskClassification {
-    pub category: String, // "deepwork", "admin", "learning", "social", etc.
-    pub estimated_duration: Option<u32>, // minutes
-    pub energy_level: String, // "high", "medium", "low"
-    pub best_time_of_day: String, // "morning", "afternoon", "evening", "flexible"
 }

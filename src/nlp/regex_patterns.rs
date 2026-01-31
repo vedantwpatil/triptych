@@ -1,5 +1,5 @@
 use crate::nlp::types::{Event, ParsedItem, Priority, Task};
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -184,11 +184,11 @@ impl RegexParser {
             // 12 AM = 0:00 (midnight)
             (12, Some("am")) => Some(0),
             // 1-11 AM = 1-11
-            (h, Some("am")) if h >= 1 && h <= 11 => Some(h),
+            (h, Some("am")) if (1..=11).contains(&h) => Some(h),
             // 12 PM = 12:00 (noon)
             (12, Some("pm")) => Some(12),
             // 1-11 PM = 13-23
-            (h, Some("pm")) if h >= 1 && h <= 11 => Some(h + 12),
+            (h, Some("pm")) if (1..=11).contains(&h) => Some(h + 12),
             // No AM/PM specified - assume 24-hour format if <= 23
             (h, None) if h <= 23 => Some(h),
             // Invalid hour
