@@ -64,24 +64,12 @@ impl SyncDaemon {
     pub async fn shutdown(self) -> Result<()> {
         let _ = self.shutdown_tx.send(());
 
-        let results = tokio::time::timeout(
+        // Wait for tasks with timeout, silently ignore failures
+        let _ = tokio::time::timeout(
             Duration::from_secs(5),
             futures::future::join_all(self.tasks),
         )
         .await;
-
-        match results {
-            Ok(results) => {
-                for result in results {
-                    if let Err(e) = result {
-                        eprintln!("Task panicked during shutdown: {:?}", e);
-                    }
-                }
-            }
-            Err(_) => {
-                eprintln!("Shutdown timeout exceeded - some tasks may not have completed");
-            }
-        }
 
         Ok(())
     }

@@ -68,16 +68,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // No subcommand - start the TUI (with sync daemon)
+    // Start sync daemon BEFORE entering alternate screen so warmup messages print cleanly
     let sync_config = SyncConfig::from_env();
     let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), sync_config).await?;
 
+    app.load_tasks().await?;
+
+    // Now enter TUI mode
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    app.load_tasks().await?;
     let tui_result = run_app(&mut terminal, app).await;
 
     disable_raw_mode()?;
@@ -324,17 +326,17 @@ where
                                         }
                                         KeyCode::Char('x') => {
                                             if let Err(e) = app.delete_task().await {
-                                                eprintln!("Error deleting task: {}", e);
+                                                app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                             }
                                         }
                                         KeyCode::Char('s') => {
                                             if let Err(e) = app.auto_schedule_task().await {
-                                                eprintln!("Error auto-scheduling: {}", e);
+                                                app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                             }
                                         }
                                         KeyCode::Enter => {
                                             if let Err(e) = app.toggle_completed().await {
-                                                eprintln!("Error toggling task: {}", e);
+                                                app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                             }
                                         }
                                         KeyCode::Char('k') => {
@@ -374,7 +376,7 @@ where
                                             }
                                             KeyCode::Char('d') => {
                                                 if let Err(e) = app.delete_block_at_selected_cell().await {
-                                                    eprintln!("Error deleting block: {}", e);
+                                                    app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                                 }
                                             }
                                             _ => {}
@@ -388,7 +390,7 @@ where
                                             KeyCode::Enter => {
                                                 if !app.block_form.title.is_empty()
                                                     && let Err(e) = app.create_schedule_block().await {
-                                                        eprintln!("Error creating block: {}", e);
+                                                        app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                                     }
                                             }
                                             KeyCode::Char(c) => {
@@ -447,7 +449,7 @@ where
                                             KeyCode::Enter => {
                                                 if !app.unscheduled_tasks().is_empty() {
                                                     if let Err(e) = app.schedule_task_to_selected_cell().await {
-                                                        eprintln!("Error scheduling task: {}", e);
+                                                        app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                                     }
                                                 }
                                             }
@@ -462,7 +464,7 @@ where
                                                 let description = app.input_buffer.trim().to_string();
                                                 if !description.is_empty()
                                                     && let Err(e) = app.add_task_at_selected_cell(&description).await {
-                                                        eprintln!("Error adding task: {}", e);
+                                                        app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                                     }
                                                 app.input_buffer.clear();
                                                 app.calendar_input_mode = CalendarInputMode::Navigate;
@@ -484,7 +486,7 @@ where
                                     let description = app.input_buffer.trim().to_string();
                                     if !description.is_empty()
                                         && let Err(e) = app.add_task(&description).await {
-                                            eprintln!("Error adding task: {}", e);
+                                            app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                         }
                                     app.input_mode = InputMode::Normal;
                                 }
@@ -503,7 +505,7 @@ where
                     }
                     Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
                     Some(Err(e)) => {
-                        eprintln!("Error reading event: {}", e);
+                        app.status_message = Some((format!("Input error: {}", e), std::time::Instant::now()));
                     }
                     None => break, // Stream ended
                 }

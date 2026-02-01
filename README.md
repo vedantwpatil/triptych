@@ -5,17 +5,20 @@ A fast, keyboard-driven productivity TUI built in Rust. Manage tasks and schedul
 ## Current Features
 
 **Task Management**
+
 - Add tasks with natural language: `"Submit report tomorrow at 3pm #work !!"`
 - Priority levels, tags, and smart categorization (deepwork, admin, learning, etc.)
 - Vim-style navigation (j/k/Enter/x)
 
 **Weekly Calendar**
+
 - Visual 7-day schedule grid (7am-11pm)
 - Define recurring time blocks via TOML configuration
 - Auto-schedule tasks to matching available slots
 - Week navigation with conflict detection
 
 **Performance**
+
 - Persistent daemon architecture for instant CLI commands (<100ms)
 - 3-layer NLP parsing: cache → regex → local LLM (Ollama)
 - Zero input lag in TUI (<1ms response time)
@@ -23,6 +26,7 @@ A fast, keyboard-driven productivity TUI built in Rust. Manage tasks and schedul
 ## Installation
 
 **Prerequisites**
+
 - Rust 1.70+
 - Ollama with Qwen2.5-7B model
 - SQLite 3.35+
@@ -46,16 +50,16 @@ cargo run
 
 **Keybindings**
 
-| Key | Action |
-|-----|--------|
-| `j/k` | Navigate tasks |
-| `a` | Add new task |
-| `Enter` | Toggle completion |
-| `x` | Delete task |
-| `s` | Auto-schedule task |
-| `c` | Switch to calendar view |
-| `H/L` | Previous/next week (calendar) |
-| `q` | Quit |
+| Key     | Action                        |
+| ------- | ----------------------------- |
+| `j/k`   | Navigate tasks                |
+| `a`     | Add new task                  |
+| `Enter` | Toggle completion             |
+| `x`     | Delete task                   |
+| `s`     | Auto-schedule task            |
+| `c`     | Switch to calendar view       |
+| `H/L`   | Previous/next week (calendar) |
+| `q`     | Quit                          |
 
 ### CLI Mode
 
@@ -88,6 +92,7 @@ triptych add "Call John in the evening #personal"
 ```
 
 Supported syntax:
+
 - **Time**: 12/24-hour format, AM/PM
 - **Dates**: today, tomorrow, next Monday, specific dates
 - **Tags**: #work, #personal, #dev
@@ -128,6 +133,7 @@ Import with `triptych schedule import schedule.toml`.
 ## Roadmap
 
 ### Implemented
+
 - Task management with NLP parsing
 - Weekly calendar view with schedule blocks
 - Persistent daemon for CLI performance
@@ -137,6 +143,7 @@ Import with `triptych schedule import schedule.toml`.
 ### Planned: Email Client
 
 A future major feature will add a full email client with:
+
 - IMAP IDLE for real-time notifications
 - Keyboard-driven email triage (archive, reply, snooze)
 - Email-to-task conversion
@@ -146,6 +153,7 @@ A future major feature will add a full email client with:
 The goal is to bring Superhuman-like email productivity to the terminal, fully integrated with task and calendar workflows.
 
 ### Other Planned Features
+
 - CalDAV calendar sync
 - Recurring tasks
 - Full-text search
@@ -156,12 +164,14 @@ The goal is to bring Superhuman-like email productivity to the terminal, fully i
 ## Troubleshooting
 
 **Ollama not responding**
+
 ```bash
 ollama serve        # Start Ollama service
 ollama list         # Verify model is installed
 ```
 
 **Daemon issues**
+
 ```bash
 rm /tmp/triptych.sock   # Remove stale socket
 triptych daemon         # Restart
