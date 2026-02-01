@@ -447,11 +447,10 @@ where
                                                 app.task_picker_selected = app.task_picker_selected.saturating_sub(1);
                                             }
                                             KeyCode::Enter => {
-                                                if !app.unscheduled_tasks().is_empty() {
-                                                    if let Err(e) = app.schedule_task_to_selected_cell().await {
+                                                if !app.unscheduled_tasks().is_empty()
+                                                    && let Err(e) = app.schedule_task_to_selected_cell().await {
                                                         app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
                                                     }
-                                                }
                                             }
                                             _ => {}
                                         },

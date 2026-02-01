@@ -14,6 +14,7 @@ dependencies = [
  "futures",
  "icalendar",
  "lru",
+ "nom 7.1.3",
  "once_cell",
  "ratatui",
  "regex",

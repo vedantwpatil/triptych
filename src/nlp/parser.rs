@@ -1,5 +1,5 @@
 use crate::nlp::ollama_client::OllamaClient;
-use crate::nlp::regex_patterns::RegexParser;
+use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -95,7 +95,7 @@ impl NLPParser {
         }
 
         // Layer 1: Try regex fast path
-        if let Some(item) = RegexParser::try_parse(input) {
+        if let Some(item) = RuleParser::try_parse(input) {
             let elapsed = start.elapsed().as_millis() as u64;
 
             let result = ParseResult {
