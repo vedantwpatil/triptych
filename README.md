@@ -149,6 +149,7 @@ A future major feature will add a full email client with:
 - Email-to-task conversion
 - OAuth2 support for Gmail and other providers
 - Multi-account management
+- Enhance the nlp parsing and the automatic scheduling
 
 The goal is to bring Superhuman-like email productivity to the terminal, fully integrated with task and calendar workflows.
 
