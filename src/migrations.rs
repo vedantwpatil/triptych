@@ -36,6 +36,21 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
         eprintln!("  ✓ Added recurrence_rule to events");
     }
 
+    // Smart scheduling: hard deadline separate from scheduled_at, plus task duration
+    if !column_exists(pool, "tasks", "deadline").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN deadline TEXT")
+            .execute(pool)
+            .await?;
+        eprintln!("  ✓ Added deadline to tasks");
+    }
+
+    if !column_exists(pool, "tasks", "duration_minutes").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN duration_minutes INTEGER DEFAULT 90")
+            .execute(pool)
+            .await?;
+        eprintln!("  ✓ Added duration_minutes to tasks");
+    }
+
     // Create schedule_blocks table
     sqlx::query(
         r#"
@@ -63,6 +78,35 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(task_category)")
         .execute(pool)
         .await?;
+
+    // Task-to-block allocations produced by the smart scheduler
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_block_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            block_date TEXT NOT NULL,
+            block_start_time TEXT NOT NULL,
+            block_end_time TEXT NOT NULL,
+            allocated_minutes INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    "#,
+    )
+    .execute(pool)
+    .await?;
+    eprintln!("  ✓ Task block allocations table ready");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_allocations_task ON task_block_allocations(task_id)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_allocations_date ON task_block_allocations(block_date)",
+    )
+    .execute(pool)
+    .await?;
 
     eprintln!("[Migration] Calendar schema ready ✓");
     Ok(())
