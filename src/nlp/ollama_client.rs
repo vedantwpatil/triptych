@@ -127,6 +127,8 @@ Output (ONLY valid JSON, no explanations):"#,
             "task" => Ok(ParsedItem::Task(Task {
                 title: structured.title,
                 due_date: datetime,
+                deadline: None,
+                duration_minutes: None,
                 tags,
                 priority,
                 is_scheduled: datetime.is_some(),

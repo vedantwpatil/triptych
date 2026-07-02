@@ -19,6 +19,10 @@ pub enum ParsedItem {
 pub struct Task {
     pub title: String,
     pub due_date: Option<DateTime<Utc>>,
+    /// Hard deadline (e.g. "by Friday"), distinct from due_date/scheduled_at
+    pub deadline: Option<DateTime<Utc>>,
+    /// How long the task is expected to take, in minutes
+    pub duration_minutes: Option<i32>,
     pub tags: Vec<String>,
     pub priority: Priority,
     pub is_scheduled: bool,

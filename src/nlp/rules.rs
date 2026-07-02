@@ -25,6 +25,10 @@ enum Segment {
     Tag(String),
     /// A parsed priority marker (!, priority:high)
     Priority(Priority),
+    /// A hard deadline ("by Friday", "due tomorrow")
+    Deadline(DateTime<Utc>),
+    /// An explicit task duration ("2h", "90m", "3 hours")
+    ExplicitDuration(i32),
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +73,16 @@ impl RuleParser {
         let mut start_time: Option<DateTime<Utc>> = None;
         let mut end_time: Option<DateTime<Utc>> = None;
         let mut duration: Option<Duration> = None;
+        let mut deadline: Option<DateTime<Utc>> = None;
+        let mut explicit_duration_minutes: Option<i32> = None;
 
         for segment in segments {
             match segment {
                 Segment::Text(t) => title_parts.push(t),
                 Segment::Tag(t) => tags.push(t),
                 Segment::Priority(p) => priority = p,
+                Segment::Deadline(dt) => deadline = Some(dt),
+                Segment::ExplicitDuration(mins) => explicit_duration_minutes = Some(mins),
                 Segment::Temporal(temp) => match temp {
                     TemporalContext::Point(dt) => {
                         // If we already have a start time, maybe this is end time?
@@ -118,6 +126,8 @@ impl RuleParser {
                 return Some(ParsedItem::Task(Task {
                     title,
                     due_date: Some(start),
+                    deadline,
+                    duration_minutes: explicit_duration_minutes,
                     tags,
                     priority,
                     is_scheduled: true,
@@ -126,14 +136,20 @@ impl RuleParser {
         }
 
         // If no time, it's a Task
-        // Fallback: If title is empty but we have tags/priority, we still want to parse?
-        if title.is_empty() && tags.is_empty() {
+        // Fallback: nothing worth keeping unless a deadline/duration was found
+        if title.is_empty()
+            && tags.is_empty()
+            && deadline.is_none()
+            && explicit_duration_minutes.is_none()
+        {
             return None;
         }
 
         Some(ParsedItem::Task(Task {
             title,
             due_date: None,
+            deadline,
+            duration_minutes: explicit_duration_minutes,
             tags,
             priority,
             is_scheduled: false,
@@ -153,12 +169,102 @@ fn parse_segments(input: &str) -> IResult<&str, Vec<Segment>> {
             // 1. Tags and Priority (unambiguous syntax)
             parse_tag_segment,
             parse_priority_segment,
-            // 2. Temporal expressions (greedy but structured)
+            // 2. Deadline and explicit duration (unambiguous prefixes/suffixes)
+            parse_deadline_segment,
+            parse_bare_duration_segment,
+            // 3. Temporal expressions (greedy but structured)
             parse_temporal_segment,
-            // 3. Fallback: standard text
+            // 4. Fallback: standard text
             parse_text_segment,
         )),
     ))(input)
+}
+
+/// Matches "by Friday", "due tomorrow", "before wed"
+fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
+    let now = Local::now();
+    let (input, _) = alt((tag_no_case("by"), tag_no_case("due"), tag_no_case("before")))(input)?;
+    let (input, _) = space1(input)?;
+    map_res(
+        take_while1(|c: char| c.is_alphabetic()),
+        move |word: &str| -> Result<Segment, &'static str> {
+            let today = now.date_naive();
+            let target_date = match word.to_lowercase().as_str() {
+                "today" => today,
+                "tomorrow" => today + Duration::days(1),
+                _ => {
+                    let target_weekday =
+                        weekday_from_name(word).ok_or("not a recognized deadline target")?;
+                    let days_ahead = (target_weekday.num_days_from_monday() as i64
+                        - today.weekday().num_days_from_monday() as i64
+                        + 7)
+                        % 7;
+                    today + Duration::days(days_ahead)
+                }
+            };
+
+            let end_of_day = target_date
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap();
+
+            Ok(Segment::Deadline(end_of_day.with_timezone(&Utc)))
+        },
+    )(input)
+}
+
+fn weekday_from_name(name: &str) -> Option<chrono::Weekday> {
+    use chrono::Weekday::*;
+    Some(match name.to_lowercase().as_str() {
+        "monday" | "mon" => Mon,
+        "tuesday" | "tue" | "tues" => Tue,
+        "wednesday" | "wed" => Wed,
+        "thursday" | "thu" | "thurs" => Thu,
+        "friday" | "fri" => Fri,
+        "saturday" | "sat" => Sat,
+        "sunday" | "sun" => Sun,
+        _ => return None,
+    })
+}
+
+/// Matches bare durations with no "for"/"in" prefix: "2h", "90m", "3 hours"
+fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
+    let (input, amount) = map_res(digit1, |s: &str| s.parse::<i64>())(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, unit) = alt((
+        tag_no_case("hours"),
+        tag_no_case("hour"),
+        tag_no_case("hrs"),
+        tag_no_case("hr"),
+        tag_no_case("h"),
+        tag_no_case("minutes"),
+        tag_no_case("minute"),
+        tag_no_case("mins"),
+        tag_no_case("min"),
+        tag_no_case("m"),
+    ))(input)?;
+    // Require a word boundary so "3 more" doesn't get eaten as "3 m[ore]"
+    let (input, _) = word_boundary(input)?;
+
+    let minutes = if unit.to_lowercase().starts_with('h') {
+        amount * 60
+    } else {
+        amount
+    };
+
+    Ok((input, Segment::ExplicitDuration(minutes as i32)))
+}
+
+/// Succeeds only if the next character isn't alphanumeric (or input is exhausted)
+fn word_boundary(input: &str) -> IResult<&str, ()> {
+    match input.chars().next() {
+        Some(c) if c.is_alphanumeric() => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        ))),
+        _ => Ok((input, ())),
+    }
 }
 
 fn parse_tag_segment(input: &str) -> IResult<&str, Segment> {
@@ -499,5 +605,67 @@ fn quantize_time(dt: DateTime<Utc>, grid_minutes: i64) -> DateTime<Utc> {
     } else {
         let diff = grid_seconds - remainder;
         dt + Duration::seconds(diff)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveTime;
+
+    fn parse_task(input: &str) -> Task {
+        match RuleParser::try_parse(input).expect("expected a parsed item") {
+            ParsedItem::Task(task) => task,
+            ParsedItem::Event(event) => panic!("expected Task, got Event: {:?}", event),
+        }
+    }
+
+    #[test]
+    fn deadline_by_weekday_sets_end_of_day() {
+        let task = parse_task("finish slides by friday");
+        let deadline = task.deadline.expect("deadline should be set");
+        let local = deadline.with_timezone(&Local);
+        assert_eq!(local.weekday(), chrono::Weekday::Fri);
+        assert_eq!(local.time(), NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+        assert_eq!(task.title, "finish slides");
+    }
+
+    #[test]
+    fn bare_hour_duration_converts_to_minutes() {
+        let task = parse_task("write report 3h");
+        assert_eq!(task.duration_minutes, Some(180));
+        assert_eq!(task.title, "write report");
+    }
+
+    #[test]
+    fn bare_minute_duration_is_not_hours() {
+        let task = parse_task("quick call 90m");
+        assert_eq!(task.duration_minutes, Some(90));
+    }
+
+    #[test]
+    fn deadline_and_duration_combine_without_becoming_an_event() {
+        let task = parse_task("MATH 475 homework by wednesday 3h");
+        assert!(task.deadline.is_some());
+        assert_eq!(task.duration_minutes, Some(180));
+        assert_eq!(task.title, "MATH 475 homework");
+        assert!(task.due_date.is_none());
+    }
+
+    #[test]
+    fn word_boundary_guard_prevents_false_positive_duration() {
+        // "3 more things" must not be misparsed as a "3m" duration.
+        let task = parse_task("buy 3 more things");
+        assert_eq!(task.duration_minutes, None);
+        assert_eq!(task.title, "buy 3 more things");
+    }
+
+    #[test]
+    fn due_tomorrow_sets_deadline() {
+        let task = parse_task("call dentist due tomorrow");
+        let deadline = task.deadline.expect("deadline should be set");
+        let tomorrow = (Local::now() + Duration::days(1)).date_naive();
+        assert_eq!(deadline.with_timezone(&Local).date_naive(), tomorrow);
+        assert_eq!(task.title, "call dentist");
     }
 }

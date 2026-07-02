@@ -163,6 +163,8 @@ impl NLPParser {
         let item = ParsedItem::Task(crate::nlp::types::Task {
             title: input.to_string(),
             due_date: None,
+            deadline: None,
+            duration_minutes: None,
             tags: vec![],
             priority: crate::nlp::types::Priority::Medium,
             is_scheduled: false,
