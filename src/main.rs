@@ -151,9 +151,9 @@ async fn handle_cli_command(
                             let mut indicators = Vec::new();
 
                             match task.priority {
-                                3 => indicators.push("[HIGH]".to_string()),
-                                2 => indicators.push("[MED]".to_string()),
-                                1 => indicators.push("[LOW]".to_string()),
+                                3 => indicators.push("[URGENT]".to_string()),
+                                2 => indicators.push("[HIGH]".to_string()),
+                                1 => indicators.push("[MED]".to_string()),
                                 _ => {}
                             }
 

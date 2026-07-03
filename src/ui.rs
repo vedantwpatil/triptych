@@ -44,9 +44,9 @@ fn render_todo_view(f: &mut Frame, app: &App) {
 
             // Add priority indicator with text
             match task.priority {
-                3 => spans.push(Span::styled("[HIGH] ", Style::default().fg(Color::Red))),
-                2 => spans.push(Span::styled("[MED] ", Style::default().fg(Color::Yellow))),
-                1 => spans.push(Span::styled("[LOW] ", Style::default().fg(Color::Blue))),
+                3 => spans.push(Span::styled("[URGENT] ", Style::default().fg(Color::Red))),
+                2 => spans.push(Span::styled("[HIGH] ", Style::default().fg(Color::Yellow))),
+                1 => spans.push(Span::styled("[MED] ", Style::default().fg(Color::Blue))),
                 _ => {}
             }
 
