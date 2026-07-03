@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -37,30 +36,6 @@ fn default_priority() -> i32 {
 
 const DB_URL: &str = "sqlite:todo.db";
 
-#[derive(Clone, FromRow, Debug)]
-pub struct TimelineEntry {
-    pub id: i64,
-    pub entity_type: String,
-    pub entity_id: i64,
-    pub created_at: DateTime<Utc>,
-    pub scheduled_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub priority: i32,
-    pub tags: Option<String>,
-}
-
-#[derive(Clone, FromRow, Debug)]
-pub struct Event {
-    pub id: i64,
-    pub title: String,
-    pub description: Option<String>,
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
-    pub location: Option<String>,
-    pub calendar_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
     TodoList,
@@ -88,7 +63,6 @@ pub struct Task {
     pub scheduled_at: Option<DateTime<Utc>>,
     pub priority: i32,
     pub tags: Option<String>,
-    pub natural_language_input: Option<String>,
     pub task_category: Option<String>,
 }
 
@@ -96,7 +70,6 @@ pub struct Task {
 pub struct EnhancedTaskInfo {
     pub task: Task,
     pub tags: Vec<String>,
-    pub is_scheduled: bool,
 }
 
 pub enum InputMode {
@@ -211,7 +184,7 @@ pub struct App {
     pub status_message: Option<(String, std::time::Instant)>,
 }
 
-fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
+pub(crate) fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
     if time_str.contains(':') {
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() >= 2 {
@@ -388,32 +361,6 @@ impl App {
         "general"
     }
 
-    pub async fn get_week_schedule(
-        &self,
-        _week_offset: i32,
-    ) -> Result<Vec<(i32, Vec<ScheduleBlock>)>, sqlx::Error> {
-        let mut schedule_by_day = Vec::new();
-
-        for day in 0..7 {
-            let blocks = sqlx::query_as::<_, ScheduleBlock>(
-                r#"
-            SELECT id, day_of_week, start_time, end_time, 
-                   block_type, title, description, priority
-            FROM schedule_blocks
-            WHERE day_of_week = ?
-            ORDER BY start_time
-            "#,
-            )
-            .bind(day)
-            .fetch_all(&self.db_pool)
-            .await?;
-
-            schedule_by_day.push((day, blocks));
-        }
-
-        Ok(schedule_by_day)
-    }
-
     pub async fn build() -> Result<Self, sqlx::Error> {
         if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
             Sqlite::create_database(DB_URL).await?;
@@ -558,26 +505,6 @@ impl App {
         Ok(())
     }
 
-    pub async fn convert_task_to_event(&self, task_id: i64) -> Result<Option<i64>, sqlx::Error> {
-        if let Some(task) = self.get_task_by_id(task_id).await?
-            && let Some(scheduled_time) = task.scheduled_at
-        {
-            let event_result = sqlx::query(
-                    "INSERT INTO events (title, description, start_time, end_time, created_at) VALUES (?, ?, ?, ?, ?)"
-                )
-                .bind(&task.description)
-                .bind("Converted from task")
-                .bind(scheduled_time)
-                .bind(scheduled_time)
-                .bind(chrono::Utc::now())
-                .execute(&self.db_pool)
-                .await?;
-
-            return Ok(Some(event_result.last_insert_rowid()));
-        }
-        Ok(None)
-    }
-
     pub async fn get_enhanced_task_list(&mut self) -> Result<Vec<EnhancedTaskInfo>, sqlx::Error> {
         self.load_tasks().await?;
 
@@ -593,7 +520,6 @@ impl App {
             enhanced_tasks.push(EnhancedTaskInfo {
                 task: task.clone(),
                 tags,
-                is_scheduled: task.scheduled_at.is_some(),
             });
         }
 

@@ -1,4 +1,6 @@
-use crate::app::{App, BlockFormField, CalendarInputMode, InputMode, ScheduleBlock, ViewMode};
+use crate::app::{
+    App, BlockFormField, CalendarInputMode, InputMode, ScheduleBlock, ViewMode, parse_time_string,
+};
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
 use ratatui::{
     Frame,
@@ -350,27 +352,6 @@ fn build_cell_content<'a>(grid: &CalendarGrid, day_idx: usize, slot_time: &Naive
             // Empty cell
             Cell::from("")
         }
-    }
-}
-
-fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
-    // Assuming format is "HH:MM:SS" or "HH:MM"
-    if time_str.contains(':') {
-        let parts: Vec<&str> = time_str.split(':').collect();
-        if parts.len() >= 2 {
-            let hour: u32 = parts[0].parse().ok()?;
-            let minute: u32 = parts[1].parse().ok()?;
-            let second: u32 = if parts.len() > 2 {
-                parts[2].parse().ok()?
-            } else {
-                0
-            };
-            NaiveTime::from_hms_opt(hour, minute, second)
-        } else {
-            None
-        }
-    } else {
-        None
     }
 }
 
