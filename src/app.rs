@@ -70,6 +70,70 @@ pub struct Task {
 
 const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category";
 
+/// A concrete occurrence of a recurring schedule block on a specific date
+#[derive(Debug, Clone)]
+pub struct BlockInstance {
+    pub date: NaiveDate,
+    pub start_time: NaiveTime,
+    pub end_time: NaiveTime,
+}
+
+impl BlockInstance {
+    fn capacity_minutes(&self) -> i64 {
+        (self.end_time - self.start_time).num_minutes()
+    }
+
+    fn start_datetime_utc(&self) -> DateTime<Utc> {
+        resolve_local_datetime(self.date.and_time(self.start_time))
+    }
+}
+
+/// Resolve a naive local wall-clock datetime to UTC without ever panicking on a
+/// DST transition: an ambiguous time (fall-back) resolves to its earlier instant,
+/// a nonexistent time (spring-forward gap) is nudged forward in hourly steps
+/// until a valid local time is found.
+pub(crate) fn resolve_local_datetime(naive: chrono::NaiveDateTime) -> DateTime<Utc> {
+    for offset_hours in 0..=4 {
+        if let Some(dt) = (naive + Duration::hours(offset_hours))
+            .and_local_timezone(chrono::Local)
+            .earliest()
+        {
+            return dt.with_timezone(&Utc);
+        }
+    }
+    // Should be unreachable (DST gaps are at most a couple hours); fail safe.
+    naive.and_utc()
+}
+
+#[derive(Debug)]
+pub struct TaskConflict {
+    pub task_id: i64,
+    pub description: String,
+    pub needed_minutes: i32,
+    pub allocated_minutes: i32,
+    pub deadline: DateTime<Utc>,
+}
+
+#[derive(Debug, Default)]
+pub struct AllocationResult {
+    pub conflicts: Vec<TaskConflict>,
+}
+
+/// Block types eligible to receive task allocations: deepwork blocks primarily,
+/// admin blocks as a fallback for low-cognitive tasks.
+///
+/// This is a deliberate subset of `BlockFormState::BLOCK_TYPES`, not a full
+/// mirror of it — most block types (class, training, meal, ...) are correctly
+/// never schedulable. If you add a new block type that SHOULD receive task
+/// allocations (behaving like deepwork/admin), you must add it here too;
+/// nothing keeps the two lists in sync automatically.
+fn is_allocatable_block_type(block_type: &str) -> bool {
+    matches!(
+        block_type,
+        "deepwork" | "deepwork_input" | "deepwork_output" | "admin"
+    )
+}
+
 pub fn classify_task(description: &str) -> &'static str {
     let lower = description.to_lowercase();
 
@@ -265,6 +329,7 @@ pub struct App {
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
     pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, String, i32)>,
+    pub cached_task_allocations: Vec<(NaiveDate, NaiveTime, String, i32, i32)>,
     pub status_message: Option<(String, std::time::Instant)>,
 }
 
@@ -308,6 +373,7 @@ impl App {
             nlp_parser,
             cached_schedule_blocks: Vec::new(),
             cached_scheduled_tasks: Vec::new(),
+            cached_task_allocations: Vec::new(),
             status_message: None,
         }
     }
@@ -329,6 +395,42 @@ impl App {
             .get_scheduled_tasks_internal(&days)
             .await
             .unwrap_or_default();
+
+        self.cached_task_allocations = self
+            .get_week_allocations_internal(&days)
+            .await
+            .unwrap_or_default();
+    }
+
+    async fn get_week_allocations_internal(
+        &self,
+        days: &[NaiveDate],
+    ) -> Result<Vec<(NaiveDate, NaiveTime, String, i32, i32)>, sqlx::Error> {
+        let start = days[0].to_string();
+        let end = days[days.len() - 1].to_string();
+
+        let rows: Vec<(String, String, String, i32, i32)> = sqlx::query_as(
+            r#"
+            SELECT a.block_date, a.block_start_time, t.description, a.allocated_minutes, t.priority
+            FROM task_block_allocations a
+            JOIN tasks t ON a.task_id = t.id
+            WHERE a.block_date BETWEEN ? AND ? AND t.completed = 0
+            ORDER BY a.block_date, a.block_start_time
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|(date_str, time_str, desc, minutes, priority)| {
+                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").ok()?;
+                let time = parse_time_string(&time_str)?;
+                Some((date, time, desc, minutes, priority))
+            })
+            .collect())
     }
 
     async fn get_week_schedule_internal(
@@ -1225,5 +1327,195 @@ impl App {
             std::time::Instant::now(),
         ));
         Ok(())
+    }
+
+    // ===== Smart Task Scheduling =====
+
+    /// Get incomplete tasks with a deadline, earliest deadline first.
+    /// Allocations are deadline-driven and additive: they never touch `scheduled_at`,
+    /// which remains under manual/direct-scheduling control (auto_schedule_task,
+    /// schedule_task_to_selected_cell). Tasks without a deadline are never reallocated.
+    async fn get_tasks_by_deadline(&self) -> Result<Vec<Task>, sqlx::Error> {
+        // Tasks already manually scheduled (scheduled_at set) are excluded: they're
+        // under the user's direct control and must never be double-booked into a
+        // second, deadline-driven allocation.
+        let query = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE completed = 0 AND deadline IS NOT NULL AND scheduled_at IS NULL ORDER BY deadline ASC"
+        );
+        sqlx::query_as::<_, Task>(&query)
+            .fetch_all(&self.db_pool)
+            .await
+    }
+
+    /// Expand recurring schedule_blocks into concrete per-date instances over the
+    /// next `days` days, keeping only block types eligible for task allocation.
+    async fn get_available_deepwork_blocks(
+        &self,
+        days: i64,
+    ) -> Result<Vec<BlockInstance>, sqlx::Error> {
+        let blocks = sqlx::query_as::<_, ScheduleBlock>(
+            "SELECT id, day_of_week, start_time, end_time, block_type, title, description, priority FROM schedule_blocks"
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        let now = chrono::Local::now();
+        let today = now.naive_local().date();
+        let current_time = now.time();
+        let mut instances: Vec<BlockInstance> = Vec::new();
+
+        for day_offset in 0..days {
+            let date = today + Duration::days(day_offset);
+            let dow = date.weekday().num_days_from_monday() as i32;
+
+            for block in &blocks {
+                if block.day_of_week != dow || !is_allocatable_block_type(&block.block_type) {
+                    continue;
+                }
+                let (Some(start_time), Some(end_time)) = (
+                    parse_time_string(&block.start_time),
+                    parse_time_string(&block.end_time),
+                ) else {
+                    continue;
+                };
+
+                // Skip blocks on today that have already fully elapsed.
+                if date == today && end_time <= current_time {
+                    continue;
+                }
+
+                instances.push(BlockInstance {
+                    date,
+                    start_time,
+                    end_time,
+                });
+            }
+        }
+
+        instances.sort_by_key(|b| (b.date, b.start_time));
+        Ok(instances)
+    }
+
+    /// Remaining free minutes in this block instance, given minutes already used.
+    fn block_has_capacity(
+        usage: &std::collections::HashMap<(NaiveDate, NaiveTime), i64>,
+        block: &BlockInstance,
+        needed_minutes: i64,
+    ) -> bool {
+        let used = usage
+            .get(&(block.date, block.start_time))
+            .copied()
+            .unwrap_or(0);
+        block.capacity_minutes() - used >= needed_minutes.min(1)
+    }
+
+    async fn clear_all_allocations(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM task_block_allocations")
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Greedily allocate `needed_minutes` of a task across the given blocks (in order),
+    /// recording usage as it goes. Returns the number of minutes actually allocated.
+    async fn allocate_task_to_blocks(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        task_id: i64,
+        needed_minutes: i64,
+        available: &[&BlockInstance],
+        usage: &mut std::collections::HashMap<(NaiveDate, NaiveTime), i64>,
+    ) -> Result<i64, sqlx::Error> {
+        let mut remaining = needed_minutes;
+
+        for block in available {
+            if remaining <= 0 {
+                break;
+            }
+
+            let used = usage
+                .get(&(block.date, block.start_time))
+                .copied()
+                .unwrap_or(0);
+            let free = block.capacity_minutes() - used;
+            if free <= 0 {
+                continue;
+            }
+
+            let take = remaining.min(free);
+
+            sqlx::query(
+                "INSERT INTO task_block_allocations (task_id, block_date, block_start_time, block_end_time, allocated_minutes) VALUES (?, ?, ?, ?, ?)"
+            )
+            .bind(task_id)
+            .bind(block.date.to_string())
+            .bind(block.start_time.format("%H:%M").to_string())
+            .bind(block.end_time.format("%H:%M").to_string())
+            .bind(take as i32)
+            .execute(&mut **tx)
+            .await?;
+
+            usage.insert((block.date, block.start_time), used + take);
+            remaining -= take;
+        }
+
+        Ok(needed_minutes - remaining)
+    }
+
+    /// Reallocate every incomplete, deadline-bearing task to available deepwork/admin
+    /// blocks in the next two weeks, earliest-deadline-first. Additive to the existing
+    /// `scheduled_at`-based flow: this only ever writes task_block_allocations rows.
+    /// The clear-and-rebuild runs inside a transaction so a mid-run error leaves the
+    /// previous allocations intact rather than a half-rewritten table.
+    pub async fn reallocate_all_tasks(&mut self) -> Result<AllocationResult, sqlx::Error> {
+        let tasks = self.get_tasks_by_deadline().await?;
+        let blocks = self.get_available_deepwork_blocks(14).await?;
+
+        let mut tx = self.db_pool.begin().await?;
+        Self::clear_all_allocations(&mut tx).await?;
+
+        let mut block_usage: std::collections::HashMap<(NaiveDate, NaiveTime), i64> =
+            std::collections::HashMap::new();
+        let mut conflicts = Vec::new();
+
+        for task in &tasks {
+            let Some(deadline) = task.deadline else {
+                continue;
+            };
+            let needed_minutes = task.duration_minutes.unwrap_or(90) as i64;
+
+            let available: Vec<&BlockInstance> = blocks
+                .iter()
+                .filter(|b| b.start_datetime_utc() < deadline)
+                .filter(|b| Self::block_has_capacity(&block_usage, b, 1))
+                .collect();
+
+            let allocated = Self::allocate_task_to_blocks(
+                &mut tx,
+                task.id,
+                needed_minutes,
+                &available,
+                &mut block_usage,
+            )
+            .await?;
+
+            if allocated < needed_minutes {
+                conflicts.push(TaskConflict {
+                    task_id: task.id,
+                    description: task.description.clone(),
+                    needed_minutes: needed_minutes as i32,
+                    allocated_minutes: allocated as i32,
+                    deadline,
+                });
+            }
+        }
+
+        tx.commit().await?;
+
+        self.load_tasks().await?;
+        self.refresh_calendar_data().await;
+
+        Ok(AllocationResult { conflicts })
     }
 }

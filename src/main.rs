@@ -281,6 +281,32 @@ async fn handle_cli_command(
                 let count = app.clear_all_schedule_blocks().await?;
                 println!("🧹 Cleared {} schedule blocks", count);
             }
+            ScheduleCommands::Reallocate => match app.reallocate_all_tasks().await {
+                Ok(result) => {
+                    if result.conflicts.is_empty() {
+                        println!("✓ All deadline tasks fit within available blocks");
+                    } else {
+                        println!(
+                            "⚠️  {} task(s) don't fully fit before their deadline:",
+                            result.conflicts.len()
+                        );
+                        for conflict in &result.conflicts {
+                            println!(
+                                "  - \"{}\" (ID: {}) needs {}m, got {}m (due {})",
+                                conflict.description,
+                                conflict.task_id,
+                                conflict.needed_minutes,
+                                conflict.allocated_minutes,
+                                conflict.deadline.format("%a %m/%d %H:%M")
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("✗ Reallocation failed: {}", e);
+                    std::process::exit(1);
+                }
+            },
         },
 
         _ => unreachable!("Daemon commands handled earlier"),

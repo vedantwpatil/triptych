@@ -63,4 +63,7 @@ pub enum ScheduleCommands {
 
     /// Clear all schedule blocks
     Clear,
+
+    /// Reallocate all deadline-bearing tasks to available deepwork/admin blocks
+    Reallocate,
 }
