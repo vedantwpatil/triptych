@@ -614,6 +614,10 @@ impl App {
             .position(|t| t.item_order == Some(new_order))
             .unwrap_or(0);
 
+        if deadline.is_some() {
+            self.on_task_changed().await?;
+        }
+
         Ok(())
     }
 
@@ -629,6 +633,7 @@ impl App {
             .execute(&self.db_pool)
             .await?;
         self.load_tasks().await?;
+        self.on_task_changed().await?;
         Ok(())
     }
 
@@ -647,6 +652,7 @@ impl App {
             .await?;
 
         self.load_tasks().await?;
+        self.on_task_changed().await?;
         Ok(())
     }
 
@@ -678,6 +684,9 @@ impl App {
             .await?
             .rows_affected();
 
+        if rows_affected > 0 {
+            self.on_task_changed().await?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -688,6 +697,9 @@ impl App {
             .await?
             .rows_affected();
 
+        if rows_affected > 0 {
+            self.on_task_changed().await?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -697,6 +709,9 @@ impl App {
             .await?
             .rows_affected();
 
+        if rows_affected > 0 {
+            self.on_task_changed().await?;
+        }
         Ok(rows_affected)
     }
 
@@ -1517,5 +1532,22 @@ impl App {
         self.refresh_calendar_data().await;
 
         Ok(AllocationResult { conflicts })
+    }
+
+    /// Called after a task with a deadline is added, so the schedule stays current.
+    pub async fn on_task_changed(&mut self) -> Result<(), sqlx::Error> {
+        let result = self.reallocate_all_tasks().await?;
+
+        if !result.conflicts.is_empty() {
+            self.status_message = Some((
+                format!(
+                    "Warning: {} task(s) cannot fit before deadline",
+                    result.conflicts.len()
+                ),
+                std::time::Instant::now(),
+            ));
+        }
+
+        Ok(())
     }
 }
