@@ -368,13 +368,11 @@ where
                                         KeyCode::Char('k') => {
                                             app.selected = app.selected.saturating_sub(1);
                                         }
-                                        KeyCode::Char('j') => {
-                                            if !app.tasks.is_empty() {
-                                                let max = app.tasks.len() - 1;
-                                                if app.selected < max {
-                                                    app.selected += 1;
-                                                }
-                                            }
+                                        KeyCode::Char('j')
+                                            if !app.tasks.is_empty()
+                                                && app.selected < app.tasks.len() - 1 =>
+                                        {
+                                            app.selected += 1;
                                         }
                                         _ => {}
                                     },
