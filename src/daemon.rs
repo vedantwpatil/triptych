@@ -181,24 +181,14 @@ async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParse
     Ok(())
 }
 
-/// Add a task to the database (daemon version)
+/// Add a task to the database (daemon version). Persists deadline/duration like
+/// App::add_task, but doesn't reallocate (no App/pool of blocks here) - run
+/// `triptych schedule reallocate` (or reopen the TUI) to pick up new deadlines.
 async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str) -> Result<i64> {
-    use crate::nlp::types::{ParsedItem, Priority};
-
     let parse_result = nlp.parse(description).await?;
 
-    let (task_title, scheduled_at, priority_value, tags_list) = match parse_result.item {
-        ParsedItem::Task(nlp_task) => {
-            let priority = match nlp_task.priority {
-                Priority::Urgent => 3,
-                Priority::High => 2,
-                Priority::Medium => 1,
-                Priority::Low => 0,
-            };
-            (nlp_task.title, nlp_task.due_date, priority, nlp_task.tags)
-        }
-        ParsedItem::Event(event) => (event.title, Some(event.start_time), 1, event.tags),
-    };
+    let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
+        crate::app::extract_task_fields(parse_result.item);
 
     let tags_json = if tags_list.is_empty() {
         None
@@ -206,11 +196,15 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
         Some(serde_json::to_string(&tags_list).unwrap_or_default())
     };
 
+    let category = crate::app::classify_task(&task_title);
+    let duration_minutes =
+        duration_minutes.unwrap_or_else(|| crate::app::default_duration_for_category(category));
+
     // Use runtime query instead of query! macro
     let result = sqlx::query(
         r#"
-        INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at)
-        VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?)
+        INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category)
+        VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?)
         "#
     )
     .bind(&task_title)
@@ -219,6 +213,9 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
     .bind(description)
     .bind(tags_json)
     .bind(scheduled_at)
+    .bind(deadline)
+    .bind(duration_minutes)
+    .bind(category)
     .execute(db)
     .await?;
 
