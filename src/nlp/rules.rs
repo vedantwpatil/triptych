@@ -44,6 +44,12 @@ enum TemporalContext {
     },
 }
 
+// ============================================================================
+// MAIN PARSER
+// ============================================================================
+
+pub struct RuleParser;
+
 /// True if the input has a deadline-intent word ("by"/"due"/"before") as a
 /// standalone token that `parse_deadline_segment` could not resolve into an
 /// actual deadline (e.g. "before the end of next month"). Used by the parser
@@ -57,12 +63,6 @@ pub fn has_unresolved_deadline_intent(input: &str, resolved_deadline: bool) -> b
         .split_whitespace()
         .any(|w| matches!(w.to_lowercase().as_str(), "by" | "due" | "before"))
 }
-
-// ============================================================================
-// MAIN PARSER
-// ============================================================================
-
-pub struct RuleParser;
 
 impl RuleParser {
     pub fn try_parse(input: &str) -> Option<ParsedItem> {
