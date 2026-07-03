@@ -61,9 +61,93 @@ pub struct Task {
     pub completed: bool,
     pub item_order: Option<i64>,
     pub scheduled_at: Option<DateTime<Utc>>,
+    pub deadline: Option<DateTime<Utc>>,
+    pub duration_minutes: Option<i32>,
     pub priority: i32,
     pub tags: Option<String>,
     pub task_category: Option<String>,
+}
+
+const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category";
+
+pub fn classify_task(description: &str) -> &'static str {
+    let lower = description.to_lowercase();
+
+    if lower.contains("leetcode")
+        || lower.contains("project")
+        || lower.contains("code")
+        || lower.contains("implement")
+        || lower.contains("study")
+        || lower.contains("homework")
+    {
+        return "deepwork";
+    }
+
+    if lower.contains("schedule") || lower.contains("call") || lower.contains("quick") {
+        return "admin";
+    }
+
+    if lower.contains("read")
+        || lower.contains("watch")
+        || lower.contains("learn")
+        || lower.contains("review")
+    {
+        return "learning";
+    }
+
+    "general"
+}
+
+pub fn default_duration_for_category(category: &str) -> i32 {
+    match category {
+        "deepwork" => 90,
+        "admin" => 30,
+        "learning" => 60,
+        _ => 60,
+    }
+}
+
+/// (title, scheduled_at, priority, tags, deadline, duration_minutes)
+pub type ExtractedTaskFields = (
+    String,
+    Option<DateTime<Utc>>,
+    i32,
+    Vec<String>,
+    Option<DateTime<Utc>>,
+    Option<i32>,
+);
+
+/// Extract the fields needed to insert a task from a parsed NLP result. Shared
+/// between `App::add_task` (TUI/CLI path) and the daemon's fast-add path so the
+/// two never drift on priority mapping or Task/Event handling.
+pub fn extract_task_fields(item: ParsedItem) -> ExtractedTaskFields {
+    match item {
+        ParsedItem::Task(nlp_task) => {
+            let priority = match nlp_task.priority {
+                Priority::Urgent => 3,
+                Priority::High => 2,
+                Priority::Medium => 1,
+                Priority::Low => 0,
+            };
+
+            (
+                nlp_task.title,
+                nlp_task.due_date,
+                priority,
+                nlp_task.tags,
+                nlp_task.deadline,
+                nlp_task.duration_minutes,
+            )
+        }
+        ParsedItem::Event(event) => (
+            event.title,
+            Some(event.start_time),
+            1,
+            event.tags,
+            None,
+            None,
+        ),
+    }
 }
 
 #[derive(Debug)]
@@ -280,19 +364,14 @@ impl App {
             .unwrap()
             .and_utc();
 
-        let tasks = sqlx::query_as::<_, Task>(
-            r#"
-            SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category
-            FROM tasks
-            WHERE scheduled_at >= ? AND scheduled_at < ?
-            AND completed = 0
-            ORDER BY scheduled_at
-            "#
-        )
-        .bind(start)
-        .bind(end)
-        .fetch_all(&self.db_pool)
-        .await?;
+        let query = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0 ORDER BY scheduled_at"
+        );
+        let tasks = sqlx::query_as::<_, Task>(&query)
+            .bind(start)
+            .bind(end)
+            .fetch_all(&self.db_pool)
+            .await?;
 
         Ok(tasks
             .iter()
@@ -333,34 +412,6 @@ impl App {
         let _ = self.load_tasks().await;
     }
 
-    pub fn classify_task(&self, description: &str) -> &str {
-        let lower = description.to_lowercase();
-
-        if lower.contains("leetcode")
-            || lower.contains("project")
-            || lower.contains("code")
-            || lower.contains("implement")
-            || lower.contains("study")
-            || lower.contains("homework")
-        {
-            return "deepwork";
-        }
-
-        if lower.contains("schedule") || lower.contains("call") || lower.contains("quick") {
-            return "admin";
-        }
-
-        if lower.contains("read")
-            || lower.contains("watch")
-            || lower.contains("learn")
-            || lower.contains("review")
-        {
-            return "learning";
-        }
-
-        "general"
-    }
-
     pub async fn build() -> Result<Self, sqlx::Error> {
         if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
             Sqlite::create_database(DB_URL).await?;
@@ -385,11 +436,10 @@ impl App {
     }
 
     pub async fn load_tasks(&mut self) -> Result<(), sqlx::Error> {
-        self.tasks = sqlx::query_as::<_, Task>(
-            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks ORDER BY item_order ASC",
-        )
-        .fetch_all(&self.db_pool)
-        .await?;
+        let query = format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY item_order ASC");
+        self.tasks = sqlx::query_as::<_, Task>(&query)
+            .fetch_all(&self.db_pool)
+            .await?;
 
         if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len().saturating_sub(1);
@@ -404,19 +454,8 @@ impl App {
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {}", e)))?;
 
-        let (task_title, scheduled_at, priority_value, tags_list) = match parse_result.item {
-            ParsedItem::Task(nlp_task) => {
-                let priority = match nlp_task.priority {
-                    Priority::Urgent => 3,
-                    Priority::High => 2,
-                    Priority::Medium => 1,
-                    Priority::Low => 0,
-                };
-
-                (nlp_task.title, nlp_task.due_date, priority, nlp_task.tags)
-            }
-            ParsedItem::Event(event) => (event.title, Some(event.start_time), 1, event.tags),
-        };
+        let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
+            extract_task_fields(parse_result.item);
 
         let new_order: i64;
         if self.tasks.is_empty() {
@@ -445,10 +484,12 @@ impl App {
             Some(serde_json::to_string(&tags_list).unwrap_or_default())
         };
 
-        let category = self.classify_task(&task_title).to_string();
+        let category = classify_task(&task_title).to_string();
+        let duration_minutes =
+            duration_minutes.unwrap_or_else(|| default_duration_for_category(&category));
 
         sqlx::query(
-            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, task_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&task_title)
         .bind(false)
@@ -457,6 +498,8 @@ impl App {
         .bind(description)
         .bind(tags_json)
         .bind(scheduled_at)
+        .bind(deadline)
+        .bind(duration_minutes)
         .bind(&category)
         .execute(&self.db_pool)
         .await?;
@@ -556,12 +599,11 @@ impl App {
     }
 
     pub async fn get_task_by_id(&self, id: i64) -> Result<Option<Task>, sqlx::Error> {
-        let task = sqlx::query_as::<_, Task>(
-            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.db_pool)
-        .await?;
+        let query = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?");
+        let task = sqlx::query_as::<_, Task>(&query)
+            .bind(id)
+            .fetch_optional(&self.db_pool)
+            .await?;
 
         Ok(task)
     }
@@ -693,7 +735,7 @@ impl App {
             .selected_cell_date()
             .and_time(self.selected_cell_time())
             .and_utc();
-        let category = self.classify_task(description).to_string();
+        let category = classify_task(description).to_string();
         let new_order = self.tasks.len() as i64;
 
         sqlx::query(
@@ -786,13 +828,14 @@ impl App {
             .unwrap()
             .and_utc();
 
-        let scheduled_tasks = sqlx::query_as::<_, Task>(
-            "SELECT id, description, completed, item_order, scheduled_at, priority, tags, natural_language_input, task_category FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0"
-        )
-        .bind(range_start)
-        .bind(range_end)
-        .fetch_all(&self.db_pool)
-        .await?;
+        let query = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0"
+        );
+        let scheduled_tasks = sqlx::query_as::<_, Task>(&query)
+            .bind(range_start)
+            .bind(range_end)
+            .fetch_all(&self.db_pool)
+            .await?;
 
         let occupied_slots: Vec<(NaiveDate, u32)> = scheduled_tasks
             .iter()
