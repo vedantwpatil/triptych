@@ -28,6 +28,8 @@ struct StructuredOutput {
     datetime: Option<String>,
     tags: Option<Vec<String>>,
     priority: Option<String>,
+    deadline: Option<String>,
+    duration_minutes: Option<i32>,
 }
 
 pub struct OllamaClient {
@@ -87,17 +89,21 @@ CRITICAL TIME PARSING RULES:
 - "12:00 AM" → use 00:00:00 (midnight)
 - Always output datetime in ISO 8601 format with timezone: YYYY-MM-DDTHH:MM:SS+00:00
 
-Extract: type (task/event), title, datetime (ISO 8601 with UTC timezone), tags (array), priority (low/medium/high/urgent).
+Extract: type (task/event), title, datetime (ISO 8601 with UTC timezone), tags (array), priority (low/medium/high/urgent), deadline (ISO 8601 UTC, a hard due date/time distinct from datetime — e.g. "before the end of next month", "by the 15th"), duration_minutes (integer, how long the task itself takes, e.g. "3 hours" -> 180).
+Omit "deadline"/"duration_minutes" (or use null) when the input doesn't mention them.
 
 Examples:
 Input: "Submit report tomorrow at 3pm #work"
-Output: {{"type": "task", "title": "Submit report", "datetime": "{}T15:00:00+00:00", "tags": ["work"], "priority": "medium"}}
+Output: {{"type": "task", "title": "Submit report", "datetime": "{}T15:00:00+00:00", "tags": ["work"], "priority": "medium", "deadline": null, "duration_minutes": null}}
 
 Input: "Meeting at 4:12 PM #important"
-Output: {{"type": "task", "title": "Meeting", "datetime": "{}T16:12:00+00:00", "tags": ["important"], "priority": "medium"}}
+Output: {{"type": "task", "title": "Meeting", "datetime": "{}T16:12:00+00:00", "tags": ["important"], "priority": "medium", "deadline": null, "duration_minutes": null}}
 
 Input: "Call John at 9:30 AM tomorrow"
-Output: {{"type": "task", "title": "Call John", "datetime": "{}T09:30:00+00:00", "tags": [], "priority": "medium"}}
+Output: {{"type": "task", "title": "Call John", "datetime": "{}T09:30:00+00:00", "tags": [], "priority": "medium", "deadline": null, "duration_minutes": null}}
+
+Input: "Finish the proposal before the end of next month, should take 3 hours"
+Output: {{"type": "task", "title": "Finish the proposal", "datetime": null, "tags": [], "priority": "medium", "deadline": "<last day of next month>T23:59:59+00:00", "duration_minutes": 180}}
 
 Now parse: "{}"
 Output (ONLY valid JSON, no explanations):"#,
@@ -123,12 +129,17 @@ Output (ONLY valid JSON, no explanations):"#,
 
         let tags = structured.tags.unwrap_or_default();
 
+        let deadline = structured
+            .deadline
+            .and_then(|dt| chrono::DateTime::parse_from_rfc3339(&dt).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+
         match structured.item_type.as_str() {
             "task" => Ok(ParsedItem::Task(Task {
                 title: structured.title,
                 due_date: datetime,
-                deadline: None,
-                duration_minutes: None,
+                deadline,
+                duration_minutes: structured.duration_minutes,
                 tags,
                 priority,
                 is_scheduled: datetime.is_some(),

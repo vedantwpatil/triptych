@@ -3,9 +3,13 @@ use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use strsim::jaro_winkler;
 use tokio::sync::Mutex;
+
+/// Cache entries older than this are treated as misses, so parsing behavior
+/// (e.g. relative dates like "tomorrow") doesn't go stale across long sessions.
+const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 pub struct NLPParser {
     ollama_client: OllamaClient,
@@ -19,6 +23,12 @@ struct CachedParse {
     strategy: ParseStrategy,
     confidence: f32,
     cached_at: Instant,
+}
+
+impl CachedParse {
+    fn is_expired(&self) -> bool {
+        self.cached_at.elapsed() > CACHE_TTL
+    }
 }
 
 impl NLPParser {
@@ -43,12 +53,12 @@ impl NLPParser {
         // Layer 0: Check exact cache match first (hold lock briefly)
         let cache_hit = {
             let mut cache = self.cache.lock().await;
-            cache.get(input).cloned() // Clone while lock is held
+            cache.get(input).cloned().filter(|c| !c.is_expired())
         };
 
         if let Some(cached) = cache_hit {
             let elapsed = start.elapsed().as_millis() as u64;
-            eprintln!("⚡ Exact cache hit!"); // Changed to eprintln!
+            eprintln!("⚡ Exact cache hit (originally {:?})!", cached.strategy);
             return Ok(ParseResult {
                 item: cached.item,
                 strategy: ParseStrategy::Cached,
@@ -67,6 +77,9 @@ impl NLPParser {
                 None
             } else {
                 cache.iter().find_map(|(cached_input, cached_parse)| {
+                    if cached_parse.is_expired() {
+                        return None;
+                    }
                     let similarity = jaro_winkler(input, cached_input);
                     if similarity > similarity_threshold {
                         Some((cached_input.clone(), cached_parse.clone(), similarity))
@@ -94,19 +107,24 @@ impl NLPParser {
             });
         }
 
-        // Layer 1: Try regex fast path
-        if let Some(item) = RuleParser::try_parse(input) {
-            let elapsed = start.elapsed().as_millis() as u64;
+        // Layer 1: Try regex fast path. If it resolves everything (including any
+        // deadline intent), return immediately. Otherwise keep it as a fallback
+        // and still try Ollama, so a phrase like "before the end of next month"
+        // isn't silently accepted with its deadline dropped.
+        let rule_fallback = RuleParser::try_parse(input);
+        if let Some(item) = &rule_fallback {
+            let resolved_deadline = matches!(item, ParsedItem::Task(t) if t.deadline.is_some());
+            if !crate::nlp::rules::has_unresolved_deadline_intent(input, resolved_deadline) {
+                let elapsed = start.elapsed().as_millis() as u64;
+                let item = item.clone();
 
-            let result = ParseResult {
-                item: item.clone(),
-                strategy: ParseStrategy::Regex,
-                confidence: 0.95,
-                parse_time_ms: elapsed,
-            };
+                let result = ParseResult {
+                    item: item.clone(),
+                    strategy: ParseStrategy::Regex,
+                    confidence: 0.95,
+                    parse_time_ms: elapsed,
+                };
 
-            // Cache result
-            {
                 let mut cache = self.cache.lock().await;
                 cache.put(
                     input.to_string(),
@@ -117,12 +135,14 @@ impl NLPParser {
                         cached_at: Instant::now(),
                     },
                 );
-            }
+                drop(cache);
 
-            return Ok(result);
+                return Ok(result);
+            }
         }
 
-        // Layer 2: Try Ollama for complex parsing
+        // Layer 2: Try Ollama for complex parsing (including deadline phrases the
+        // regex fast path couldn't resolve)
         if self.ollama_available {
             match self.ollama_client.parse(input).await {
                 Ok(item) => {
@@ -155,6 +175,19 @@ impl NLPParser {
                     eprintln!("Ollama parsing failed: {}. Falling back.", e);
                 }
             }
+        }
+
+        // Layer 2.5: Ollama unavailable/failed but the regex parser did produce
+        // something usable (just without a fully-resolved deadline) - use that
+        // rather than discarding it entirely for the empty Layer 3 fallback.
+        if let Some(item) = rule_fallback {
+            let elapsed = start.elapsed().as_millis() as u64;
+            return Ok(ParseResult {
+                item,
+                strategy: ParseStrategy::Regex,
+                confidence: 0.7,
+                parse_time_ms: elapsed,
+            });
         }
 
         // Layer 3: Fallback
@@ -196,11 +229,6 @@ impl NLPParser {
 
     pub fn is_ollama_available(&self) -> bool {
         self.ollama_available
-    }
-
-    pub async fn cache_stats(&self) -> (usize, usize) {
-        let cache = self.cache.lock().await;
-        (cache.len(), cache.cap().get())
     }
 }
 

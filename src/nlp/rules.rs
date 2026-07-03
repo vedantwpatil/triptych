@@ -44,6 +44,20 @@ enum TemporalContext {
     },
 }
 
+/// True if the input has a deadline-intent word ("by"/"due"/"before") as a
+/// standalone token that `parse_deadline_segment` could not resolve into an
+/// actual deadline (e.g. "before the end of next month"). Used by the parser
+/// to decide whether to fall through to Ollama instead of silently dropping
+/// the user's intended deadline.
+pub fn has_unresolved_deadline_intent(input: &str, resolved_deadline: bool) -> bool {
+    if resolved_deadline {
+        return false;
+    }
+    input
+        .split_whitespace()
+        .any(|w| matches!(w.to_lowercase().as_str(), "by" | "due" | "before"))
+}
+
 // ============================================================================
 // MAIN PARSER
 // ============================================================================
@@ -203,13 +217,11 @@ fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
                 }
             };
 
-            let end_of_day = target_date
-                .and_hms_opt(23, 59, 59)
-                .unwrap()
-                .and_local_timezone(Local)
-                .unwrap();
+            let end_of_day = target_date.and_hms_opt(23, 59, 59).unwrap();
 
-            Ok(Segment::Deadline(end_of_day.with_timezone(&Utc)))
+            Ok(Segment::Deadline(crate::app::resolve_local_datetime(
+                end_of_day,
+            )))
         },
     )(input)
 }
