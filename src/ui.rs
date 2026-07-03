@@ -259,6 +259,7 @@ struct CalendarGrid {
     time_slots: Vec<TimeSlot>,
     schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
     scheduled_tasks: Vec<(NaiveDate, NaiveTime, String, i32)>,
+    task_allocations: Vec<(NaiveDate, NaiveTime, String, i32, i32)>,
 }
 
 struct TimeSlot {
@@ -290,13 +291,41 @@ fn build_calendar_grid(app: &App) -> CalendarGrid {
     // Use cached data from app
     let schedule_blocks = app.cached_schedule_blocks.clone();
     let scheduled_tasks = app.cached_scheduled_tasks.clone();
+    let task_allocations = app.cached_task_allocations.clone();
 
     CalendarGrid {
         days,
         time_slots,
         schedule_blocks,
         scheduled_tasks,
+        task_allocations,
     }
+}
+
+/// A task showing up in a calendar cell: its description, priority, and whether
+/// it's a manually-scheduled task (false) or a deadline-driven allocation (true).
+fn find_task_display<'a>(
+    grid: &'a CalendarGrid,
+    day: NaiveDate,
+    slot_time: &NaiveTime,
+) -> Option<(&'a str, i32, bool)> {
+    if let Some((_, _, desc, priority)) = grid
+        .scheduled_tasks
+        .iter()
+        .find(|(d, t, _, _)| *d == day && t.hour() == slot_time.hour())
+    {
+        return Some((desc.as_str(), *priority, false));
+    }
+
+    if let Some((_, _, desc, _, priority)) = grid
+        .task_allocations
+        .iter()
+        .find(|(d, t, _, _, _)| *d == day && t.hour() == slot_time.hour())
+    {
+        return Some((desc.as_str(), *priority, true));
+    }
+
+    None
 }
 
 fn build_cell_content<'a>(grid: &CalendarGrid, day_idx: usize, slot_time: &NaiveTime) -> Cell<'a> {
@@ -317,35 +346,33 @@ fn build_cell_content<'a>(grid: &CalendarGrid, day_idx: usize, slot_time: &Naive
         }
     });
 
-    // Check if there's a scheduled task at this time
-    let task = grid
-        .scheduled_tasks
-        .iter()
-        .find(|(d, t, _, _)| *d == day && t.hour() == slot_time.hour());
+    let task = find_task_display(grid, day, slot_time);
 
     match (schedule_block, task) {
-        (Some((_, block)), Some((_, _, task_desc, priority))) => {
+        (Some((_, block)), Some((task_desc, priority, is_allocation))) => {
             // Task scheduled in this block - high priority overrides block color
-            let style = if *priority >= 3 {
+            let style = if priority >= 3 {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
                 get_block_style(&block.block_type).add_modifier(Modifier::BOLD)
             };
-            Cell::from(format!("● {}", truncate_text(task_desc, 12))).style(style)
+            let symbol = if is_allocation { "◆" } else { "●" };
+            Cell::from(format!("{} {}", symbol, truncate_text(task_desc, 12))).style(style)
         }
         (Some((_, block)), None) => {
             // Empty schedule block
             let style = get_block_style(&block.block_type);
             Cell::from(format!("[{}]", block.block_type)).style(style)
         }
-        (None, Some((_, _, task_desc, priority))) => {
+        (None, Some((task_desc, priority, is_allocation))) => {
             // Task without schedule block - use priority color
             let color = match priority {
                 3 => Color::Red,
                 2 => Color::Yellow,
                 _ => Color::White,
             };
-            Cell::from(format!("• {}", truncate_text(task_desc, 12)))
+            let symbol = if is_allocation { "◇" } else { "•" };
+            Cell::from(format!("{} {}", symbol, truncate_text(task_desc, 12)))
                 .style(Style::default().fg(color))
         }
         (None, None) => {
@@ -396,20 +423,19 @@ fn get_cell_text(grid: &CalendarGrid, day_idx: usize, slot_time: &NaiveTime) -> 
         }
     });
 
-    let task = grid
-        .scheduled_tasks
-        .iter()
-        .find(|(d, t, _, _)| *d == day && t.hour() == slot_time.hour());
+    let task = find_task_display(grid, day, slot_time);
 
     match (schedule_block, task) {
-        (Some((_, _block)), Some((_, _, task_desc, _))) => {
-            format!("● {}", truncate_text(task_desc, 12))
+        (Some((_, _block)), Some((task_desc, _, is_allocation))) => {
+            let symbol = if is_allocation { "◆" } else { "●" };
+            format!("{} {}", symbol, truncate_text(task_desc, 12))
         }
         (Some((_, block)), None) => {
             format!("[{}]", block.block_type)
         }
-        (None, Some((_, _, task_desc, _))) => {
-            format!("• {}", truncate_text(task_desc, 12))
+        (None, Some((task_desc, _, is_allocation))) => {
+            let symbol = if is_allocation { "◇" } else { "•" };
+            format!("{} {}", symbol, truncate_text(task_desc, 12))
         }
         (None, None) => String::new(),
     }
