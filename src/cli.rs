@@ -38,6 +38,19 @@ pub enum Commands {
     /// Schedule management commands
     #[command(subcommand)]
     Schedule(ScheduleCommands),
+
+    /// Email commands
+    #[command(subcommand)]
+    Email(EmailCommands),
+}
+
+#[derive(Subcommand)]
+pub enum EmailCommands {
+    /// One-shot fetch of new mail over IMAP into local storage
+    Sync,
+
+    /// Print recently stored emails
+    List,
 }
 
 #[derive(Subcommand)]

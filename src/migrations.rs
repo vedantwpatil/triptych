@@ -112,6 +112,39 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
+    eprintln!("[Migration] Checking email schema...");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS email_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            message_id TEXT NOT NULL UNIQUE,
+            folder TEXT NOT NULL DEFAULT 'INBOX',
+            from_addr TEXT NOT NULL,
+            from_name TEXT,
+            subject TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            snippet TEXT,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            task_id INTEGER REFERENCES tasks(id),
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    "#,
+    )
+    .execute(pool)
+    .await?;
+    eprintln!("  ✓ Email messages table ready");
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_messages_date ON email_messages(date_utc)")
+        .execute(pool)
+        .await?;
+
+    eprintln!("[Migration] Email schema ready ✓");
+    Ok(())
+}
+
 async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
     let count: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = ?",

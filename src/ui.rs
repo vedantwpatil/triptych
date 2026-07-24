@@ -14,6 +14,73 @@ pub fn ui(f: &mut Frame, app: &App) {
     match app.view_mode {
         ViewMode::TodoList => render_todo_view(f, app),
         ViewMode::Calendar => render_calendar_view(f, app),
+        ViewMode::Email => render_email_view(f, app),
+    }
+}
+
+fn render_email_view(f: &mut Frame, app: &App) {
+    f.render_widget(Clear, f.area());
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
+        .split(f.area());
+
+    let items: Vec<ListItem> = app
+        .emails
+        .iter()
+        .map(|email| {
+            let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
+            let date_text = email.date_utc.format("%m/%d %H:%M").to_string();
+
+            let mut spans = vec![
+                Span::styled(format!("[{}] ", date_text), Style::default().fg(Color::Green)),
+                Span::styled(format!("{:20} ", from), Style::default().fg(Color::Cyan)),
+            ];
+
+            let subject_style = if email.is_read {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(email.subject.clone(), subject_style));
+
+            if email.task_id.is_some() {
+                spans.push(Span::styled(" [task]", Style::default().fg(Color::Blue)));
+            }
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    if !app.emails.is_empty() {
+        state.select(Some(app.selected_email));
+    }
+
+    let email_list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(
+            "Email (m/Esc: back, j/k: move, Enter: convert to task, r: mark read)",
+        ))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    f.render_stateful_widget(email_list, chunks[0], &mut state);
+
+    if let Some((msg, instant)) = &app.status_message
+        && instant.elapsed() < std::time::Duration::from_secs(3)
+    {
+        let status = Paragraph::new(msg.as_str())
+            .style(Style::default().fg(Color::Green))
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(status, chunks[1]);
     }
 }
 

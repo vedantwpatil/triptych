@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod daemon;
+mod email;
 mod nlp;
 mod sync;
 mod ui;
@@ -10,7 +11,8 @@ use crate::ui::ui;
 mod migrations;
 use app::App;
 use clap::Parser;
-use cli::{Cli, Commands, ScheduleCommands};
+use cli::{Cli, Commands, EmailCommands, ScheduleCommands};
+use email::{EmailConfig, ImapMailSource, MailSource, message, store};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode},
     execute,
@@ -314,6 +316,64 @@ async fn handle_cli_command(
             },
         },
 
+        Commands::Email(email_cmd) => match email_cmd {
+            EmailCommands::Sync => {
+                let Some(config) = EmailConfig::from_env() else {
+                    eprintln!("✗ Email not configured (set TRIPTYCH_EMAIL_ENABLED=true and IMAP_* in .env)");
+                    std::process::exit(1);
+                };
+
+                let last_uid: Option<i64> =
+                    sqlx::query_scalar("SELECT MAX(uid) FROM email_messages WHERE folder = ?")
+                        .bind(&config.imap_folder)
+                        .fetch_one(&app.db_pool)
+                        .await?;
+
+                let source = ImapMailSource::new(config.clone());
+                match source.fetch_new(last_uid.map(|uid| uid as u32)).await {
+                    Ok(raw_messages) => {
+                        let new_emails: Vec<_> = raw_messages
+                            .into_iter()
+                            .filter_map(|(uid, raw)| {
+                                message::parse_raw(uid, &config.imap_folder, &raw).ok()
+                            })
+                            .collect();
+
+                        let count = new_emails.len();
+                        store::insert_new(&app.db_pool, &new_emails)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        println!("✓ Synced {} new email(s)", count);
+                    }
+                    Err(e) => {
+                        eprintln!("✗ Sync failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            EmailCommands::List => {
+                let emails = store::get_recent(&app.db_pool, 50)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if emails.is_empty() {
+                    println!("📭 No emails yet! Sync with: triptych email sync");
+                } else {
+                    for email in &emails {
+                        let status = if email.is_read { " " } else { "*" };
+                        let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
+                        println!(
+                            "  {} [{}] {:20} {} (ID: {})",
+                            status,
+                            email.date_utc.format("%m/%d %H:%M"),
+                            from,
+                            email.subject,
+                            email.id
+                        );
+                    }
+                }
+            }
+        },
+
         _ => unreachable!("Daemon commands handled earlier"),
     }
 
@@ -351,6 +411,7 @@ where
                                     ViewMode::TodoList => match key.code {
                                         KeyCode::Char('q') => return Ok(()),
                                         KeyCode::Char('c') => { app.toggle_to_calendar().await; }
+                                        KeyCode::Char('m') => { app.toggle_to_email().await; }
                                         KeyCode::Char('a') => {
                                             app.input_mode = InputMode::Editing;
                                             app.input_buffer.clear();
@@ -547,6 +608,32 @@ where
                                             }
                                             _ => {}
                                         },
+                                    },
+                                    ViewMode::Email => match key.code {
+                                        KeyCode::Char('q') => return Ok(()),
+                                        KeyCode::Char('m') | KeyCode::Esc => {
+                                            app.toggle_to_todo().await;
+                                        }
+                                        KeyCode::Char('j') | KeyCode::Down
+                                            if !app.emails.is_empty()
+                                                && app.selected_email < app.emails.len() - 1 =>
+                                        {
+                                            app.selected_email += 1;
+                                        }
+                                        KeyCode::Char('k') | KeyCode::Up => {
+                                            app.selected_email = app.selected_email.saturating_sub(1);
+                                        }
+                                        KeyCode::Enter => {
+                                            if let Err(e) = app.convert_selected_email_to_task().await {
+                                                app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                            }
+                                        }
+                                        KeyCode::Char('r') => {
+                                            if let Err(e) = app.mark_selected_email_read().await {
+                                                app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                            }
+                                        }
+                                        _ => {}
                                     },
                                 }
                             }

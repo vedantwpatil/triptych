@@ -40,6 +40,7 @@ const DB_URL: &str = "sqlite:todo.db";
 pub enum ViewMode {
     TodoList,
     Calendar,
+    Email,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -338,6 +339,8 @@ pub struct App {
     pub held_task: Option<i64>,
     /// Task whose deadline is being edited via `CalendarInputMode::DeadlineInput`.
     pub deadline_edit_task_id: Option<i64>,
+    pub emails: Vec<crate::email::EmailMessage>,
+    pub selected_email: usize,
 }
 
 /// A task occupying a calendar cell, resolved from the current week's cached data.
@@ -417,6 +420,8 @@ impl App {
             status_message: None,
             held_task: None,
             deadline_edit_task_id: None,
+            emails: Vec::new(),
+            selected_email: 0,
         }
     }
 
@@ -556,6 +561,59 @@ impl App {
         self.view_mode = ViewMode::TodoList;
         self.held_task = None;
         let _ = self.load_tasks().await;
+    }
+
+    pub async fn toggle_to_email(&mut self) {
+        self.view_mode = ViewMode::Email;
+        let _ = self.refresh_emails().await;
+    }
+
+    pub async fn refresh_emails(&mut self) -> Result<(), sqlx::Error> {
+        self.emails = crate::email::store::get_recent(&self.db_pool, 100)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+        if self.selected_email >= self.emails.len() {
+            self.selected_email = self.emails.len().saturating_sub(1);
+        }
+        Ok(())
+    }
+
+    pub async fn mark_selected_email_read(&mut self) -> Result<(), sqlx::Error> {
+        let Some(email) = self.emails.get(self.selected_email) else {
+            return Ok(());
+        };
+        let email_id = email.id;
+
+        crate::email::store::mark_read(&self.db_pool, email_id)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+        self.refresh_emails().await
+    }
+
+    pub async fn convert_selected_email_to_task(&mut self) -> Result<(), sqlx::Error> {
+        let Some(email) = self.emails.get(self.selected_email) else {
+            return Ok(());
+        };
+        let email_id = email.id;
+        let subject = email.subject.clone();
+
+        self.add_task(&subject).await?;
+        let task_id = self.tasks.get(self.selected).map(|t| t.id);
+
+        if let Some(task_id) = task_id {
+            crate::email::store::link_task(&self.db_pool, email_id, task_id)
+                .await
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        }
+
+        crate::email::store::mark_read(&self.db_pool, email_id)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+        self.status_message = Some(("Email converted to task".to_string(), std::time::Instant::now()));
+        self.refresh_emails().await
     }
 
     pub async fn build() -> Result<Self, sqlx::Error> {

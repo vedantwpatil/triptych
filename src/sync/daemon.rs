@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use super::config::SyncConfig;
-use super::{cache, calendar, ollama};
+use super::{cache, calendar, mail, ollama};
 
 /// Handle for managing the background sync daemon
 pub struct SyncDaemon {
@@ -54,6 +54,16 @@ impl SyncDaemon {
 
             tasks.push(tokio::spawn(async move {
                 calendar::calendar_sync_worker(db_clone, shutdown_rx).await
+            }));
+        }
+
+        // Mail sync (IMAP polling)
+        if config.mail_sync_enabled {
+            let shutdown_rx = shutdown_tx.subscribe();
+            let db_clone = db.clone();
+
+            tasks.push(tokio::spawn(async move {
+                mail::mail_sync_worker(db_clone, shutdown_rx).await
             }));
         }
 
