@@ -231,6 +231,7 @@ pub enum CalendarInputMode {
     BlockForm,
     TaskPicker,
     TaskInput,
+    DeadlineInput,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -328,9 +329,48 @@ pub struct App {
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
-    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, String, i32)>,
-    pub cached_task_allocations: Vec<(NaiveDate, NaiveTime, String, i32, i32)>,
+    /// (date, time, task_id, description, priority)
+    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, i64, String, i32)>,
+    /// (date, time, task_id, description, allocated_minutes, priority)
+    pub cached_task_allocations: Vec<(NaiveDate, NaiveTime, i64, String, i32, i32)>,
     pub status_message: Option<(String, std::time::Instant)>,
+    /// Task picked up from the calendar with `m`, awaiting a drop cell.
+    pub held_task: Option<i64>,
+    /// Task whose deadline is being edited via `CalendarInputMode::DeadlineInput`.
+    pub deadline_edit_task_id: Option<i64>,
+}
+
+/// A task occupying a calendar cell, resolved from the current week's cached data.
+pub struct CellTask {
+    pub id: i64,
+    /// True if this is a deadline-driven allocation rather than a manually
+    /// scheduled task (see `reallocate_all_tasks`).
+    pub is_allocation: bool,
+}
+
+/// Pure lookup backing `App::task_at_cell` - kept free of `&self` so it's
+/// testable without spinning up a DB pool or NLP parser.
+fn find_cell_task(
+    scheduled_tasks: &[(NaiveDate, NaiveTime, i64, String, i32)],
+    task_allocations: &[(NaiveDate, NaiveTime, i64, String, i32, i32)],
+    day: NaiveDate,
+    hour: u32,
+) -> Option<CellTask> {
+    if let Some((_, _, id, ..)) = scheduled_tasks.iter().find(|(d, t, ..)| *d == day && t.hour() == hour) {
+        return Some(CellTask {
+            id: *id,
+            is_allocation: false,
+        });
+    }
+
+    if let Some((_, _, id, ..)) = task_allocations.iter().find(|(d, t, ..)| *d == day && t.hour() == hour) {
+        return Some(CellTask {
+            id: *id,
+            is_allocation: true,
+        });
+    }
+
+    None
 }
 
 pub(crate) fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
@@ -375,6 +415,8 @@ impl App {
             cached_scheduled_tasks: Vec::new(),
             cached_task_allocations: Vec::new(),
             status_message: None,
+            held_task: None,
+            deadline_edit_task_id: None,
         }
     }
 
@@ -405,13 +447,13 @@ impl App {
     async fn get_week_allocations_internal(
         &self,
         days: &[NaiveDate],
-    ) -> Result<Vec<(NaiveDate, NaiveTime, String, i32, i32)>, sqlx::Error> {
+    ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32, i32)>, sqlx::Error> {
         let start = days[0].to_string();
         let end = days[days.len() - 1].to_string();
 
-        let rows: Vec<(String, String, String, i32, i32)> = sqlx::query_as(
+        let rows: Vec<(String, String, i64, String, i32, i32)> = sqlx::query_as(
             r#"
-            SELECT a.block_date, a.block_start_time, t.description, a.allocated_minutes, t.priority
+            SELECT a.block_date, a.block_start_time, t.id, t.description, a.allocated_minutes, t.priority
             FROM task_block_allocations a
             JOIN tasks t ON a.task_id = t.id
             WHERE a.block_date BETWEEN ? AND ? AND t.completed = 0
@@ -425,10 +467,10 @@ impl App {
 
         Ok(rows
             .into_iter()
-            .filter_map(|(date_str, time_str, desc, minutes, priority)| {
+            .filter_map(|(date_str, time_str, task_id, desc, minutes, priority)| {
                 let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").ok()?;
                 let time = parse_time_string(&time_str)?;
-                Some((date, time, desc, minutes, priority))
+                Some((date, time, task_id, desc, minutes, priority))
             })
             .collect())
     }
@@ -459,7 +501,7 @@ impl App {
     async fn get_scheduled_tasks_internal(
         &self,
         days: &[NaiveDate],
-    ) -> Result<Vec<(NaiveDate, NaiveTime, String, i32)>, sqlx::Error> {
+    ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32)>, sqlx::Error> {
         let start = days[0].and_hms_opt(0, 0, 0).unwrap().and_utc();
         let end = days[days.len() - 1]
             .and_hms_opt(23, 59, 59)
@@ -482,6 +524,7 @@ impl App {
                     (
                         dt.date_naive(),
                         dt.time(),
+                        t.id,
                         t.description.clone(),
                         t.priority,
                     )
@@ -511,6 +554,7 @@ impl App {
 
     pub async fn toggle_to_todo(&mut self) {
         self.view_mode = ViewMode::TodoList;
+        self.held_task = None;
         let _ = self.load_tasks().await;
     }
 
@@ -757,6 +801,196 @@ impl App {
     pub fn selected_cell_time(&self) -> NaiveTime {
         let hour = 7 + self.selected_time_slot as u32;
         NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
+    }
+
+    /// The task (if any) occupying a given day/hour, from the cached week data.
+    /// Manually-scheduled tasks take precedence over deadline-driven allocations,
+    /// matching what ui.rs renders for that cell.
+    pub fn task_at_cell(&self, day: NaiveDate, hour: u32) -> Option<CellTask> {
+        find_cell_task(&self.cached_scheduled_tasks, &self.cached_task_allocations, day, hour)
+    }
+
+    fn selected_cell_task(&self) -> Option<CellTask> {
+        let day = self.selected_cell_date();
+        let hour = self.selected_cell_time().hour();
+        self.task_at_cell(day, hour)
+    }
+
+    /// Pick up the manually-scheduled task at the selected cell so it can be
+    /// dropped on a new cell with `drop_held_task`. Deadline-driven allocations
+    /// aren't draggable this way - move their deadline instead (`e`).
+    pub fn pick_up_task_at_selected_cell(&mut self) {
+        match self.selected_cell_task() {
+            Some(CellTask {
+                id,
+                is_allocation: false,
+                ..
+            }) => {
+                self.held_task = Some(id);
+                self.status_message = Some((
+                    "Task picked up - move cursor, m to drop, Esc to cancel".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            Some(CellTask {
+                is_allocation: true,
+                ..
+            }) => {
+                self.status_message = Some((
+                    "Can't move a deadline allocation directly - edit its deadline with 'e'"
+                        .to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            None => {
+                self.status_message =
+                    Some(("No scheduled task here".to_string(), std::time::Instant::now()));
+            }
+        }
+    }
+
+    /// Drop the held task (see `pick_up_task_at_selected_cell`) onto the selected cell.
+    pub async fn drop_held_task(&mut self) -> Result<(), sqlx::Error> {
+        let Some(task_id) = self.held_task.take() else {
+            return Ok(());
+        };
+
+        let datetime = self
+            .selected_cell_date()
+            .and_time(self.selected_cell_time())
+            .and_utc();
+
+        sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
+            .bind(datetime)
+            .bind(task_id)
+            .execute(&self.db_pool)
+            .await?;
+
+        self.load_tasks().await?;
+        self.refresh_calendar_data().await;
+        self.status_message = Some(("Task moved".to_string(), std::time::Instant::now()));
+        Ok(())
+    }
+
+    /// Cancel an in-progress task move without changing its schedule.
+    pub fn cancel_held_task(&mut self) {
+        if self.held_task.take().is_some() {
+            self.status_message =
+                Some(("Move cancelled".to_string(), std::time::Instant::now()));
+        }
+    }
+
+    /// Clear the manually-set schedule of the task at the selected cell, returning
+    /// it to the unscheduled pool. Deadline-driven allocations are left alone -
+    /// they're recomputed by `reallocate_all_tasks`, not directly unscheduled.
+    pub async fn unschedule_task_at_selected_cell(&mut self) -> Result<(), sqlx::Error> {
+        match self.selected_cell_task() {
+            Some(CellTask {
+                id,
+                is_allocation: false,
+                ..
+            }) => {
+                sqlx::query("UPDATE tasks SET scheduled_at = NULL WHERE id = ?")
+                    .bind(id)
+                    .execute(&self.db_pool)
+                    .await?;
+                self.load_tasks().await?;
+                self.refresh_calendar_data().await;
+                self.status_message =
+                    Some(("Task unscheduled".to_string(), std::time::Instant::now()));
+            }
+            Some(CellTask {
+                is_allocation: true,
+                ..
+            }) => {
+                self.status_message = Some((
+                    "This is a deadline allocation, not a manual schedule".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+            None => {
+                self.status_message =
+                    Some(("No scheduled task here".to_string(), std::time::Instant::now()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Begin editing the deadline of the task at the selected cell (works for
+    /// both manually-scheduled tasks and deadline allocations).
+    pub fn start_deadline_edit_at_selected_cell(&mut self) {
+        match self.selected_cell_task() {
+            Some(CellTask { id, .. }) => {
+                self.deadline_edit_task_id = Some(id);
+                self.input_buffer.clear();
+                self.calendar_input_mode = CalendarInputMode::DeadlineInput;
+            }
+            None => {
+                self.status_message = Some((
+                    "No task here to set a deadline for".to_string(),
+                    std::time::Instant::now(),
+                ));
+            }
+        }
+    }
+
+    /// Parse the pending deadline-edit input (e.g. "friday", "tomorrow") and
+    /// apply it to the target task, then re-run allocation so the calendar
+    /// reflects the new deadline immediately. Reuses the existing "by <word>"
+    /// deadline grammar rather than adding a second date parser.
+    pub async fn submit_deadline_edit(&mut self) -> Result<(), sqlx::Error> {
+        let Some(task_id) = self.deadline_edit_task_id.take() else {
+            self.calendar_input_mode = CalendarInputMode::Navigate;
+            return Ok(());
+        };
+
+        let text = self.input_buffer.trim().to_string();
+        self.input_buffer.clear();
+        self.calendar_input_mode = CalendarInputMode::Navigate;
+
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let extract_deadline = |item: ParsedItem| match item {
+            ParsedItem::Task(t) => t.deadline,
+            ParsedItem::Event(_) => None,
+        };
+
+        let mut deadline = self
+            .nlp_parser
+            .parse(&format!("by {}", text))
+            .await
+            .ok()
+            .and_then(|r| extract_deadline(r.item));
+
+        if deadline.is_none() {
+            deadline = self
+                .nlp_parser
+                .parse(&text)
+                .await
+                .ok()
+                .and_then(|r| extract_deadline(r.item));
+        }
+
+        let Some(deadline) = deadline else {
+            self.status_message = Some((
+                format!("Couldn't parse deadline '{}' - try 'tomorrow' or a weekday", text),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        };
+
+        sqlx::query("UPDATE tasks SET deadline = ? WHERE id = ?")
+            .bind(deadline)
+            .bind(task_id)
+            .execute(&self.db_pool)
+            .await?;
+
+        self.load_tasks().await?;
+        self.on_task_changed().await?;
+        self.status_message = Some(("Deadline updated".to_string(), std::time::Instant::now()));
+        Ok(())
     }
 
     // Schedule block creation
@@ -1549,5 +1783,234 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_task_picks_deepwork_for_coding_keywords() {
+        assert_eq!(classify_task("implement the new parser"), "deepwork");
+        assert_eq!(classify_task("leetcode grind"), "deepwork");
+    }
+
+    #[test]
+    fn classify_task_picks_admin_for_scheduling_keywords() {
+        assert_eq!(classify_task("schedule dentist call"), "admin");
+    }
+
+    #[test]
+    fn classify_task_picks_learning_for_reading_keywords() {
+        assert_eq!(classify_task("read chapter 3"), "learning");
+    }
+
+    #[test]
+    fn classify_task_falls_back_to_general() {
+        assert_eq!(classify_task("buy groceries"), "general");
+    }
+
+    #[test]
+    fn default_duration_matches_category() {
+        assert_eq!(default_duration_for_category("deepwork"), 90);
+        assert_eq!(default_duration_for_category("admin"), 30);
+        assert_eq!(default_duration_for_category("learning"), 60);
+        assert_eq!(default_duration_for_category("general"), 60);
+    }
+
+    #[test]
+    fn resolve_local_datetime_roundtrips_a_normal_time() {
+        let naive = NaiveDate::from_ymd_opt(2026, 3, 10)
+            .unwrap()
+            .and_hms_opt(9, 30, 0)
+            .unwrap();
+        let resolved = resolve_local_datetime(naive);
+        let local = resolved.with_timezone(&chrono::Local);
+        assert_eq!(local.naive_local(), naive);
+    }
+
+    #[test]
+    fn parse_days_expands_special_groups() {
+        assert_eq!(App::parse_days("weekdays").unwrap(), vec![0, 1, 2, 3, 4]);
+        assert_eq!(App::parse_days("weekends").unwrap(), vec![5, 6]);
+        assert_eq!(
+            App::parse_days("everyday").unwrap(),
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn parse_days_expands_compound_names() {
+        assert_eq!(App::parse_days("monday_wednesday").unwrap(), vec![0, 2]);
+    }
+
+    #[test]
+    fn parse_days_rejects_unknown_names() {
+        assert!(App::parse_days("someday").is_err());
+    }
+
+    #[test]
+    fn time_to_minutes_parses_hh_mm() {
+        assert_eq!(App::time_to_minutes("09:30"), Some(570));
+        assert_eq!(App::time_to_minutes("00:00"), Some(0));
+        assert_eq!(App::time_to_minutes("23:59"), Some(1439));
+    }
+
+    #[test]
+    fn time_to_minutes_rejects_malformed_input() {
+        assert_eq!(App::time_to_minutes("bogus"), None);
+    }
+
+    #[test]
+    fn validate_time_format_accepts_in_range_times() {
+        assert!(App::validate_time_format("09:30").is_ok());
+        assert!(App::validate_time_format("23:59").is_ok());
+    }
+
+    #[test]
+    fn validate_time_format_rejects_out_of_range_times() {
+        assert!(App::validate_time_format("24:00").is_err());
+        assert!(App::validate_time_format("09:60").is_err());
+        assert!(App::validate_time_format("not-a-time").is_err());
+    }
+
+    #[test]
+    fn day_number_to_name_matches_monday_first_numbering() {
+        assert_eq!(App::day_number_to_name(0), "monday");
+        assert_eq!(App::day_number_to_name(6), "sunday");
+    }
+
+    #[test]
+    fn parse_time_string_handles_optional_seconds() {
+        assert_eq!(
+            parse_time_string("09:30"),
+            NaiveTime::from_hms_opt(9, 30, 0)
+        );
+        assert_eq!(
+            parse_time_string("09:30:15"),
+            NaiveTime::from_hms_opt(9, 30, 15)
+        );
+        assert_eq!(parse_time_string("not-a-time"), None);
+    }
+
+    #[test]
+    fn task_at_cell_finds_manual_and_allocated_tasks() {
+        let day = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let other_day = NaiveDate::from_ymd_opt(2026, 3, 11).unwrap();
+        let manual_time = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let alloc_time = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+
+        let scheduled_tasks = vec![(day, manual_time, 1i64, "write report".to_string(), 2i32)];
+        let task_allocations = vec![(day, alloc_time, 2i64, "study rust".to_string(), 90i32, 1i32)];
+
+        let manual = find_cell_task(&scheduled_tasks, &task_allocations, day, 9).expect("manual task at 9am");
+        assert_eq!(manual.id, 1);
+        assert!(!manual.is_allocation);
+
+        let alloc = find_cell_task(&scheduled_tasks, &task_allocations, day, 14).expect("allocation at 2pm");
+        assert_eq!(alloc.id, 2);
+        assert!(alloc.is_allocation);
+
+        assert!(find_cell_task(&scheduled_tasks, &task_allocations, day, 10).is_none());
+        assert!(find_cell_task(&scheduled_tasks, &task_allocations, other_day, 9).is_none());
+    }
+
+    /// A single-connection in-memory DB, fully migrated the same way `App::build`
+    /// migrates the real one, so these tests exercise the real read/write paths
+    /// instead of a hand-rolled stand-in schema.
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("base schema migration");
+        crate::migrations::run_calendar_migration(&pool)
+            .await
+            .expect("calendar schema migration");
+        pool
+    }
+
+    async fn insert_task(pool: &SqlitePool, description: &str) -> i64 {
+        sqlx::query("INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, 0, 1)")
+            .bind(description)
+            .execute(pool)
+            .await
+            .expect("insert task")
+            .last_insert_rowid()
+    }
+
+    /// Round-trips a task through pick-up/drop: the goal of the "move a
+    /// scheduled task in the calendar" half of Task 2. Regression guard for the
+    /// write path (`drop_held_task`, naive-local-as-UTC) and read path
+    /// (`get_scheduled_tasks_internal`) staying on the same convention - if they
+    /// ever drift, the task would land in the wrong cell after a reload.
+    #[tokio::test]
+    async fn drop_held_task_moves_task_to_selected_cell_and_reload_agrees() {
+        let pool = test_pool().await;
+        let task_id = insert_task(&pool, "write report").await;
+
+        let mut app = App::new(pool).await;
+        app.held_task = Some(task_id);
+        app.calendar_week_offset = Some(0);
+        app.selected_day = 2;
+        app.selected_time_slot = 3; // 7 + 3 = 10:00
+
+        app.drop_held_task().await.expect("drop task");
+
+        let target_day = app.selected_cell_date();
+        let cell = app.task_at_cell(target_day, 10).expect("task lands in dropped cell");
+        assert_eq!(cell.id, task_id);
+        assert!(!cell.is_allocation);
+        assert!(app.held_task.is_none());
+    }
+
+    /// Round-trips a task through schedule -> unschedule: it must disappear from
+    /// the calendar cell and reappear in the todolist's unscheduled pool - the
+    /// other half of "reflect in the todolist".
+    #[tokio::test]
+    async fn unschedule_task_clears_cell_and_returns_task_to_unscheduled_pool() {
+        let pool = test_pool().await;
+        let task_id = insert_task(&pool, "study rust").await;
+
+        let mut app = App::new(pool).await;
+        app.calendar_week_offset = Some(0);
+        app.selected_day = 1;
+        app.selected_time_slot = 0; // 7:00
+        app.held_task = Some(task_id);
+        app.drop_held_task().await.expect("schedule task");
+
+        let day = app.selected_cell_date();
+        assert!(app.task_at_cell(day, 7).is_some());
+
+        app.unschedule_task_at_selected_cell().await.expect("unschedule task");
+
+        assert!(app.task_at_cell(day, 7).is_none());
+        assert!(app.unscheduled_tasks().iter().any(|t| t.id == task_id));
+    }
+
+    /// Editing a deadline from the calendar (the "move a deadline" half of
+    /// Task 2) must persist through the same regex parser `add_task` uses, and
+    /// show up on reload - it must not just update the DB row silently.
+    #[tokio::test]
+    async fn submit_deadline_edit_persists_parsed_deadline_and_reloads_task() {
+        let pool = test_pool().await;
+        let task_id = insert_task(&pool, "renew license").await;
+
+        let mut app = App::new(pool).await;
+        app.deadline_edit_task_id = Some(task_id);
+        app.input_buffer = "tomorrow".to_string();
+
+        app.submit_deadline_edit().await.expect("submit deadline edit");
+
+        let task = app.get_task_by_id(task_id).await.expect("query task").expect("task exists");
+        let deadline = task.deadline.expect("deadline parsed and saved");
+
+        let expected_date = chrono::Local::now().naive_local().date() + Duration::days(1);
+        assert_eq!(deadline.with_timezone(&chrono::Local).date_naive(), expected_date);
     }
 }

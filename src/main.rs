@@ -379,7 +379,13 @@ where
                                     ViewMode::Calendar => match app.calendar_input_mode {
                                         CalendarInputMode::Navigate => match key.code {
                                             KeyCode::Char('q') => return Ok(()),
-                                            KeyCode::Char('t') | KeyCode::Esc => { app.toggle_to_todo().await; }
+                                            KeyCode::Char('t') | KeyCode::Esc => {
+                                                if app.held_task.is_some() {
+                                                    app.cancel_held_task();
+                                                } else {
+                                                    app.toggle_to_todo().await;
+                                                }
+                                            }
                                             KeyCode::Char('j') | KeyCode::Down => app.calendar_move_down(),
                                             KeyCode::Char('k') | KeyCode::Up => app.calendar_move_up(),
                                             KeyCode::Char('h') | KeyCode::Left => app.calendar_move_left(),
@@ -397,6 +403,23 @@ where
                                             KeyCode::Char('a') => {
                                                 app.input_buffer.clear();
                                                 app.calendar_input_mode = CalendarInputMode::TaskInput;
+                                            }
+                                            KeyCode::Char('m') => {
+                                                if app.held_task.is_some() {
+                                                    if let Err(e) = app.drop_held_task().await {
+                                                        app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                                    }
+                                                } else {
+                                                    app.pick_up_task_at_selected_cell();
+                                                }
+                                            }
+                                            KeyCode::Char('u') => {
+                                                if let Err(e) = app.unschedule_task_at_selected_cell().await {
+                                                    app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                                }
+                                            }
+                                            KeyCode::Char('e') => {
+                                                app.start_deadline_edit_at_selected_cell();
                                             }
                                             KeyCode::Char('d') => {
                                                 if let Err(e) = app.delete_block_at_selected_cell().await {
@@ -491,6 +514,25 @@ where
                                                     }
                                                 app.input_buffer.clear();
                                                 app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Char(c) => {
+                                                app.input_buffer.push(c);
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.input_buffer.pop();
+                                            }
+                                            _ => {}
+                                        },
+                                        CalendarInputMode::DeadlineInput => match key.code {
+                                            KeyCode::Esc => {
+                                                app.input_buffer.clear();
+                                                app.deadline_edit_task_id = None;
+                                                app.calendar_input_mode = CalendarInputMode::Navigate;
+                                            }
+                                            KeyCode::Enter => {
+                                                if let Err(e) = app.submit_deadline_edit().await {
+                                                    app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+                                                }
                                             }
                                             KeyCode::Char(c) => {
                                                 app.input_buffer.push(c);

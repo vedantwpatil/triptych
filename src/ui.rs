@@ -236,7 +236,14 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
         .chain(std::iter::repeat_n(Constraint::Fill(1), 7))
         .collect::<Vec<_>>();
 
-    let title = "Weekly Calendar (t: todo, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, q: quit)".to_string();
+    // While a task is held (picked up with 'm'), the title swaps to drop
+    // instructions so the pending action is always visible, not just in the
+    // fading status line.
+    let title = if let Some(task_id) = app.held_task {
+        format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel")
+    } else {
+        "Weekly Calendar (t: todo, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, d: delete block, q: quit)".to_string()
+    };
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -250,16 +257,20 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
         CalendarInputMode::BlockForm => render_block_form_popup(f, app),
         CalendarInputMode::TaskPicker => render_task_picker(f, app),
         CalendarInputMode::TaskInput => render_calendar_task_input(f, app),
+        CalendarInputMode::DeadlineInput => render_deadline_input(f, app),
         CalendarInputMode::Navigate => {}
     }
 }
 
-struct CalendarGrid {
+/// Per-frame render view over the app's cached weekly data. Borrows rather than
+/// clones the cached vectors - they're rebuilt on every keystroke's redraw, so a
+/// clone here would copy the whole week's schedule/tasks every frame for no reason.
+struct CalendarGrid<'a> {
     days: Vec<NaiveDate>,
     time_slots: Vec<TimeSlot>,
-    schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
-    scheduled_tasks: Vec<(NaiveDate, NaiveTime, String, i32)>,
-    task_allocations: Vec<(NaiveDate, NaiveTime, String, i32, i32)>,
+    schedule_blocks: &'a [(NaiveDate, ScheduleBlock)],
+    scheduled_tasks: &'a [(NaiveDate, NaiveTime, i64, String, i32)],
+    task_allocations: &'a [(NaiveDate, NaiveTime, i64, String, i32, i32)],
 }
 
 struct TimeSlot {
@@ -267,7 +278,7 @@ struct TimeSlot {
     time_label: String,
 }
 
-fn build_calendar_grid(app: &App) -> CalendarGrid {
+fn build_calendar_grid(app: &App) -> CalendarGrid<'_> {
     // Calculate week start (Monday)
     let today = chrono::Local::now().naive_local().date();
     let week_offset = app.calendar_week_offset.unwrap_or(0);
@@ -288,39 +299,34 @@ fn build_calendar_grid(app: &App) -> CalendarGrid {
         })
         .collect();
 
-    // Use cached data from app
-    let schedule_blocks = app.cached_schedule_blocks.clone();
-    let scheduled_tasks = app.cached_scheduled_tasks.clone();
-    let task_allocations = app.cached_task_allocations.clone();
-
     CalendarGrid {
         days,
         time_slots,
-        schedule_blocks,
-        scheduled_tasks,
-        task_allocations,
+        schedule_blocks: &app.cached_schedule_blocks,
+        scheduled_tasks: &app.cached_scheduled_tasks,
+        task_allocations: &app.cached_task_allocations,
     }
 }
 
 /// A task showing up in a calendar cell: its description, priority, and whether
 /// it's a manually-scheduled task (false) or a deadline-driven allocation (true).
 fn find_task_display<'a>(
-    grid: &'a CalendarGrid,
+    grid: &CalendarGrid<'a>,
     day: NaiveDate,
     slot_time: &NaiveTime,
 ) -> Option<(&'a str, i32, bool)> {
-    if let Some((_, _, desc, priority)) = grid
+    if let Some((_, _, _, desc, priority)) = grid
         .scheduled_tasks
         .iter()
-        .find(|(d, t, _, _)| *d == day && t.hour() == slot_time.hour())
+        .find(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
     {
         return Some((desc.as_str(), *priority, false));
     }
 
-    if let Some((_, _, desc, _, priority)) = grid
+    if let Some((_, _, _, desc, _, priority)) = grid
         .task_allocations
         .iter()
-        .find(|(d, t, _, _, _)| *d == day && t.hour() == slot_time.hour())
+        .find(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
     {
         return Some((desc.as_str(), *priority, true));
     }
@@ -328,7 +334,11 @@ fn find_task_display<'a>(
     None
 }
 
-fn build_cell_content<'a>(grid: &CalendarGrid, day_idx: usize, slot_time: &NaiveTime) -> Cell<'a> {
+fn build_cell_content<'a>(
+    grid: &CalendarGrid<'_>,
+    day_idx: usize,
+    slot_time: &NaiveTime,
+) -> Cell<'a> {
     let day = grid.days[day_idx];
 
     // Parse time strings to NaiveTime for comparison
@@ -399,15 +409,18 @@ fn get_block_style(block_type: &str) -> Style {
     Style::default().fg(color).bg(Color::Reset)
 }
 
+/// Truncate to at most `max_len` characters, appending "...". Counts chars, not
+/// bytes, so it never splits a multi-byte UTF-8 character (unlike byte slicing).
 fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() > max_len {
-        format!("{}...", &text[..max_len - 3])
+    if text.chars().count() > max_len {
+        let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     } else {
         text.to_string()
     }
 }
 
-fn get_cell_text(grid: &CalendarGrid, day_idx: usize, slot_time: &NaiveTime) -> String {
+fn get_cell_text(grid: &CalendarGrid<'_>, day_idx: usize, slot_time: &NaiveTime) -> String {
     let day = grid.days[day_idx];
 
     let schedule_block = grid.schedule_blocks.iter().find(|(d, block)| {
@@ -605,6 +618,28 @@ fn render_calendar_task_input(f: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
+        .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let input_text =
+        Paragraph::new(app.input_buffer.as_str()).style(Style::default().fg(Color::Yellow));
+    f.render_widget(input_text, inner);
+
+    f.set_cursor_position(ratatui::layout::Position {
+        x: inner.x + app.input_buffer.chars().count() as u16,
+        y: inner.y,
+    });
+}
+
+fn render_deadline_input(f: &mut Frame, app: &App) {
+    let area = centered_rect(50, 25, f.area());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("New deadline - day name or 'tomorrow' (Enter: save, Esc: cancel)")
         .style(Style::default().bg(Color::Black));
 
     let inner = block.inner(area);
