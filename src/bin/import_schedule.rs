@@ -7,7 +7,7 @@ async fn main() -> Result<()> {
 
     let pool = SqlitePool::connect(&db_url).await?;
 
-    println!("🔄 Importing schedule template...");
+    println!("▸ Importing schedule template...");
 
     // Clear existing blocks
     sqlx::query("DELETE FROM schedule_blocks")
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
         .execute(&pool).await?;
     }
 
-    println!("✅ Schedule imported successfully!");
+    println!("✓ Schedule imported successfully!");
     println!("   Run 'cargo run' and press 'c' to view calendar");
 
     Ok(())

@@ -571,7 +571,7 @@ impl App {
         if app.nlp_parser.is_ollama_available() {
             println!("✓ NLP parsing ready");
         } else {
-            println!("⚠️  Ollama unavailable - limited parsing");
+            println!("⚠ Ollama unavailable - limited parsing");
         }
 
         Ok(app)

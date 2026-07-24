@@ -18,7 +18,7 @@ use crossterm::{
 };
 use daemon::{DaemonRequest, DaemonResponse};
 use futures::StreamExt;
-use migrations::run_calendar_migration;
+use migrations::{run_calendar_migration, run_email_migration};
 use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
@@ -57,8 +57,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::build().await?;
 
     if let Err(e) = run_calendar_migration(&app.db_pool).await {
-        eprintln!("⚠️  Calendar migration failed: {}", e);
+        eprintln!("⚠ Calendar migration failed: {}", e);
         eprintln!("   Calendar features will be disabled");
+    }
+
+    if let Err(e) = run_email_migration(&app.db_pool).await {
+        eprintln!("⚠ Email migration failed: {}", e);
+        eprintln!("   Email features will be disabled");
     }
 
     // Check if a subcommand was provided
@@ -113,15 +118,15 @@ async fn handle_cli_command(
                         return Ok(());
                     }
                     Ok(DaemonResponse::Error(e)) => {
-                        eprintln!("⚠️  Daemon error: {}", e);
+                        eprintln!("⚠ Daemon error: {}", e);
                         eprintln!("   Falling back to direct mode...");
                     }
                     Err(e) => {
-                        eprintln!("⚠️  Daemon communication error: {}", e);
+                        eprintln!("⚠ Daemon communication error: {}", e);
                         eprintln!("   Falling back to direct mode...");
                     }
                     _ => {
-                        eprintln!("⚠️  Unexpected daemon response");
+                        eprintln!("⚠ Unexpected daemon response");
                         eprintln!("   Falling back to direct mode...");
                     }
                 }
@@ -142,9 +147,9 @@ async fn handle_cli_command(
             match app.get_enhanced_task_list().await {
                 Ok(enhanced_tasks) => {
                     if enhanced_tasks.is_empty() {
-                        println!("📝 No tasks yet! Add one with: triptych add \"Your task\"");
+                        println!("ℹ No tasks yet! Add one with: triptych add \"Your task\"");
                     } else {
-                        println!("📋 Current Tasks:");
+                        println!("▸ Current Tasks:");
                         for enhanced in &enhanced_tasks {
                             let task = &enhanced.task;
                             let status = if task.completed { "✓" } else { "○" };
@@ -238,10 +243,10 @@ async fn handle_cli_command(
         Commands::Clear => match app.clear_completed_tasks().await {
             Ok(count) => {
                 if count == 0 {
-                    println!("🧹 No completed tasks to clear");
+                    println!("✓ No completed tasks to clear");
                 } else {
                     println!(
-                        "🧹 Cleared {} completed task{}",
+                        "✓ Cleared {} completed task{}",
                         count,
                         if count == 1 { "" } else { "s" }
                     );
@@ -279,7 +284,7 @@ async fn handle_cli_command(
             }
             ScheduleCommands::Clear => {
                 let count = app.clear_all_schedule_blocks().await?;
-                println!("🧹 Cleared {} schedule blocks", count);
+                println!("✓ Cleared {} schedule blocks", count);
             }
             ScheduleCommands::Reallocate => match app.reallocate_all_tasks().await {
                 Ok(result) => {
@@ -287,7 +292,7 @@ async fn handle_cli_command(
                         println!("✓ All deadline tasks fit within available blocks");
                     } else {
                         println!(
-                            "⚠️  {} task(s) don't fully fit before their deadline:",
+                            "⚠ {} task(s) don't fully fit before their deadline:",
                             result.conflicts.len()
                         );
                         for conflict in &result.conflicts {

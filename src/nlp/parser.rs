@@ -58,7 +58,7 @@ impl NLPParser {
 
         if let Some(cached) = cache_hit {
             let elapsed = start.elapsed().as_millis() as u64;
-            eprintln!("⚡ Exact cache hit (originally {:?})!", cached.strategy);
+            eprintln!("» Exact cache hit (originally {:?})!", cached.strategy);
             return Ok(ParseResult {
                 item: cached.item,
                 strategy: ParseStrategy::Cached,
@@ -93,7 +93,7 @@ impl NLPParser {
         if let Some((matched_input, cached_parse, similarity)) = fuzzy_match {
             let elapsed = start.elapsed().as_millis() as u64;
             eprintln!(
-                "🔍 Similar pattern found ({:.0}% match): \"{}\"",
+                "≈ Similar pattern found ({:.0}% match): \"{}\"",
                 similarity * 100.0,
                 matched_input
             );
