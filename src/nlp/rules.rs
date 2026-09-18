@@ -12,6 +12,14 @@ use nom::{
     sequence::{pair, preceded, tuple},
 };
 
+/// Converts a `None` from a calendar `Option` (`and_hms_opt`, `with_day`, etc.) that's
+/// provably `Some` by construction (values already in-range) into a nom parse failure
+/// instead of panicking, so a future edit that breaks the invariant fails the parse
+/// rather than crashing the process.
+fn require<T>(opt: Option<T>, input: &str) -> Result<T, nom::Err<nom::error::Error<&str>>> {
+    opt.ok_or_else(|| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+}
+
 // ============================================================================
 // DATA STRUCTURES
 // ============================================================================
@@ -136,18 +144,17 @@ impl RuleParser {
                     location: None,
                     tags,
                 }));
-            } else {
-                // It has a start/due date but no duration, likely a Task
-                return Some(ParsedItem::Task(Task {
-                    title,
-                    due_date: Some(start),
-                    deadline,
-                    duration_minutes: explicit_duration_minutes,
-                    tags,
-                    priority,
-                    is_scheduled: true,
-                }));
             }
+            // It has a start/due date but no duration, likely a Task
+            return Some(ParsedItem::Task(Task {
+                title,
+                due_date: Some(start),
+                deadline,
+                duration_minutes: explicit_duration_minutes,
+                tags,
+                priority,
+                is_scheduled: true,
+            }));
         }
 
         // If no time, it's a Task
@@ -210,15 +217,15 @@ fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
                 _ => {
                     let target_weekday =
                         weekday_from_name(word).ok_or("not a recognized deadline target")?;
-                    let days_ahead = (target_weekday.num_days_from_monday() as i64
-                        - today.weekday().num_days_from_monday() as i64
+                    let days_ahead = (i64::from(target_weekday.num_days_from_monday())
+                        - i64::from(today.weekday().num_days_from_monday())
                         + 7)
                         % 7;
                     today + Duration::days(days_ahead)
                 }
             };
 
-            let end_of_day = target_date.and_hms_opt(23, 59, 59).unwrap();
+            let end_of_day = target_date.and_hms_opt(23, 59, 59).ok_or("invalid time")?;
 
             Ok(Segment::Deadline(crate::app::resolve_local_datetime(
                 end_of_day,
@@ -228,7 +235,7 @@ fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
 }
 
 fn weekday_from_name(name: &str) -> Option<chrono::Weekday> {
-    use chrono::Weekday::*;
+    use chrono::Weekday::{Mon, Tue, Wed, Thu, Fri, Sat, Sun};
     Some(match name.to_lowercase().as_str() {
         "monday" | "mon" => Mon,
         "tuesday" | "tue" | "tues" => Tue,
@@ -258,7 +265,7 @@ fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
         tag_no_case("m"),
     ))(input)?;
     // Require a word boundary so "3 more" doesn't get eaten as "3 m[ore]"
-    let (input, _) = word_boundary(input)?;
+    let (input, ()) = word_boundary(input)?;
 
     let minutes = if unit.to_lowercase().starts_with('h') {
         amount * 60
@@ -266,7 +273,7 @@ fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
         amount
     };
 
-    Ok((input, Segment::ExplicitDuration(minutes as i32)))
+    Ok((input, Segment::ExplicitDuration(i32::try_from(minutes).unwrap_or(i32::MAX))))
 }
 
 /// Succeeds only if the next character isn't alphanumeric (or input is exhausted)
@@ -341,12 +348,9 @@ fn parse_temporal_segment(input: &str) -> IResult<&str, Segment> {
         // We must identify *valid* chrono strings first so we don't feed random title words
         map_res(parse_chrono_candidate, move |s| {
             // We use map_res to return a Result. If chrono fails, nom backtracks!
-            match parse_date_string(s, now, Dialect::Us) {
-                Ok(dt) => Ok(Segment::Temporal(TemporalContext::Point(
-                    dt.with_timezone(&Utc),
-                ))),
-                Err(_) => Err("chrono parse failed"),
-            }
+            parse_date_string(s, now, Dialect::Us).map_or(Err("chrono parse failed"), |dt| {
+                Ok(Segment::Temporal(TemporalContext::Point(dt.with_timezone(&Utc))))
+            })
         }),
     ))(input)
 }
@@ -366,7 +370,7 @@ fn parse_day_after_tomorrow(
 
         let target = now + Duration::days(2);
         // Default to 9am
-        let dt = resolve_local_datetime(target.date_naive().and_hms_opt(9, 0, 0).unwrap());
+        let dt = resolve_local_datetime(require(target.date_naive().and_hms_opt(9, 0, 0), input)?);
 
         Ok((input, TemporalContext::Point(dt)))
     }
@@ -387,10 +391,14 @@ fn parse_time_range(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, T
         let s_hour = resolve_24h(start_h, effective_start_ampm);
         let e_hour = resolve_24h(end_h, end_ampm);
 
-        let start_dt =
-            resolve_local_datetime(now.date_naive().and_hms_opt(s_hour, start_m, 0).unwrap());
-        let end_dt =
-            resolve_local_datetime(now.date_naive().and_hms_opt(e_hour, end_m, 0).unwrap());
+        let start_dt = resolve_local_datetime(require(
+            now.date_naive().and_hms_opt(s_hour, start_m, 0),
+            input,
+        )?);
+        let end_dt = resolve_local_datetime(require(
+            now.date_naive().and_hms_opt(e_hour, end_m, 0),
+            input,
+        )?);
 
         Ok((
             input,
@@ -412,39 +420,44 @@ fn parse_business_time(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str
         ))(input)?;
 
         let dt = match token.to_lowercase().as_str() {
-            "eod" | "cob" => resolve_local_datetime(now.date_naive().and_hms_opt(17, 0, 0).unwrap()),
+            "eod" | "cob" => {
+                resolve_local_datetime(require(now.date_naive().and_hms_opt(17, 0, 0), input)?)
+            }
             "eow" => {
-                let days_until_fri = (4i64 - now.weekday().num_days_from_monday() as i64 + 7) % 7;
-                resolve_local_datetime(
-                    (now + Duration::days(days_until_fri))
-                        .date_naive()
-                        .and_hms_opt(17, 0, 0)
-                        .unwrap(),
-                )
+                let days_until_fri = (4i64 - i64::from(now.weekday().num_days_from_monday()) + 7) % 7;
+                let naive = require(
+                    (now + Duration::days(days_until_fri)).date_naive().and_hms_opt(17, 0, 0),
+                    input,
+                )?;
+                resolve_local_datetime(naive)
             }
             "eom" => {
                 // Reset the day to 1 first (always valid in every month) before
                 // changing month/year, so a 31st never gets carried into a
                 // shorter target month - e.g. Jan 31 -> with_month(2) would
-                // compute "Feb 31", which doesn't exist and panics `.unwrap()`.
-                let first_of_this_month = now.with_day(1).unwrap();
+                // compute "Feb 31", which doesn't exist and returns `None`.
+                let first_of_this_month = require(now.with_day(1), input)?;
                 let first_of_next_month = if now.month() == 12 {
-                    first_of_this_month
-                        .with_year(now.year() + 1)
-                        .unwrap()
-                        .with_month(1)
-                        .unwrap()
+                    let next_year = require(first_of_this_month.with_year(now.year() + 1), input)?;
+                    require(next_year.with_month(1), input)?
                 } else {
-                    first_of_this_month.with_month(now.month() + 1).unwrap()
+                    require(first_of_this_month.with_month(now.month() + 1), input)?
                 };
-                resolve_local_datetime(
-                    (first_of_next_month - Duration::days(1))
-                        .date_naive()
-                        .and_hms_opt(17, 0, 0)
-                        .unwrap(),
-                )
+                let naive = require(
+                    (first_of_next_month - Duration::days(1)).date_naive().and_hms_opt(17, 0, 0),
+                    input,
+                )?;
+                resolve_local_datetime(naive)
             }
-            _ => unreachable!(),
+            // Unreachable by construction: `token` can only be "eod"/"cob"/"eow"/"eom",
+            // the exact set `alt()` above matched — a real parse failure, not a panic,
+            // if that invariant is ever broken by a future edit.
+            _ => {
+                return Err(nom::Err::Failure(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Verify,
+                )));
+            }
         };
 
         Ok((input, TemporalContext::Point(dt)))
@@ -578,13 +591,13 @@ fn parse_loose_time(input: &str) -> IResult<&str, (u32, u32, Option<bool>)> {
     Ok((input, (hour, minute.unwrap_or(0), is_pm)))
 }
 
-fn resolve_24h(hour: u32, is_pm: Option<bool>) -> u32 {
+const fn resolve_24h(hour: u32, is_pm: Option<bool>) -> u32 {
     match (hour, is_pm) {
         (12, Some(true)) => 12, // 12 pm is noon
         (12, Some(false)) => 0, // 12 am is midnight
         (h, Some(true)) => h + 12,
-        (h, Some(false)) => h,
-        (h, None) => h, // Assume 24h if no am/pm
+        // No am/pm suffix (`None`) is assumed already 24h.
+        (h, Some(false) | None) => h,
     }
 }
 
@@ -603,6 +616,7 @@ fn quantize_time(dt: DateTime<Utc>, grid_minutes: i64) -> DateTime<Utc> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use chrono::{NaiveDate, NaiveTime};
@@ -610,7 +624,7 @@ mod tests {
     fn parse_task(input: &str) -> Task {
         match RuleParser::try_parse(input).expect("expected a parsed item") {
             ParsedItem::Task(task) => task,
-            ParsedItem::Event(event) => panic!("expected Task, got Event: {:?}", event),
+            ParsedItem::Event(event) => panic!("expected Task, got Event: {event:?}"),
         }
     }
 

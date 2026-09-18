@@ -11,6 +11,11 @@
 //! Email/IMAP env vars are explicitly stripped from every child process so these tests
 //! are deterministic regardless of what's `source`d in the shell that runs `cargo test`.
 
+// unwrap/expect on setup (spawning the binary, reading its output) are the correct failure
+// mode here: a panic fails the test with a clear message, which is exactly what's wanted.
+// The project-wide `deny` in Cargo.toml's `[lints.clippy]` is aimed at production code paths.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use chrono::{Datelike, TimeZone, Utc, Weekday};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -37,7 +42,7 @@ impl Sandbox {
             n
         ));
         std::fs::create_dir_all(&dir).expect("create sandbox dir");
-        Sandbox { dir }
+        Self { dir }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -96,7 +101,7 @@ fn extract_id(text: &str) -> Option<i64> {
 }
 
 /// Lowercase full-name form `App::parse_days` accepts for a single weekday.
-fn weekday_name(w: Weekday) -> &'static str {
+const fn weekday_name(w: Weekday) -> &'static str {
     match w {
         Weekday::Mon => "monday",
         Weekday::Tue => "tuesday",

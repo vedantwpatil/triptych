@@ -13,7 +13,7 @@ use crate::email::store::SyncCursor;
 pub async fn mail_sync_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiver<()>) -> Result<()> {
     let configs = EmailConfig::all_from_env();
     if configs.is_empty() {
-        eprintln!("[Mail] no IMAP accounts configured (TRIPTYCH_EMAIL_ENABLED/IMAP_*), mail sync disabled");
+        tracing::info!("[Mail] no IMAP accounts configured (TRIPTYCH_EMAIL_ENABLED/IMAP_*), mail sync disabled");
         return Ok(());
     }
 
@@ -32,7 +32,7 @@ pub async fn mail_sync_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiv
             _ = sync_interval.tick() => {
                 for (config, source) in &sources {
                     if let Err(e) = sync_mail(&db, source, config).await {
-                        eprintln!("[Mail] sync failed for account '{}': {}", config.account, e);
+                        tracing::warn!("[Mail] sync failed for account '{}': {}", config.account, e);
                     }
                 }
             }
@@ -48,22 +48,24 @@ async fn sync_mail(db: &SqlitePool, source: &ImapMailSource, config: &EmailConfi
     let (uid_validity, raw_messages) = source.fetch_new(cursor).await?;
 
     let epoch_changed = match (cursor, uid_validity) {
-        (Some(c), Some(current)) => c.uid_validity as u32 != current,
+        // `c.uid_validity` was itself stored from a `u32` (see `client.rs`), so
+        // this round-trip always fits.
+        (Some(c), Some(current)) => u32::try_from(c.uid_validity).unwrap_or(0) != current,
         _ => false,
     };
     if epoch_changed {
-        eprintln!(
+        tracing::info!(
             "[Mail] UIDVALIDITY changed for '{}'; resyncing recent mail instead of resuming",
             config.account
         );
     }
 
-    let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
+    let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
 
     let new_emails: Vec<_> = raw_messages
         .into_iter()
-        .filter_map(|(uid, raw)| {
-            message::parse_raw(&config.account, uid, &config.imap_folder, &raw).ok()
+        .filter_map(|(uid, raw, header_only)| {
+            message::parse_raw(&config.account, uid, &config.imap_folder, &raw, header_only).ok()
         })
         .collect();
 
@@ -80,12 +82,12 @@ async fn sync_mail(db: &SqlitePool, source: &ImapMailSource, config: &EmailConfi
         && !(epoch_changed && fetched_max_uid.is_none())
     {
         let prior_uid = if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
-        let last_uid = fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+        let last_uid = fetched_max_uid.map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
         store::set_sync_cursor(
             db,
             &config.account,
             &config.imap_folder,
-            SyncCursor { uid_validity: validity as i64, last_uid },
+            SyncCursor { uid_validity: i64::from(validity), last_uid },
         )
         .await?;
     }

@@ -92,6 +92,18 @@ message's account — no per-account switcher/filter.
   LLM dependency — e.g. a local model call that scores each synced message's importance and
   the TUI sorts/highlights on that score. Distinct from the plain archive/snooze triage above:
   this is automatic ranking, not manual action. Also tracked in `docs/roadmap.md` as Slice 6.
+- **Per-email summary in the detail view.** Not started, no design work done. Currently the
+  detail popup (`App::open_selected_email`, `ui.rs`'s detail popup) shows the raw `body_text`
+  as-is; the list's `snippet` is a truncation (`body_preview(200)`), not a summary — neither
+  extracts key points. Idea: reuse `src/nlp/ollama_client.rs`'s `OllamaClient` pattern (same
+  `qwen2.5:7b` model, already warm via `src/sync/ollama.rs`'s warmup task) with a new
+  summarization prompt, store the result in a new column alongside `snippet`/`body_text`.
+  Generate at sync time (`App::sync_email_accounts`/`src/sync/mail.rs::sync_mail`), not on
+  popup-open — `OLLAMA_TIMEOUT_MS` budgets 15s per call, and doing that synchronously when the
+  user opens an email would reintroduce the kind of UI stall the non-blocking sync fix (see
+  `DEVELOPMENT.md`) already removed. Tradeoff: adds one LLM call per synced message to the sync
+  path — either accept slower sync for a richer list/detail view, or batch/cache summaries the
+  way `nlp/parser.rs`'s LRU cache does for parsed input.
 
 ## Known limitations
 

@@ -17,11 +17,7 @@ pub struct SyncDaemon {
 
 impl SyncDaemon {
     /// Start the background sync daemon with all enabled services
-    pub async fn start(
-        db: SqlitePool,
-        nlp_parser: Arc<NLPParser>,
-        config: SyncConfig,
-    ) -> Result<Self> {
+    pub fn start(db: SqlitePool, nlp_parser: Arc<NLPParser>, config: &SyncConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let mut tasks = Vec::new();
 
@@ -39,7 +35,7 @@ impl SyncDaemon {
         if config.cache_preload_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
             let db_clone = db.clone();
-            let nlp = nlp_parser.clone();
+            let nlp = nlp_parser;
 
             tasks.push(tokio::spawn(async move {
                 cache::preload_cache(db_clone, nlp, shutdown_rx).await
@@ -60,14 +56,14 @@ impl SyncDaemon {
         // Mail sync (IMAP polling)
         if config.mail_sync_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
-            let db_clone = db.clone();
+            let db_clone = db;
 
             tasks.push(tokio::spawn(async move {
                 mail::mail_sync_worker(db_clone, shutdown_rx).await
             }));
         }
 
-        Ok(Self { shutdown_tx, tasks })
+        Self { shutdown_tx, tasks }
     }
 
     /// Gracefully shutdown all background tasks

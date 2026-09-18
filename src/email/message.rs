@@ -36,36 +36,45 @@ pub struct NewEmail {
     pub body_text: Option<String>,
 }
 
-/// Parse a raw RFC822 message fetched over IMAP into a `NewEmail`.
-pub fn parse_raw(account: &str, uid: u32, folder: &str, raw: &[u8]) -> Result<NewEmail> {
+/// Parse a raw RFC822 message fetched over IMAP into a `NewEmail`. `header_only`
+/// marks a message whose body was skipped during fetch (see `client.rs`'s
+/// `LARGE_MESSAGE_BYTES`) — `raw` is headers only, so `snippet`/`body_text` are
+/// synthesized instead of extracted.
+pub fn parse_raw(
+    account: &str,
+    uid: u32,
+    folder: &str,
+    raw: &[u8],
+    header_only: bool,
+) -> Result<NewEmail> {
     let message = MessageParser::default()
         .parse(raw)
         .context("failed to parse RFC822 message")?;
 
     let message_id = message
-        .message_id()
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("<generated-{}-{}@triptych>", folder, uid));
+        .message_id().map_or_else(|| format!("<generated-{folder}-{uid}@triptych>"), str::to_string);
 
     let from = message.from().and_then(|addr| addr.first());
     let from_addr = from
-        .and_then(|a| a.address())
-        .map(str::to_string)
-        .unwrap_or_else(|| "unknown@unknown".to_string());
+        .and_then(|a| a.address()).map_or_else(|| "unknown@unknown".to_string(), str::to_string);
     let from_name = from.and_then(|a| a.name()).map(str::to_string);
 
     let subject = message.subject().unwrap_or("(no subject)").to_string();
 
     let date_utc = message
-        .date()
-        .map(|d| Utc.timestamp_opt(d.to_timestamp(), 0).single().unwrap_or_else(Utc::now))
-        .unwrap_or_else(Utc::now);
+        .date().map_or_else(Utc::now, |d| Utc.timestamp_opt(d.to_timestamp(), 0).single().unwrap_or_else(Utc::now));
 
-    let snippet = message.body_preview(200).map(|s| clean_snippet(&s));
-    let body_text = message.body_text(0).map(|s| strip_hidden_chars(&s));
+    let (snippet, body_text) = if header_only {
+        (Some("[message too large to sync — body not fetched]".to_string()), None)
+    } else {
+        (
+            message.body_preview(200).map(|s| clean_snippet(&s)),
+            message.body_text(0).map(|s| strip_hidden_chars(&s)),
+        )
+    };
 
     Ok(NewEmail {
-        uid: uid as i64,
+        uid: i64::from(uid),
         message_id,
         account: account.to_string(),
         folder: folder.to_string(),
@@ -106,6 +115,7 @@ fn clean_snippet(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::clean_snippet;
 

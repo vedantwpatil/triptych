@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
 
-/// Background calendar sync worker for CalDAV integration
+/// Background calendar sync worker for `CalDAV` integration
 pub async fn calendar_sync_worker(
     db: SqlitePool,
     mut shutdown_rx: broadcast::Receiver<()>,
@@ -25,8 +25,8 @@ pub async fn calendar_sync_worker(
     Ok(())
 }
 
-/// Sync calendar events from CalDAV server
-/// TODO: Implement CalDAV protocol
+/// Sync calendar events from `CalDAV` server
+/// TODO: Implement `CalDAV` protocol
 async fn sync_calendar(db: &SqlitePool) -> Result<()> {
     let _count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM events")
         .fetch_one(db)

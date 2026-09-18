@@ -46,7 +46,7 @@ impl OllamaClient {
     }
 
     pub async fn parse(&self, input: &str) -> Result<ParsedItem, OllamaError> {
-        let prompt = self.build_prompt(input);
+        let prompt = Self::build_prompt(input);
 
         let request = OllamaRequest {
             model: self.model.clone(),
@@ -59,7 +59,7 @@ impl OllamaClient {
         let response = timeout(
             std::time::Duration::from_millis(OLLAMA_TIMEOUT_MS),
             self.client
-                .post(format!("{}/api/generate", OLLAMA_BASE_URL))
+                .post(format!("{OLLAMA_BASE_URL}/api/generate"))
                 .json(&request)
                 .send(),
         )
@@ -70,17 +70,17 @@ impl OllamaClient {
         let ollama_response: OllamaResponse =
             response.json().await.map_err(OllamaError::Request)?;
 
-        self.parse_response(&ollama_response.response)
+        Self::parse_response(&ollama_response.response)
     }
 
-    fn build_prompt(&self, input: &str) -> String {
+    fn build_prompt(input: &str) -> String {
         // Get current date for context
         let now = chrono::Local::now();
         let today = now.format("%Y-%m-%d").to_string();
         let tomorrow = (now + Duration::days(1)).format("%Y-%m-%d").to_string();
 
         format!(
-            r#"Today is {}. Parse the following natural language input into structured JSON.
+            r#"Today is {today}. Parse the following natural language input into structured JSON.
 
 CRITICAL TIME PARSING RULES:
 - "4:12 PM" or "4:12 pm" → use 16:12:00 (afternoon)
@@ -94,24 +94,23 @@ Omit "deadline"/"duration_minutes" (or use null) when the input doesn't mention 
 
 Examples:
 Input: "Submit report tomorrow at 3pm #work"
-Output: {{"type": "task", "title": "Submit report", "datetime": "{}T15:00:00+00:00", "tags": ["work"], "priority": "medium", "deadline": null, "duration_minutes": null}}
+Output: {{"type": "task", "title": "Submit report", "datetime": "{tomorrow}T15:00:00+00:00", "tags": ["work"], "priority": "medium", "deadline": null, "duration_minutes": null}}
 
 Input: "Meeting at 4:12 PM #important"
-Output: {{"type": "task", "title": "Meeting", "datetime": "{}T16:12:00+00:00", "tags": ["important"], "priority": "medium", "deadline": null, "duration_minutes": null}}
+Output: {{"type": "task", "title": "Meeting", "datetime": "{today}T16:12:00+00:00", "tags": ["important"], "priority": "medium", "deadline": null, "duration_minutes": null}}
 
 Input: "Call John at 9:30 AM tomorrow"
-Output: {{"type": "task", "title": "Call John", "datetime": "{}T09:30:00+00:00", "tags": [], "priority": "medium", "deadline": null, "duration_minutes": null}}
+Output: {{"type": "task", "title": "Call John", "datetime": "{tomorrow}T09:30:00+00:00", "tags": [], "priority": "medium", "deadline": null, "duration_minutes": null}}
 
 Input: "Finish the proposal before the end of next month, should take 3 hours"
 Output: {{"type": "task", "title": "Finish the proposal", "datetime": null, "tags": [], "priority": "medium", "deadline": "<last day of next month>T23:59:59+00:00", "duration_minutes": 180}}
 
-Now parse: "{}"
-Output (ONLY valid JSON, no explanations):"#,
-            today, tomorrow, today, tomorrow, input
+Now parse: "{input}"
+Output (ONLY valid JSON, no explanations):"#
         )
     }
 
-    fn parse_response(&self, response: &str) -> Result<ParsedItem, OllamaError> {
+    fn parse_response(response: &str) -> Result<ParsedItem, OllamaError> {
         let structured: StructuredOutput =
             serde_json::from_str(response).map_err(|e| OllamaError::ParseError(e.to_string()))?;
 
@@ -162,7 +161,7 @@ Output (ONLY valid JSON, no explanations):"#,
 
     pub async fn health_check(&self) -> bool {
         self.client
-            .get(format!("{}/api/tags", OLLAMA_BASE_URL))
+            .get(format!("{OLLAMA_BASE_URL}/api/tags"))
             .send()
             .await
             .is_ok()
@@ -181,10 +180,10 @@ pub enum OllamaError {
 impl std::fmt::Display for OllamaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OllamaError::Timeout => write!(f, "Ollama request timed out"),
-            OllamaError::Request(e) => write!(f, "Request error: {}", e),
-            OllamaError::ParseError(e) => write!(f, "Parse error: {}", e),
-            OllamaError::ServiceUnavailable => write!(f, "Ollama service unavailable"),
+            Self::Timeout => write!(f, "Ollama request timed out"),
+            Self::Request(e) => write!(f, "Request error: {e}"),
+            Self::ParseError(e) => write!(f, "Parse error: {e}"),
+            Self::ServiceUnavailable => write!(f, "Ollama service unavailable"),
         }
     }
 }

@@ -32,7 +32,7 @@ pub struct BlockDefinition {
     pub priority: i32,
 }
 
-fn default_priority() -> i32 {
+const fn default_priority() -> i32 {
     1
 }
 
@@ -45,7 +45,7 @@ fn db_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| DB_URL.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewMode {
     TodoList,
     Calendar,
@@ -64,6 +64,9 @@ pub struct ScheduleBlock {
     pub priority: i32,
 }
 
+// `task_category` mirrors the `tasks.task_category` DB column name (see `TASK_COLUMNS`) —
+// renaming would need an sqlx column-rename shim, not worth it for a naming lint.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, FromRow, Debug)]
 pub struct Task {
     pub id: i64,
@@ -102,7 +105,7 @@ impl BlockInstance {
 /// DST transition: an ambiguous time (fall-back) resolves to its earlier instant,
 /// a nonexistent time (spring-forward gap) is nudged forward in hourly steps
 /// until a valid local time is found.
-pub(crate) fn resolve_local_datetime(naive: chrono::NaiveDateTime) -> DateTime<Utc> {
+pub fn resolve_local_datetime(naive: chrono::NaiveDateTime) -> DateTime<Utc> {
     for offset_hours in 0..=4 {
         if let Some(dt) = (naive + Duration::hours(offset_hours))
             .and_local_timezone(chrono::Local)
@@ -115,10 +118,35 @@ pub(crate) fn resolve_local_datetime(naive: chrono::NaiveDateTime) -> DateTime<U
     naive.and_utc()
 }
 
+/// `day` at 00:00:00. `and_hms_opt` only returns `None` for an out-of-range
+/// hour/min/sec, never for literal 0/0/0, so the fallback is dead code kept
+/// only to satisfy the no-`unwrap`-in-production-code lint.
+fn day_start(day: NaiveDate) -> chrono::NaiveDateTime {
+    day.and_hms_opt(0, 0, 0).unwrap_or_else(|| day.and_time(NaiveTime::MIN))
+}
+
+/// `day` at 23:59:59 - see [`day_start`].
+fn day_end(day: NaiveDate) -> chrono::NaiveDateTime {
+    day.and_hms_opt(23, 59, 59).unwrap_or_else(|| day.and_time(NaiveTime::MIN))
+}
+
+/// `day`'s weekday as the `schedule_blocks.day_of_week` column's `i32` encoding
+/// (Monday = 0). `num_days_from_monday()` returns `0..=6`, so the cast never
+/// truncates or wraps; centralized here so that fact is justified once.
+fn day_of_week_i32(day: NaiveDate) -> i32 {
+    i32::try_from(day.weekday().num_days_from_monday()).unwrap_or(0)
+}
+
 /// How far ahead `reallocate_all_tasks` looks for free blocks. A deadline past
 /// this horizon is never even considered, so a conflict on such a task doesn't
 /// mean the schedule is full - see `ConflictReason::BeyondWindow`.
 pub const ALLOCATION_WINDOW_DAYS: i64 = 14;
+
+/// Email retention window for [`App::cleanup_old_emails`]. ~6 months, expressed
+/// as days rather than calendar months to sidestep invalid-date edge cases
+/// (e.g. Aug 31 minus 1 month = Feb 31) — the window isn't meant to be exact to
+/// the day.
+const EMAIL_RETENTION_DAYS: i64 = 180;
 
 /// Why a deadline-bearing task didn't get all the minutes it needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,10 +162,10 @@ pub enum ConflictReason {
 impl std::fmt::Display for ConflictReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConflictReason::BeyondWindow => {
+            Self::BeyondWindow => {
                 write!(f, "deadline past the {ALLOCATION_WINDOW_DAYS}-day planning window")
             }
-            ConflictReason::OutOfCapacity => {
+            Self::OutOfCapacity => {
                 write!(f, "no free deepwork/admin time before the deadline")
             }
         }
@@ -257,12 +285,11 @@ pub fn default_duration_for_category(category: &str) -> i32 {
     match category {
         "deepwork" => 90,
         "admin" => 30,
-        "learning" => 60,
         _ => 60,
     }
 }
 
-/// (title, scheduled_at, priority, tags, deadline, duration_minutes)
+/// (title, `scheduled_at`, priority, tags, deadline, `duration_minutes`)
 pub type ExtractedTaskFields = (
     String,
     Option<DateTime<Utc>>,
@@ -316,7 +343,7 @@ pub enum InputMode {
     Editing,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalendarInputMode {
     Navigate,
     BlockForm,
@@ -325,7 +352,7 @@ pub enum CalendarInputMode {
     DeadlineInput,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockFormField {
     BlockType,
     StartTime,
@@ -364,8 +391,8 @@ impl BlockFormState {
         let end_hour = start_hour + 1;
         Self {
             block_type: "deepwork".to_string(),
-            start_time: format!("{:02}:00", start_hour),
-            end_time: format!("{:02}:00", end_hour),
+            start_time: format!("{start_hour:02}:00"),
+            end_time: format!("{end_hour:02}:00"),
             title: String::new(),
             active_field: BlockFormField::BlockType,
         }
@@ -386,7 +413,7 @@ impl BlockFormState {
         self.block_type = Self::BLOCK_TYPES[new_idx].to_string();
     }
 
-    pub fn next_field(&mut self) {
+    pub const fn next_field(&mut self) {
         self.active_field = match self.active_field {
             BlockFormField::BlockType => BlockFormField::StartTime,
             BlockFormField::StartTime => BlockFormField::EndTime,
@@ -395,7 +422,7 @@ impl BlockFormState {
         };
     }
 
-    pub fn prev_field(&mut self) {
+    pub const fn prev_field(&mut self) {
         self.active_field = match self.active_field {
             BlockFormField::BlockType => BlockFormField::Title,
             BlockFormField::StartTime => BlockFormField::BlockType,
@@ -425,9 +452,9 @@ pub struct App {
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
-    /// (date, time, task_id, description, priority)
+    /// (date, time, `task_id`, description, priority)
     pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, i64, String, i32)>,
-    /// (date, time, task_id, description, allocated_minutes, priority)
+    /// (date, time, `task_id`, description, `allocated_minutes`, priority)
     pub cached_task_allocations: Vec<(NaiveDate, NaiveTime, i64, String, i32, i32)>,
     pub status_message: Option<(String, std::time::Instant)>,
     /// Task picked up from the calendar with `m`, awaiting a drop cell.
@@ -493,15 +520,15 @@ fn cell_tasks(
 /// starting at 9:00) must show in every hour cell it spans, not just the one
 /// matching its exact start time. `pub(crate)` so `ui.rs`'s `cell_task_displays`
 /// shares this exact rule rather than re-deriving it.
-pub(crate) fn allocation_covers_hour(start: NaiveTime, minutes: i32, hour: u32) -> bool {
+pub fn allocation_covers_hour(start: NaiveTime, minutes: i32, hour: u32) -> bool {
     let Some(slot) = NaiveTime::from_hms_opt(hour, 0, 0) else {
         return false;
     };
-    let end = start + Duration::minutes(minutes as i64);
+    let end = start + Duration::minutes(i64::from(minutes));
     start <= slot && slot < end
 }
 
-pub(crate) fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
+pub fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
     if time_str.contains(':') {
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() >= 2 {
@@ -559,7 +586,7 @@ impl App {
         let today = chrono::Local::now().naive_local().date();
         let week_offset = self.calendar_week_offset.unwrap_or(0);
         let start_of_week = today + Duration::weeks(week_offset)
-            - Duration::days(today.weekday().num_days_from_monday() as i64);
+            - Duration::days(i64::from(today.weekday().num_days_from_monday()));
 
         let days: Vec<NaiveDate> = (0..7).map(|i| start_of_week + Duration::days(i)).collect();
 
@@ -587,13 +614,13 @@ impl App {
         let end = days[days.len() - 1].to_string();
 
         let rows: Vec<(String, String, i64, String, i32, i32)> = sqlx::query_as(
-            r#"
+            r"
             SELECT a.block_date, a.block_start_time, t.id, t.description, a.allocated_minutes, t.priority
             FROM task_block_allocations a
             JOIN tasks t ON a.task_id = t.id
             WHERE a.block_date BETWEEN ? AND ? AND t.completed = 0
             ORDER BY a.block_date, a.block_start_time, t.id
-            "#,
+            ",
         )
         .bind(start)
         .bind(end)
@@ -623,7 +650,7 @@ impl App {
         let mut result = Vec::new();
         for block in blocks {
             for day in days {
-                if day.weekday().num_days_from_monday() == block.day_of_week as u32 {
+                if day_of_week_i32(*day) == block.day_of_week {
                     result.push((*day, block.clone()));
                     break;
                 }
@@ -637,10 +664,8 @@ impl App {
         &self,
         days: &[NaiveDate],
     ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32)>, sqlx::Error> {
-        let start = resolve_local_datetime(days[0].and_hms_opt(0, 0, 0).unwrap());
-        let end = resolve_local_datetime(
-            days[days.len() - 1].and_hms_opt(23, 59, 59).unwrap(),
-        );
+        let start = resolve_local_datetime(day_start(days[0]));
+        let end = resolve_local_datetime(day_end(days[days.len() - 1]));
 
         let query = format!(
             "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0 ORDER BY scheduled_at, id"
@@ -700,7 +725,21 @@ impl App {
         self.view_mode = ViewMode::Email;
         self.email_detail_open = false;
         self.sync_email_accounts();
+        self.cleanup_old_emails().await;
         let _ = self.refresh_emails().await;
+    }
+
+    /// Purges emails older than [`EMAIL_RETENTION_DAYS`] (~6 months), run every
+    /// time the Email view is entered — the only retention path there is, so
+    /// without it `email_messages` grows unbounded. Runs inline, not spawned:
+    /// unlike `sync_email_accounts`'s IMAP round-trip, a `DELETE` on the indexed
+    /// `date_utc` column is a local disk write, not a network call, so there's no
+    /// TUI-stall risk to avoid.
+    async fn cleanup_old_emails(&self) {
+        let cutoff = Utc::now() - Duration::days(EMAIL_RETENTION_DAYS);
+        if let Err(e) = email_store::delete_older_than(&self.db_pool, cutoff).await {
+            tracing::warn!("[Email] cleanup failed: {}", e);
+        }
     }
 
     /// Kicks off a background pull of new mail from IMAP for every configured
@@ -711,7 +750,7 @@ impl App {
     /// TUI (no redraw, no key input) until every account's TCP+TLS round-trip
     /// finished or failed. No-ops silently if email isn't configured;
     /// per-account failures are logged to stderr, same as the background
-    /// poller, since there's no `&mut self` left to post a status_message to
+    /// poller, since there's no `&mut self` left to post a `status_message` to
     /// once the task is spawned.
     fn sync_email_accounts(&self) {
         let configs = EmailConfig::all_from_env();
@@ -731,7 +770,7 @@ impl App {
                 {
                     Ok(cursor) => cursor,
                     Err(e) => {
-                        eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                        tracing::warn!("[Email] sync failed for '{}': {}", config.account, e);
                         continue;
                     }
                 };
@@ -739,27 +778,37 @@ impl App {
                 match source.fetch_new(cursor).await {
                     Ok((uid_validity, raw_messages)) => {
                         let epoch_changed = match (cursor, uid_validity) {
-                            (Some(c), Some(current)) => c.uid_validity as u32 != current,
+                            // `c.uid_validity` was itself stored from a `u32` (see
+                            // `client.rs`), so this round-trip always fits.
+                            (Some(c), Some(current)) => {
+                                u32::try_from(c.uid_validity).unwrap_or(0) != current
+                            }
                             _ => false,
                         };
                         if epoch_changed {
-                            eprintln!(
+                            tracing::info!(
                                 "[Email] UIDVALIDITY changed for '{}'; resyncing recent mail instead of resuming",
                                 config.account
                             );
                         }
 
-                        let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
+                        let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
 
                         let new_emails: Vec<_> = raw_messages
                             .into_iter()
-                            .filter_map(|(uid, raw)| {
-                                message::parse_raw(&config.account, uid, &config.imap_folder, &raw)
-                                    .ok()
+                            .filter_map(|(uid, raw, header_only)| {
+                                message::parse_raw(
+                                    &config.account,
+                                    uid,
+                                    &config.imap_folder,
+                                    &raw,
+                                    header_only,
+                                )
+                                .ok()
                             })
                             .collect();
                         if let Err(e) = email_store::insert_new(&db_pool, &new_emails).await {
-                            eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                            tracing::warn!("[Email] sync failed for '{}': {}", config.account, e);
                         }
                         // See sync/mail.rs's sync_mail: skip persisting a synthetic
                         // `last_uid = 0` when the epoch changed but nothing came back, so
@@ -770,26 +819,26 @@ impl App {
                             let prior_uid =
                                 if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
                             let last_uid =
-                                fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+                                fetched_max_uid.map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
                             if let Err(e) = email_store::set_sync_cursor(
                                 &db_pool,
                                 &config.account,
                                 &config.imap_folder,
-                                email_store::SyncCursor { uid_validity: validity as i64, last_uid },
+                                email_store::SyncCursor { uid_validity: i64::from(validity), last_uid },
                             )
                             .await
                             {
-                                eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                                tracing::warn!("[Email] sync failed for '{}': {}", config.account, e);
                             }
                         }
                     }
-                    Err(e) => eprintln!("[Email] sync failed for '{}': {}", config.account, e),
+                    Err(e) => tracing::warn!("[Email] sync failed for '{}': {}", config.account, e),
                 }
             }
         });
     }
 
-    /// Tab: TodoList -> Calendar -> Email -> TodoList.
+    /// Tab: `TodoList` -> Calendar -> Email -> `TodoList`.
     pub async fn cycle_view_next(&mut self) {
         match self.view_mode {
             ViewMode::TodoList => self.toggle_to_calendar().await,
@@ -798,7 +847,7 @@ impl App {
         }
     }
 
-    /// Shift+Tab: reverse of cycle_view_next.
+    /// Shift+Tab: reverse of `cycle_view_next`.
     pub async fn cycle_view_prev(&mut self) {
         match self.view_mode {
             ViewMode::TodoList => self.toggle_to_email().await,
@@ -832,17 +881,28 @@ impl App {
     }
 
     /// Opens the email detail popup on the selected email and marks it read,
-    /// same as most mail clients do on open.
+    /// same as most mail clients do on open. `self.emails` (from `get_recent`)
+    /// never carries `body_text` - fetched here, on demand, only for the one
+    /// email actually being viewed, rather than for every row in the list.
     pub async fn open_selected_email(&mut self) -> Result<(), sqlx::Error> {
-        if self.emails.get(self.selected_email).is_none() {
+        let Some(email) = self.emails.get(self.selected_email) else {
             return Ok(());
-        }
+        };
+        let email_id = email.id;
         self.email_detail_open = true;
         self.email_detail_scroll = 0;
-        self.mark_selected_email_read().await
+        self.mark_selected_email_read().await?;
+
+        let body = crate::email::store::get_body(&self.db_pool, email_id)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
+            email.body_text = body;
+        }
+        Ok(())
     }
 
-    pub fn close_email_detail(&mut self) {
+    pub const fn close_email_detail(&mut self) {
         self.email_detail_open = false;
         self.email_detail_scroll = 0;
     }
@@ -912,7 +972,7 @@ impl App {
             .nlp_parser
             .parse(description)
             .await
-            .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {}", e)))?;
+            .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {e}")))?;
 
         let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
             extract_task_fields(parse_result.item);
@@ -928,7 +988,7 @@ impl App {
         } else {
             let current_order = self.tasks[self.selected]
                 .item_order
-                .unwrap_or(self.tasks.len() as i64);
+                .unwrap_or_else(|| i64::try_from(self.tasks.len()).unwrap_or(i64::MAX));
 
             sqlx::query("UPDATE tasks SET item_order = item_order + 1 WHERE item_order > ?")
                 .bind(current_order)
@@ -1021,11 +1081,9 @@ impl App {
         let mut enhanced_tasks = Vec::new();
 
         for task in &self.tasks {
-            let tags: Vec<String> = if let Some(tags_json) = &task.tags {
+            let tags: Vec<String> = task.tags.as_ref().map_or_else(Vec::new, |tags_json| {
                 serde_json::from_str(tags_json).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            });
 
             enhanced_tasks.push(EnhancedTaskInfo {
                 task: task.clone(),
@@ -1085,24 +1143,24 @@ impl App {
     }
 
     // Calendar navigation methods
-    pub fn calendar_move_up(&mut self) {
+    pub const fn calendar_move_up(&mut self) {
         self.selected_time_slot = self.selected_time_slot.saturating_sub(1);
         self.stack_index = 0;
     }
 
-    pub fn calendar_move_down(&mut self) {
+    pub const fn calendar_move_down(&mut self) {
         if self.selected_time_slot < 15 {
             self.selected_time_slot += 1;
         }
         self.stack_index = 0;
     }
 
-    pub fn calendar_move_left(&mut self) {
+    pub const fn calendar_move_left(&mut self) {
         self.selected_day = self.selected_day.saturating_sub(1);
         self.stack_index = 0;
     }
 
-    pub fn calendar_move_right(&mut self) {
+    pub const fn calendar_move_right(&mut self) {
         if self.selected_day < 6 {
             self.selected_day += 1;
         }
@@ -1139,13 +1197,14 @@ impl App {
         let today = chrono::Local::now().naive_local().date();
         let week_offset = self.calendar_week_offset.unwrap_or(0);
         let start_of_week = today + Duration::weeks(week_offset)
-            - Duration::days(today.weekday().num_days_from_monday() as i64);
-        start_of_week + Duration::days(self.selected_day as i64)
+            - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+        start_of_week + Duration::days(i64::try_from(self.selected_day).unwrap_or(0))
     }
 
     pub fn selected_cell_time(&self) -> NaiveTime {
-        let hour = 7 + self.selected_time_slot as u32;
-        NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
+        let hour = 7 + u32::try_from(self.selected_time_slot).unwrap_or(0);
+        // `hour` is always in-range for a time-of-day, so this is never `None`.
+        NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or(NaiveTime::MIN)
     }
 
     /// The task `m`/`u`/`e` act on: the one at `stack_index` within the
@@ -1300,7 +1359,7 @@ impl App {
 
         let mut deadline = self
             .nlp_parser
-            .parse(&format!("by {}", text))
+            .parse(&format!("by {text}"))
             .await
             .ok()
             .and_then(|r| extract_deadline(r.item));
@@ -1316,7 +1375,7 @@ impl App {
 
         let Some(deadline) = deadline else {
             self.status_message = Some((
-                format!("Couldn't parse deadline '{}' - try 'tomorrow' or a weekday", text),
+                format!("Couldn't parse deadline '{text}' - try 'tomorrow' or a weekday"),
                 std::time::Instant::now(),
             ));
             return Ok(());
@@ -1336,7 +1395,7 @@ impl App {
 
     // Schedule block creation
     pub async fn create_schedule_block(&mut self) -> Result<(), sqlx::Error> {
-        let day_of_week = self.selected_cell_date().weekday().num_days_from_monday() as i32;
+        let day_of_week = day_of_week_i32(self.selected_cell_date());
 
         // Validate times
         if Self::validate_time_format(&self.block_form.start_time).is_err() {
@@ -1427,7 +1486,7 @@ impl App {
             self.selected_cell_date().and_time(self.selected_cell_time()),
         );
         let category = classify_task(description).to_string();
-        let new_order = self.tasks.len() as i64;
+        let new_order = i64::try_from(self.tasks.len()).unwrap_or(i64::MAX);
 
         sqlx::query(
             "INSERT INTO tasks (description, completed, item_order, priority, scheduled_at, task_category) VALUES (?, ?, ?, ?, ?, ?)"
@@ -1513,10 +1572,8 @@ impl App {
         .await?;
 
         // Get all scheduled tasks in this range
-        let range_start = resolve_local_datetime(days[0].and_hms_opt(0, 0, 0).unwrap());
-        let range_end = resolve_local_datetime(
-            days[days.len() - 1].and_hms_opt(23, 59, 59).unwrap(),
-        );
+        let range_start = resolve_local_datetime(day_start(days[0]));
+        let range_end = resolve_local_datetime(day_end(days[days.len() - 1]));
 
         let query = format!(
             "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0"
@@ -1539,7 +1596,7 @@ impl App {
 
         // Strategy 1: Find a matching block type with a free hour
         for day in &days {
-            let dow = day.weekday().num_days_from_monday() as i32;
+            let dow = day_of_week_i32(*day);
             for block in &blocks {
                 if block.day_of_week != dow {
                     continue;
@@ -1547,13 +1604,11 @@ impl App {
                 if block.block_type != task_category {
                     continue;
                 }
-                let start = match parse_time_string(&block.start_time) {
-                    Some(t) => t,
-                    None => continue,
+                let Some(start) = parse_time_string(&block.start_time) else {
+                    continue;
                 };
-                let end = match parse_time_string(&block.end_time) {
-                    Some(t) => t,
-                    None => continue,
+                let Some(end) = parse_time_string(&block.end_time) else {
+                    continue;
                 };
 
                 let mut hour = start.hour();
@@ -1565,7 +1620,8 @@ impl App {
                     }
                     // Check if slot is free
                     if !occupied_slots.contains(&(*day, hour)) {
-                        let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+                        // `hour` is always in-range for a time-of-day, so this is never `None`.
+                    let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or(NaiveTime::MIN);
                         return Ok(Some(resolve_local_datetime(day.and_time(time))));
                     }
                     hour += 1;
@@ -1575,15 +1631,16 @@ impl App {
 
         // Strategy 2: Find any free hour (7am-11pm) not inside a different-type block
         for day in &days {
-            let dow = day.weekday().num_days_from_monday() as i32;
+            let dow = day_of_week_i32(*day);
             for hour in 7u32..23 {
                 // Skip past hours for today
                 if *day == today && hour <= now.hour() {
                     continue;
                 }
 
-                // Check if this hour is inside a different-type block
-                let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+                // Check if this hour is inside a different-type block. `hour` is
+                // always in-range for a time-of-day, so this is never `None`.
+                let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or(NaiveTime::MIN);
                 let in_different_block = blocks.iter().any(|block| {
                     if block.day_of_week != dow {
                         return false;
@@ -1621,21 +1678,21 @@ impl App {
     fn validate_time_format(time: &str) -> Result<(), Box<dyn std::error::Error>> {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() != 2 {
-            return Err(format!("Invalid time format: {}", time).into());
+            return Err(format!("Invalid time format: {time}").into());
         }
 
         let hour: u32 = parts[0]
             .parse()
-            .map_err(|_| format!("Invalid hour in: {}", time))?;
+            .map_err(|_| format!("Invalid hour in: {time}"))?;
         let minute: u32 = parts[1]
             .parse()
-            .map_err(|_| format!("Invalid minute in: {}", time))?;
+            .map_err(|_| format!("Invalid minute in: {time}"))?;
 
         if hour > 23 {
-            return Err(format!("Hour out of range: {}", time).into());
+            return Err(format!("Hour out of range: {time}").into());
         }
         if minute > 59 {
-            return Err(format!("Minute out of range: {}", time).into());
+            return Err(format!("Minute out of range: {time}").into());
         }
 
         Ok(())
@@ -1655,10 +1712,10 @@ impl App {
 
     /// Parse day name(s) to day numbers. Supports:
     /// - Single days: "monday", "tuesday", etc.
-    /// - Compound days: "monday_wednesday", "tuesday_thursday"
+    /// - Compound days: "`monday_wednesday`", "`tuesday_thursday`"
     /// - Special groups: "weekdays", "weekends", "everyday"
     ///
-    /// Uses Monday-first numbering to match chrono's num_days_from_monday():
+    /// Uses Monday-first numbering to match chrono's `num_days_from_monday()`:
     /// Monday = 0, Tuesday = 1, ..., Sunday = 6
     fn parse_days(name: &str) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
         let name_lower = name.to_lowercase();
@@ -1685,7 +1742,7 @@ impl App {
                 "friday" | "fri" => 4,
                 "saturday" | "sat" => 5,
                 "sunday" | "sun" => 6,
-                _ => return Err(format!("Invalid day name: {} (in '{}')", part, name).into()),
+                _ => return Err(format!("Invalid day name: {part} (in '{name}')").into()),
             };
             if !days.contains(&day_num) {
                 days.push(day_num);
@@ -1693,10 +1750,10 @@ impl App {
         }
 
         if days.is_empty() {
-            return Err(format!("Invalid day name: {}", name).into());
+            return Err(format!("Invalid day name: {name}").into());
         }
 
-        days.sort();
+        days.sort_unstable();
         Ok(days)
     }
 
@@ -1868,7 +1925,8 @@ impl App {
         for block in blocks {
             if block.day_of_week != current_day {
                 current_day = block.day_of_week;
-                println!("\n{}:", days[current_day as usize]);
+                // `day_of_week` is always 0..=6 by DB constraint.
+                println!("\n{}:", days[usize::try_from(current_day).unwrap_or(0)]);
             }
             println!(
                 "  {} - {} [{}] {}",
@@ -1881,7 +1939,7 @@ impl App {
 
     pub async fn delete_block_at_selected_cell(&mut self) -> Result<(), sqlx::Error> {
         let date = self.selected_cell_date();
-        let day_of_week = date.weekday().num_days_from_monday() as i32;
+        let day_of_week = day_of_week_i32(date);
         let time = self.selected_cell_time();
         let time_str = format!("{:02}:{:02}", time.hour(), time.minute());
 
@@ -1926,8 +1984,8 @@ impl App {
 
     /// Get incomplete tasks with a deadline, earliest deadline first.
     /// Allocations are deadline-driven and additive: they never touch `scheduled_at`,
-    /// which remains under manual/direct-scheduling control (auto_schedule_task,
-    /// schedule_task_to_selected_cell). Tasks without a deadline are never reallocated.
+    /// which remains under manual/direct-scheduling control (`auto_schedule_task`,
+    /// `schedule_task_to_selected_cell`). Tasks without a deadline are never reallocated.
     async fn get_tasks_by_deadline(&self) -> Result<Vec<Task>, sqlx::Error> {
         // Tasks already manually scheduled (scheduled_at set) are excluded: they're
         // under the user's direct control and must never be double-booked into a
@@ -1940,7 +1998,7 @@ impl App {
             .await
     }
 
-    /// Expand recurring schedule_blocks into concrete per-date instances over the
+    /// Expand recurring `schedule_blocks` into concrete per-date instances over the
     /// next `days` days, keeping only block types eligible for task allocation.
     async fn get_available_deepwork_blocks(
         &self,
@@ -1959,7 +2017,7 @@ impl App {
 
         for day_offset in 0..days {
             let date = today + Duration::days(day_offset);
-            let dow = date.weekday().num_days_from_monday() as i32;
+            let dow = day_of_week_i32(date);
 
             for block in &blocks {
                 if block.day_of_week != dow || !is_allocatable_block_type(&block.block_type) {
@@ -2052,7 +2110,7 @@ impl App {
             .bind(block.date.to_string())
             .bind(allocation_start.format("%H:%M").to_string())
             .bind(allocation_end.format("%H:%M").to_string())
-            .bind(take as i32)
+            .bind(i32::try_from(take).unwrap_or(i32::MAX))
             .execute(&mut **tx)
             .await?;
 
@@ -2065,7 +2123,7 @@ impl App {
 
     /// Reallocate every incomplete, deadline-bearing task to available deepwork/admin
     /// blocks in the next two weeks, earliest-deadline-first. Additive to the existing
-    /// `scheduled_at`-based flow: this only ever writes task_block_allocations rows.
+    /// `scheduled_at`-based flow: this only ever writes `task_block_allocations` rows.
     /// The clear-and-rebuild runs inside a transaction so a mid-run error leaves the
     /// previous allocations intact rather than a half-rewritten table.
     pub async fn reallocate_all_tasks(&mut self) -> Result<AllocationResult, sqlx::Error> {
@@ -2084,7 +2142,7 @@ impl App {
             let Some(deadline) = task.deadline else {
                 continue;
             };
-            let needed_minutes = task.duration_minutes.unwrap_or(90) as i64;
+            let needed_minutes = i64::from(task.duration_minutes.unwrap_or(90));
 
             let available: Vec<&BlockInstance> = blocks
                 .iter()
@@ -2105,8 +2163,8 @@ impl App {
                 conflicts.push(TaskConflict {
                     task_id: task.id,
                     description: task.description.clone(),
-                    needed_minutes: needed_minutes as i32,
-                    allocated_minutes: allocated as i32,
+                    needed_minutes: i32::try_from(needed_minutes).unwrap_or(i32::MAX),
+                    allocated_minutes: i32::try_from(allocated).unwrap_or(i32::MAX),
                     deadline,
                     reason: classify_conflict(deadline, window_end),
                 });
@@ -2134,6 +2192,7 @@ impl App {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

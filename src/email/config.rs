@@ -27,20 +27,21 @@ impl EmailConfig {
     /// keep working unmodified.
     pub fn all_from_env() -> Vec<Self> {
         let enabled = env::var("TRIPTYCH_EMAIL_ENABLED")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .is_ok_and(|v| v.eq_ignore_ascii_case("true"));
 
         if !enabled {
             return Vec::new();
         }
 
-        match env::var("IMAP_ACCOUNTS") {
-            Ok(raw) => parse_account_labels(&raw)
-                .into_iter()
-                .filter_map(|label| Self::from_suffixed_env(&label))
-                .collect(),
-            Err(_) => Self::from_legacy_env().into_iter().collect(),
-        }
+        env::var("IMAP_ACCOUNTS").map_or_else(
+            |_| Self::from_legacy_env().into_iter().collect(),
+            |raw| {
+                parse_account_labels(&raw)
+                    .into_iter()
+                    .filter_map(|label| Self::from_suffixed_env(&label))
+                    .collect()
+            },
+        )
     }
 
     fn from_legacy_env() -> Option<Self> {
@@ -105,6 +106,7 @@ fn parse_account_labels(raw: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

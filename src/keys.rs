@@ -1,7 +1,7 @@
 //! Keyboard dispatch for the TUI. `handle_key_event` is the single entry point
 //! the event loop in main.rs calls per keypress; it routes on
-//! (InputMode, ViewMode, CalendarInputMode) to the per-mode handlers below,
-//! each translating raw KeyCodes into App method calls. Splitting this out of
+//! (`InputMode`, `ViewMode`, `CalendarInputMode`) to the per-mode handlers below,
+//! each translating raw `KeyCodes` into App method calls. Splitting this out of
 //! main.rs keeps process bootstrapping (terminal setup, daemon wiring)
 //! separate from "what does this key do in this mode".
 
@@ -15,7 +15,7 @@ pub enum KeyOutcome {
 }
 
 fn set_error(app: &mut App, e: impl std::fmt::Display) {
-    app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+    app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
 }
 
 pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
@@ -311,7 +311,7 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
 /// Keys while the email detail popup (`v`) is open: scroll the body or close
 /// it. Doesn't fall through to the list keys below it, same as how
 /// `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
-fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+const fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     match code {
         KeyCode::Esc | KeyCode::Char('v') => app.close_email_detail(),
         KeyCode::Char('j') | KeyCode::Down => {

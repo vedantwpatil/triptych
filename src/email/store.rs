@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
 use super::message::{EmailMessage, NewEmail};
@@ -7,13 +8,15 @@ use super::message::{EmailMessage, NewEmail};
 /// `message_id` — the same Message-ID can legitimately show up in more than one
 /// account, e.g. mailing lists or CCs).
 pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
     for email in emails {
         sqlx::query(
-            r#"
+            r"
             INSERT OR IGNORE INTO email_messages
                 (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
+            ",
         )
         .bind(email.uid)
         .bind(&email.message_id)
@@ -25,10 +28,11 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
         .bind(email.date_utc)
         .bind(&email.snippet)
         .bind(&email.body_text)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }
 
@@ -79,13 +83,13 @@ pub async fn set_sync_cursor(
     cursor: SyncCursor,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r"
         INSERT INTO email_sync_state (account, folder, uid_validity, last_uid)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(account, folder) DO UPDATE SET
             uid_validity = excluded.uid_validity,
             last_uid = excluded.last_uid
-        "#,
+        ",
     )
     .bind(account)
     .bind(folder)
@@ -97,22 +101,51 @@ pub async fn set_sync_cursor(
     Ok(())
 }
 
-/// Merged inbox across all accounts, most recent first.
+/// Merged inbox across all accounts, most recent first. Only one email's body is
+/// ever on screen at a time (the detail popup), so this deliberately leaves
+/// `body_text` unset (`NULL AS body_text`, not the real column) rather than
+/// pulling every row's full body off disk just to list subjects/senders — call
+/// [`get_body`] on demand when a specific email is opened.
 pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessage>> {
     let emails = sqlx::query_as::<_, EmailMessage>(
-        r#"
+        r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
-               snippet, is_read, task_id, body_text
+               snippet, is_read, task_id, NULL AS body_text
         FROM email_messages
         ORDER BY date_utc DESC
         LIMIT ?
-        "#,
+        ",
     )
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
     Ok(emails)
+}
+
+/// Fetches one email's full body on demand — the counterpart to [`get_recent`]
+/// leaving `body_text` unset in its listing.
+pub async fn get_body(pool: &SqlitePool, email_id: i64) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT body_text FROM email_messages WHERE id = ?")
+        .bind(email_id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.and_then(|row| row.try_get::<Option<String>, _>("body_text").ok().flatten()))
+}
+
+/// Deletes emails older than `cutoff`. Caller (`App::cleanup_old_emails`) runs this
+/// on every Email view entry with a 6-month cutoff — there's no other retention
+/// path, so without it `email_messages` grows unbounded. `date_utc` is indexed
+/// (`idx_email_messages_date`), so this is a cheap indexed range delete, not a
+/// table scan.
+pub async fn delete_older_than(pool: &SqlitePool, cutoff: DateTime<Utc>) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM email_messages WHERE date_utc < ?")
+        .bind(cutoff)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
 }
 
 pub async fn mark_read(pool: &SqlitePool, email_id: i64) -> Result<()> {

@@ -15,7 +15,7 @@ use clap::Parser;
 use cli::{Cli, Commands, EmailCommands, ScheduleCommands};
 use email::{EmailConfig, ImapMailSource, MailSource, message, store};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    event::{Event, EventStream},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -30,8 +30,42 @@ use std::io;
 use sync::{SyncConfig, SyncDaemon};
 use tokio::signal;
 
+/// Routes `tracing::*` calls (background IMAP sync's connection/fetch chatter -
+/// see `src/email/client.rs`, `src/sync/mail.rs`, `App::sync_email_accounts`) to
+/// a file instead of stderr. Those calls fire from `tokio::spawn`ed background
+/// tasks that can run at any time while the TUI has raw-mode control of the
+/// terminal; writing them straight to stderr punched text into the middle of the
+/// user's screen mid-navigation. `email sync`/`email list`'s own summary lines
+/// (`println!`/`eprintln!` in `handle_cli_command`) are separate and unaffected -
+/// those are a one-shot CLI command's direct, expected output.
+/// The returned guard must stay alive for the process's lifetime (tracing-
+/// appender's non-blocking writer flushes on drop) - bound in `main` and never
+/// explicitly dropped.
+fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
+    let log_path = std::env::var("TRIPTYCH_LOG_PATH").map_or_else(|_| std::env::temp_dir().join("triptych.log"), std::path::PathBuf::from);
+    let dir = log_path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = log_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("triptych.log"));
+    let (non_blocking, guard) =
+        tracing_appender::non_blocking(tracing_appender::rolling::never(dir, file_name));
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .init();
+
+    guard
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _tracing_guard = init_tracing();
+
     // Loads `.env` from the cwd or a parent dir into the process env, without
     // overriding any var already set (so a real shell export, or the sandbox
     // env `tests/cli.rs` passes to the child process, always wins). Nothing
@@ -45,18 +79,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli_args = Cli::parse();
 
     // Handle daemon commands first
-    if let Some(Commands::Daemon) = &cli_args.command {
+    if matches!(&cli_args.command, Some(Commands::Daemon)) {
         let app = App::build().await?;
         daemon::start_daemon(app.db_pool.clone(), app.nlp_parser_ref()).await?;
         return Ok(());
     }
 
-    if let Some(Commands::Stop) = &cli_args.command {
+    if matches!(&cli_args.command, Some(Commands::Stop)) {
         daemon::stop_daemon().await?;
         return Ok(());
     }
 
-    if let Some(Commands::Status) = &cli_args.command {
+    if matches!(&cli_args.command, Some(Commands::Status)) {
         if daemon::is_daemon_running().await {
             println!("✓ Daemon is running");
         } else {
@@ -70,12 +104,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::build().await?;
 
     if let Err(e) = run_calendar_migration(&app.db_pool).await {
-        eprintln!("⚠ Calendar migration failed: {}", e);
+        eprintln!("⚠ Calendar migration failed: {e}");
         eprintln!("   Calendar features will be disabled");
     }
 
     if let Err(e) = run_email_migration(&app.db_pool).await {
-        eprintln!("⚠ Email migration failed: {}", e);
+        eprintln!("⚠ Email migration failed: {e}");
         eprintln!("   Email features will be disabled");
     }
 
@@ -88,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // No subcommand - start the TUI (with sync daemon)
     // Start sync daemon BEFORE entering alternate screen so warmup messages print cleanly
     let sync_config = SyncConfig::from_env();
-    let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), sync_config).await?;
+    let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), &sync_config);
 
     app.load_tasks().await?;
 
@@ -96,17 +130,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let tui_result = run_app(&mut terminal, app).await;
 
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     daemon.shutdown().await?;
@@ -114,6 +144,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// One match arm per CLI subcommand - splitting it up would scatter each
+// subcommand's handling across functions without reducing complexity.
+#[allow(clippy::too_many_lines)]
 async fn handle_cli_command(
     app: &mut App,
     command: Commands,
@@ -128,15 +161,15 @@ async fn handle_cli_command(
                 .await
                 {
                     Ok(DaemonResponse::TaskAdded { id }) => {
-                        println!("✓ Added task: \"{}\" (ID: {}, via daemon)", description, id);
+                        println!("✓ Added task: \"{description}\" (ID: {id}, via daemon)");
                         return Ok(());
                     }
                     Ok(DaemonResponse::Error(e)) => {
-                        eprintln!("⚠ Daemon error: {}", e);
+                        eprintln!("⚠ Daemon error: {e}");
                         eprintln!("   Falling back to direct mode...");
                     }
                     Err(e) => {
-                        eprintln!("⚠ Daemon communication error: {}", e);
+                        eprintln!("⚠ Daemon communication error: {e}");
                         eprintln!("   Falling back to direct mode...");
                     }
                     _ => {
@@ -148,9 +181,9 @@ async fn handle_cli_command(
 
             // Fallback: direct execution
             match app.add_task(&description).await {
-                Ok(id) => println!("✓ Added task: \"{}\" (ID: {})", description, id),
+                Ok(id) => println!("✓ Added task: \"{description}\" (ID: {id})"),
                 Err(e) => {
-                    eprintln!("✗ Error adding task: {}", e);
+                    eprintln!("✗ Error adding task: {e}");
                     std::process::exit(1);
                 }
             }
@@ -199,10 +232,10 @@ async fn handle_cli_command(
                                 format!("{} ", indicators.join(" "))
                             };
 
-                            let tags_display = if !enhanced.tags.is_empty() {
-                                format!(" #{}", enhanced.tags.join(" #"))
-                            } else {
+                            let tags_display = if enhanced.tags.is_empty() {
                                 String::new()
+                            } else {
+                                format!(" #{}", enhanced.tags.join(" #"))
                             };
 
                             let description = if task.completed {
@@ -219,7 +252,7 @@ async fn handle_cli_command(
                     }
                 }
                 Err(e) => {
-                    eprintln!("✗ Error loading tasks: {}", e);
+                    eprintln!("✗ Error loading tasks: {e}");
                     std::process::exit(1);
                 }
             }
@@ -230,27 +263,27 @@ async fn handle_cli_command(
                 if let Ok(Some(task)) = app.get_task_by_id(id).await {
                     println!("✓ Marked task as done: \"{}\"", task.description);
                 } else {
-                    println!("✓ Marked task {} as done", id);
+                    println!("✓ Marked task {id} as done");
                 }
             }
             Ok(false) => {
-                eprintln!("✗ Task with ID {} not found", id);
+                eprintln!("✗ Task with ID {id} not found");
                 std::process::exit(1);
             }
             Err(e) => {
-                eprintln!("✗ Error completing task: {}", e);
+                eprintln!("✗ Error completing task: {e}");
                 std::process::exit(1);
             }
         },
 
         Commands::Rm { id } => match app.remove_task_by_id(id).await {
-            Ok(true) => println!("✓ Removed task with ID {}", id),
+            Ok(true) => println!("✓ Removed task with ID {id}"),
             Ok(false) => {
-                eprintln!("✗ Task with ID {} not found", id);
+                eprintln!("✗ Task with ID {id} not found");
                 std::process::exit(1);
             }
             Err(e) => {
-                eprintln!("✗ Error removing task: {}", e);
+                eprintln!("✗ Error removing task: {e}");
                 std::process::exit(1);
             }
         },
@@ -268,7 +301,7 @@ async fn handle_cli_command(
                 }
             }
             Err(e) => {
-                eprintln!("✗ Error clearing completed tasks: {}", e);
+                eprintln!("✗ Error clearing completed tasks: {e}");
                 std::process::exit(1);
             }
         },
@@ -280,17 +313,21 @@ async fn handle_cli_command(
                     println!("Cleared existing blocks");
                 }
                 match app.import_schedule_from_toml(&file).await {
-                    Ok(count) => println!("✓ Imported {} schedule blocks from {:?}", count, file),
+                    Ok(count) => {
+                        println!("✓ Imported {count} schedule blocks from {}", file.display());
+                    }
                     Err(e) => {
-                        eprintln!("✗ Import failed: {}", e);
+                        eprintln!("✗ Import failed: {e}");
                         std::process::exit(1);
                     }
                 }
             }
             ScheduleCommands::Export { file } => match app.export_schedule_to_toml(&file).await {
-                Ok(count) => println!("✓ Exported {} schedule blocks to {:?}", count, file),
+                Ok(count) => {
+                    println!("✓ Exported {count} schedule blocks to {}", file.display());
+                }
                 Err(e) => {
-                    eprintln!("✗ Export failed: {}", e);
+                    eprintln!("✗ Export failed: {e}");
                     std::process::exit(1);
                 }
             },
@@ -299,12 +336,12 @@ async fn handle_cli_command(
             }
             ScheduleCommands::Clear => {
                 let count = app.clear_all_schedule_blocks().await?;
-                println!("✓ Cleared {} schedule blocks", count);
+                println!("✓ Cleared {count} schedule blocks");
             }
             ScheduleCommands::Reallocate => match app.reallocate_all_tasks().await {
                 Ok(result) => {
                     if let Some(summary) = result.conflict_summary() {
-                        println!("⚠ {}", summary);
+                        println!("⚠ {summary}");
                         for conflict in &result.conflicts {
                             println!(
                                 "  - \"{}\" (ID: {}) needs {}m, got {}m (due {}) - {}",
@@ -324,7 +361,7 @@ async fn handle_cli_command(
                     }
                 }
                 Err(e) => {
-                    eprintln!("✗ Reallocation failed: {}", e);
+                    eprintln!("✗ Reallocation failed: {e}");
                     std::process::exit(1);
                 }
             },
@@ -348,7 +385,11 @@ async fn handle_cli_command(
                     match source.fetch_new(cursor).await {
                         Ok((uid_validity, raw_messages)) => {
                             let epoch_changed = match (cursor, uid_validity) {
-                                (Some(c), Some(current)) => c.uid_validity as u32 != current,
+                                // `c.uid_validity` was itself stored from a `u32`
+                                // (see `email/client.rs`), so this round-trip always fits.
+                                (Some(c), Some(current)) => {
+                                    u32::try_from(c.uid_validity).unwrap_or(0) != current
+                                }
                                 _ => false,
                             };
                             if epoch_changed {
@@ -358,13 +399,19 @@ async fn handle_cli_command(
                                 );
                             }
 
-                            let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
+                            let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
 
                             let new_emails: Vec<_> = raw_messages
                                 .into_iter()
-                                .filter_map(|(uid, raw)| {
-                                    message::parse_raw(&config.account, uid, &config.imap_folder, &raw)
-                                        .ok()
+                                .filter_map(|(uid, raw, header_only)| {
+                                    message::parse_raw(
+                                        &config.account,
+                                        uid,
+                                        &config.imap_folder,
+                                        &raw,
+                                        header_only,
+                                    )
+                                    .ok()
                                 })
                                 .collect();
 
@@ -381,12 +428,12 @@ async fn handle_cli_command(
                                 let prior_uid =
                                     if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
                                 let last_uid =
-                                    fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+                                    fetched_max_uid.map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
                                 store::set_sync_cursor(
                                     &app.db_pool,
                                     &config.account,
                                     &config.imap_folder,
-                                    store::SyncCursor { uid_validity: validity as i64, last_uid },
+                                    store::SyncCursor { uid_validity: i64::from(validity), last_uid },
                                 )
                                 .await
                                 .map_err(|e| e.to_string())?;
@@ -428,7 +475,9 @@ async fn handle_cli_command(
             }
         },
 
-        _ => unreachable!("Daemon commands handled earlier"),
+        // Daemon/Stop/Status are filtered out in `main` before this fn is called;
+        // reaching here means that filtering has a bug, not a real user path.
+        _ => return Err("unexpected daemon command reached handle_cli_command".into()),
     }
 
     Ok(())
@@ -440,7 +489,7 @@ fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
         default_hook(panic_info);
     }));
 }
@@ -470,13 +519,13 @@ where
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
-                        if let KeyOutcome::Quit = keys::handle_key_event(&mut app, key).await {
+                        if matches!(keys::handle_key_event(&mut app, key).await, KeyOutcome::Quit) {
                             return Ok(());
                         }
                     }
                     Some(Ok(_)) => {} // Other events (mouse, resize, etc.)
                     Some(Err(e)) => {
-                        app.status_message = Some((format!("Input error: {}", e), std::time::Instant::now()));
+                        app.status_message = Some((format!("Input error: {e}"), std::time::Instant::now()));
                     }
                     None => break, // Stream ended
                 }

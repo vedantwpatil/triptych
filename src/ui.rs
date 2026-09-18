@@ -41,8 +41,8 @@ fn render_email_view(f: &mut Frame, app: &mut App) {
 
             let mut spans = vec![
                 Span::styled(format!("({}) ", email.account), Style::default().fg(Color::Magenta)),
-                Span::styled(format!("[{}] ", date_text), Style::default().fg(Color::Green)),
-                Span::styled(format!("{:20} ", from), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("[{date_text}] "), Style::default().fg(Color::Green)),
+                Span::styled(format!("{from:20} "), Style::default().fg(Color::Cyan)),
             ];
 
             let subject_style = if email.is_read {
@@ -140,6 +140,9 @@ fn render_email_detail_popup(f: &mut Frame, app: &App) {
     f.render_widget(popup, area);
 }
 
+// One screen's worth of rendering - splitting it into helpers would scatter
+// widget-building state without reducing its actual complexity.
+#[allow(clippy::too_many_lines)]
 fn render_todo_view(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, f.area());
 
@@ -156,14 +159,12 @@ fn render_todo_view(f: &mut Frame, app: &mut App) {
             let status = if task.completed { "[✓]" } else { "[ ]" };
 
             // Parse tags for display
-            let tags: Vec<String> = if let Some(tags_json) = &task.tags {
+            let tags: Vec<String> = task.tags.as_ref().map_or_else(Vec::new, |tags_json| {
                 serde_json::from_str(tags_json).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+            });
 
             // Build the display line with colors and indicators
-            let mut spans = vec![Span::raw(format!("{} ", status))];
+            let mut spans = vec![Span::raw(format!("{status} "))];
 
             // Add priority indicator with text
             match task.priority {
@@ -184,15 +185,15 @@ fn render_todo_view(f: &mut Frame, app: &mut App) {
                 let time_str = scheduled.format("%l:%M%P").to_string().trim().to_string();
 
                 let date_text = if scheduled_date == today {
-                    format!("[TODAY {}]", time_str)
+                    format!("[TODAY {time_str}]")
                 } else if scheduled_date == tomorrow {
-                    format!("[TMR {}]", time_str)
+                    format!("[TMR {time_str}]")
                 } else {
                     format!("[{} {}]", scheduled.format("%m/%d"), time_str)
                 };
 
                 spans.push(Span::styled(
-                    format!("{} ", date_text),
+                    format!("{date_text} "),
                     Style::default().fg(Color::Green),
                 ));
             }
@@ -255,7 +256,9 @@ fn render_todo_view(f: &mut Frame, app: &mut App) {
             f.render_widget(input_box, chunks[1]);
 
             f.set_cursor_position(ratatui::layout::Position {
-                x: chunks[1].x + app.input_buffer.chars().count() as u16 + 1,
+                x: chunks[1].x
+                    + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX)
+                    + 1,
                 y: chunks[1].y + 1,
             });
         }
@@ -280,6 +283,9 @@ fn today_accent() -> Style {
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
 }
 
+// One screen's worth of rendering - splitting it into helpers would scatter
+// widget-building state without reducing its actual complexity.
+#[allow(clippy::too_many_lines)]
 fn render_calendar_view(f: &mut Frame, app: &App) {
     f.render_widget(Clear, f.area());
 
@@ -351,7 +357,7 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
                 // Non-selected cells always show the first (topmost) task;
                 // the selected cell shows whichever one `[`/`]` cycled to.
                 let task_index = if is_selected { app.stack_index } else { 0 };
-                let view = build_cell_view(&calendar_data, day_idx, &slot.time, task_index);
+                let view = build_cell_view(&calendar_data, day_idx, slot.time, task_index);
 
                 let headline = if is_selected && is_empty {
                     "[n: add block]".to_string()
@@ -392,11 +398,10 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
     // While a task is held (picked up with 'm'), the title swaps to drop
     // instructions so the pending action is always visible, not just in the
     // fading status line.
-    let title = if let Some(task_id) = app.held_task {
-        format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel")
-    } else {
-        "Weekly Calendar (t: todo, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string()
-    };
+    let title = app.held_task.map_or_else(
+        || "Weekly Calendar (t: todo, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string(),
+        |task_id| format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel"),
+    );
 
     let table = Table::new(rows, widths)
         .header(header)
@@ -449,7 +454,7 @@ fn build_calendar_grid(app: &App) -> CalendarGrid<'_> {
     let today = chrono::Local::now().naive_local().date();
     let week_offset = app.calendar_week_offset.unwrap_or(0);
     let start_of_week = today + Duration::weeks(week_offset)
-        - Duration::days(today.weekday().num_days_from_monday() as i64);
+        - Duration::days(i64::from(today.weekday().num_days_from_monday()));
 
     // Generate 7 days starting from Monday
     let days: Vec<NaiveDate> = (0..7).map(|i| start_of_week + Duration::days(i)).collect();
@@ -457,7 +462,8 @@ fn build_calendar_grid(app: &App) -> CalendarGrid<'_> {
     // Generate time slots (7am - 11pm in 1-hour increments)
     let time_slots: Vec<TimeSlot> = (7..23)
         .map(|hour| {
-            let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
+            // `hour` is always 7..23 from the range above, so this is never `None`.
+            let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or(NaiveTime::MIN);
             TimeSlot {
                 time,
                 time_label: time.format("%I%p").to_string().to_lowercase(),
@@ -495,7 +501,7 @@ struct CellView {
 fn cell_task_displays<'a>(
     grid: &CalendarGrid<'a>,
     day: NaiveDate,
-    slot_time: &NaiveTime,
+    slot_time: NaiveTime,
 ) -> Vec<(&'a str, i32, bool)> {
     grid.scheduled_tasks
         .iter()
@@ -519,7 +525,7 @@ fn cell_task_displays<'a>(
 fn build_cell_view(
     grid: &CalendarGrid<'_>,
     day_idx: usize,
-    slot_time: &NaiveTime,
+    slot_time: NaiveTime,
     task_index: usize,
 ) -> CellView {
     let day = grid.days[day_idx];
@@ -532,7 +538,7 @@ fn build_cell_view(
                 parse_time_string(&block.start_time),
                 parse_time_string(&block.end_time),
             ) {
-                start <= *slot_time && end > *slot_time
+                start <= slot_time && end > slot_time
             } else {
                 false
             }
@@ -610,7 +616,7 @@ fn get_block_style(block_type: &str) -> Style {
 fn truncate_text(text: &str, max_len: usize) -> String {
     if text.chars().count() > max_len {
         let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
+        format!("{truncated}...")
     } else {
         text.to_string()
     }
@@ -746,7 +752,7 @@ fn render_task_picker(f: &mut Frame, app: &App) {
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::styled(
-                    format!("[{}] ", category_label),
+                    format!("[{category_label}] "),
                     Style::default().fg(category_color),
                 ),
                 Span::raw(&task.description),
@@ -790,7 +796,7 @@ fn render_calendar_task_input(f: &mut Frame, app: &App) {
     f.render_widget(input_text, inner);
 
     f.set_cursor_position(ratatui::layout::Position {
-        x: inner.x + app.input_buffer.chars().count() as u16,
+        x: inner.x + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX),
         y: inner.y,
     });
 }
@@ -812,12 +818,13 @@ fn render_deadline_input(f: &mut Frame, app: &App) {
     f.render_widget(input_text, inner);
 
     f.set_cursor_position(ratatui::layout::Position {
-        x: inner.x + app.input_buffer.chars().count() as u16,
+        x: inner.x + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX),
         y: inner.y,
     });
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -845,7 +852,7 @@ mod tests {
             task_allocations: &task_allocations,
         };
 
-        let displays = cell_task_displays(&grid, d, &time(9));
+        let displays = cell_task_displays(&grid, d, time(9));
         assert_eq!(displays.len(), 3);
         assert_eq!(displays[0].0, "manual one");
         assert_eq!(displays[1].0, "manual two");
@@ -871,11 +878,11 @@ mod tests {
             scheduled_tasks: &two_tasks,
             task_allocations: &no_allocations,
         };
-        let view_two = build_cell_view(&grid_two, 0, &time(9), 0);
+        let view_two = build_cell_view(&grid_two, 0, time(9), 0);
         assert_eq!(view_two.overflow.as_deref(), Some("1/2"));
         assert!(view_two.headline.contains("first"));
 
-        let view_second = build_cell_view(&grid_two, 0, &time(9), 1);
+        let view_second = build_cell_view(&grid_two, 0, time(9), 1);
         assert_eq!(view_second.overflow.as_deref(), Some("2/2"));
         assert!(view_second.headline.contains("second"));
 
@@ -887,7 +894,7 @@ mod tests {
             scheduled_tasks: &one_task,
             task_allocations: &no_allocations,
         };
-        let view_one = build_cell_view(&grid_one, 0, &time(9), 0);
+        let view_one = build_cell_view(&grid_one, 0, time(9), 0);
         assert!(view_one.overflow.is_none());
     }
 
@@ -917,7 +924,7 @@ mod tests {
             task_allocations: &no_allocations,
         };
 
-        let view = build_cell_view(&grid, 0, &time(9), 0);
+        let view = build_cell_view(&grid, 0, time(9), 0);
         assert_eq!(view.headline, "[deepwork]");
         assert!(view.overflow.is_none());
     }
@@ -941,9 +948,9 @@ mod tests {
             task_allocations: &allocations,
         };
 
-        assert_eq!(cell_task_displays(&grid, d, &time(9)).len(), 1);
-        assert_eq!(cell_task_displays(&grid, d, &time(10)).len(), 1);
-        assert!(cell_task_displays(&grid, d, &time(11)).is_empty());
-        assert!(cell_task_displays(&grid, day(1), &time(9)).is_empty());
+        assert_eq!(cell_task_displays(&grid, d, time(9)).len(), 1);
+        assert_eq!(cell_task_displays(&grid, d, time(10)).len(), 1);
+        assert!(cell_task_displays(&grid, d, time(11)).is_empty());
+        assert!(cell_task_displays(&grid, day(1), time(9)).is_empty());
     }
 }

@@ -15,6 +15,85 @@ Run all three before considering a change done. Known Issues resolved in place, 
 
 ## Changelog
 
+- 2026-09-18: Clippy warn-level remediation, following up the deny-level fix in `624e9ae`
+  (`nursery`/`pedantic` enabled at `warn` in `Cargo.toml`). Started at 67 tractable findings
+  across 15 files after `cargo clippy --fix` mechanically resolved ~340; fixed each by hand.
+  Pattern used per finding: real cast sites (`as i64`/`as u32`/`as usize` narrowing DB-derived
+  or user-input-derived values) got `TryFrom::try_from(...).unwrap_or(fallback)` with a comment
+  justifying why the fallback branch is unreachable in practice, not a silent truncation;
+  `match`/`if let` over `Option`/`Result` that only branched two ways became
+  `.map_or_else(...)`; `manual_let_else` sites became `let Some(x) = ... else { continue };`.
+  Two cast patterns repeated 5-6x in one file each got a small shared helper instead of
+  per-site fixes: `day_of_week_i32` (`src/app.rs`) and `elapsed_ms` (`src/nlp/parser.rs`) - both
+  doc-commented with why the truncation branch can't hit. The UIDVALIDITY round-trip cast
+  (`c.uid_validity as u32`) recurs at 4 call sites across `app.rs`/`sync/mail.rs`/
+  `email/client.rs`/`main.rs`; fixed individually rather than a cross-module helper, since the
+  sites are unrelated modules - not a good abstraction target. Structural pedantic/nursery lints
+  with no real fix (`struct_field_names` on `Task.task_category`, which mirrors a DB column name;
+  `struct_excessive_bools` on `SyncConfig`'s 4 independent per-worker flags, see
+  [`src/sync/CLAUDE.md`](../src/sync/CLAUDE.md); `too_many_lines` on 5 functions that are each one
+  linear sequence - an IMAP protocol round-trip, a render function, an NLP pipeline, a migration's
+  idempotent-check list, a CLI subcommand dispatch) got targeted `#[allow]`s with a one-line
+  rationale instead of forced splits. Also: `SyncDaemon::start` (`src/sync/daemon.rs`) was
+  `async fn` returning `Result<Self>` despite never `.await`ing or failing in its own body (only
+  `tokio::spawn`s workers) - now a plain `fn` returning `Self`, taking `config: &SyncConfig`
+  instead of by value; `main.rs`'s one call site updated (dropped `.await` and the trailing `?`).
+  `OllamaClient::build_prompt`/`parse_response` (`src/nlp/ollama_client.rs`) didn't touch `self` -
+  now associated functions (`Self::build_prompt(input)`), called from `parse`. `{file:?}`/
+  `{socket:?}` in user-facing `println!`/`eprintln!` (`main.rs`'s `schedule import`/`export`,
+  `daemon.rs`'s startup/bind-failure messages) switched to `{}`/`.display()` - `Debug` on a
+  `PathBuf` adds quotes and escapes that `Display` doesn't, and these are plain status lines, not
+  diagnostic dumps. Separately, `arithmetic_side_effects`/`indexing_slicing` (both `nursery`) were
+  dropped from `Cargo.toml`'s lint table entirely rather than fixed per-site - too broad a rewrite
+  for the value, by user decision. Verified clean throughout: `cargo build --all-targets` (0
+  errors, only the 2 pre-existing baseline warnings - `EmailMessage`'s unread fields, the `toml`
+  crate's semver-metadata notice), `cargo clippy --all-targets` (same), `cargo test` (57 passed).
+- 2026-09-18: Fetch/storage efficiency pass, triggered by a live sync that fetched the entire
+  30,232-message mailbox (several multi-MB attachments included) instead of the intended
+  25-message capped catch-up, then lost all 505 already-fetched messages when it hit the
+  timeout (nothing persists until `fetch_new` returns `Ok` - a `tokio::time::timeout` on the
+  in-flight future drops everything it had accumulated). Root cause: `INITIAL_SYNC_LIMIT`'s cap
+  guard only checked `since_uid.is_none()`, not `since_uid == Some(0)` - a `last_uid = 0` cursor
+  row (the default value backfilled by `src/migrations.rs`'s `ALTER TABLE ... ADD COLUMN last_uid
+  ... DEFAULT 0` for any account that existed before that column did) looked identical to a
+  legitimate incremental resume, so it searched `UID 1:*` uncapped. Fixed: cap condition is now
+  `since_uid.is_none_or(|uid| uid == 0)`. Also reconciled a stale doc: `src/email/CLAUDE.md` said
+  `FETCH_TIMEOUT` was 120s; the source has read 300s since this session started (doc not updated
+  when the constant was last bumped) - corrected to match source. Four further changes, same
+  session:
+  1. **Selective fetch for oversized messages.** `client.rs::fetch_new_inner` now does a cheap
+     `(RFC822.SIZE)` pre-fetch (sizes only, no bodies) before the real fetch, splitting the UID
+     set into "small" (fetched as full `RFC822`, as before) and "large" (over
+     `LARGE_MESSAGE_BYTES` = 1 MiB, fetched as `RFC822.HEADER` only - no body, no attachments).
+     `RawMessage` is now `(uid, raw_bytes, header_only)`; `message::parse_raw` takes a
+     `header_only` param and synthesizes a placeholder snippet/`None` body for those instead of
+     parsing a body that was never fetched. All 3 duplicated callers (`src/sync/mail.rs`,
+     `main.rs`'s `EmailCommands::Sync`, `App::sync_email_accounts`) updated to destructure and
+     thread the extra tuple field through.
+  2. **Batched inserts.** `store::insert_new` wrapped its per-row `INSERT OR IGNORE` loop in a
+     single `sqlx::Transaction` (`pool.begin()`/`tx.commit()`) instead of one implicit
+     transaction per row.
+  3. **Lazy body load.** `store::get_recent` (used for the Email view's list, up to 100 rows) now
+     selects `NULL AS body_text` instead of the real column - the detail popup is the only place
+     a body is ever shown, and only one email at a time, so loading every row's full body just to
+     render a subject-line list was pure waste. New `store::get_body(pool, id)` fetches one
+     email's body on demand; `App::open_selected_email` calls it and patches the body into
+     `self.emails` by id after `mark_selected_email_read`'s own refresh (which would otherwise
+     re-null it).
+  4. **Background sync logging moved off stderr.** `client.rs`/`src/sync/mail.rs`/
+     `App::sync_email_accounts`'s connection/fetch/error messages were plain `eprintln!`, which
+     punched text directly into the terminal mid-TUI-navigation since they fire from
+     `tokio::spawn`ed background tasks with no relation to ratatui's raw-mode screen (user
+     report: sync output "keeps showing up while I'm going through the UI"). Switched to
+     `tracing::debug!/info!/warn!`; new `init_tracing()` in `main.rs` (using the `tracing`/
+     `tracing-subscriber`/`tracing-appender` deps that were already in `Cargo.toml` but never
+     wired up) routes them to a file instead - `$TMPDIR/triptych.log` by default, overridable via
+     `TRIPTYCH_LOG_PATH`, filtered by `RUST_LOG` (defaults to `info`, so the per-connection
+     `debug!` chatter is off unless asked for). `email sync`/`email list`'s own
+     `println!`/`eprintln!` summary lines in `handle_cli_command` are untouched - that's a
+     one-shot CLI command's direct, expected terminal output, not background noise.
+  Rebuilt/clippy/tested clean after each change (57 tests, no new warnings beyond the
+  pre-existing `EmailMessage` dead-field one).
 - 2026-09-18: Fixed mail sync silently going stale after a Gmail-side UIDVALIDITY change (user
   report: "I've gotten more emails since 7/24, why is it not updating"). Root cause #1: `.env`
   wasn't being loaded at all in one code path (fixed first, unblocked diagnosis). Root cause #2,
@@ -253,8 +332,23 @@ since epoch 0 never occurs on real IMAP servers.
 - `client.rs::fetch_new` had no timeout - a stalled/throttled IMAP server could hang the awaiting
   task forever, and since `mail_sync_worker` awaits each account sequentially inside one
   `tokio::select!` branch, that also blocked every future tick for every account and starved
-  shutdown. Fixed 2026-09-18 with a 120s `tokio::time::timeout` around the whole connect-through-
-  logout sequence (see Changelog).
+  shutdown. Fixed 2026-09-18 with a `tokio::time::timeout` (now 300s) around the whole connect-
+  through-logout sequence (see Changelog).
+- First-sync cap (`INITIAL_SYNC_LIMIT`, 25 messages) only checked `since_uid.is_none()`, so a
+  migration-backfilled `last_uid = 0` cursor row silently bypassed it and fetched the entire
+  mailbox (live-observed: 30,232 messages, several MB of attachments, lost entirely on the
+  resulting timeout). Fixed 2026-09-18: cap condition is now `since_uid.is_none_or(|uid| uid ==
+  0)` (see Changelog).
+- Fetch/storage inefficiency: every message got a full `RFC822` fetch regardless of size
+  (attachments included, though never stored), `insert_new` ran one implicit transaction per row,
+  and every row in the Email view's list carried its full body even though only one is ever shown
+  at a time. Fixed 2026-09-18: size-gated selective fetch (`LARGE_MESSAGE_BYTES`), batched insert
+  in one transaction, list/detail `body_text` split (see Changelog).
+- Background sync (`tokio::spawn`ed tasks: `mail_sync_worker`, `App::sync_email_accounts`,
+  `client.rs`) wrote straight to stderr via `eprintln!`, corrupting the TUI's display mid-
+  navigation since it bypasses ratatui's alternate-screen buffer. Fixed 2026-09-18: converted to
+  `tracing::debug!/info!/warn!`, routed to a file (`$TMPDIR/triptych.log` by default) via new
+  `init_tracing()` in `main.rs` (see Changelog).
 
 ## Open Questions
 

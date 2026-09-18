@@ -31,6 +31,12 @@ impl CachedParse {
     }
 }
 
+/// Milliseconds since `start`, for `ParseResult::parse_time_ms`. A parse never
+/// takes anywhere near `u64::MAX` ms, so the truncation is unreachable in practice.
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 impl NLPParser {
     pub async fn new() -> Self {
         let ollama_client = OllamaClient::new(None);
@@ -43,10 +49,14 @@ impl NLPParser {
         Self {
             ollama_client,
             ollama_available,
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap())),
+            // 1000 is a non-zero literal, so this is never `None`.
+            cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN))),
         }
     }
 
+    // A linear layered pipeline (Layer 0 through 3, see comments below) - splitting
+    // it into helpers would scatter that sequence without reducing its complexity.
+    #[allow(clippy::too_many_lines)]
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
         let start = Instant::now();
 
@@ -57,7 +67,7 @@ impl NLPParser {
         };
 
         if let Some(cached) = cache_hit {
-            let elapsed = start.elapsed().as_millis() as u64;
+            let elapsed = elapsed_ms(start);
             eprintln!("» Exact cache hit (originally {:?})!", cached.strategy);
             return Ok(ParseResult {
                 item: cached.item,
@@ -91,13 +101,16 @@ impl NLPParser {
         };
 
         if let Some((matched_input, cached_parse, similarity)) = fuzzy_match {
-            let elapsed = start.elapsed().as_millis() as u64;
+            let elapsed = elapsed_ms(start);
             eprintln!(
                 "≈ Similar pattern found ({:.0}% match): \"{}\"",
                 similarity * 100.0,
                 matched_input
             );
 
+            // `jaro_winkler` returns f64; no lossless f64->f32 conversion exists,
+            // and a similarity score in [0, 1] loses nothing that matters at f32.
+            #[allow(clippy::cast_possible_truncation)]
             let adjusted_confidence = cached_parse.confidence * similarity as f32;
             return Ok(ParseResult {
                 item: cached_parse.item,
@@ -115,7 +128,7 @@ impl NLPParser {
         if let Some(item) = &rule_fallback {
             let resolved_deadline = matches!(item, ParsedItem::Task(t) if t.deadline.is_some());
             if !crate::nlp::rules::has_unresolved_deadline_intent(input, resolved_deadline) {
-                let elapsed = start.elapsed().as_millis() as u64;
+                let elapsed = elapsed_ms(start);
                 let item = item.clone();
 
                 let result = ParseResult {
@@ -146,7 +159,7 @@ impl NLPParser {
         if self.ollama_available {
             match self.ollama_client.parse(input).await {
                 Ok(item) => {
-                    let elapsed = start.elapsed().as_millis() as u64;
+                    let elapsed = elapsed_ms(start);
 
                     let result = ParseResult {
                         item: item.clone(),
@@ -172,7 +185,7 @@ impl NLPParser {
                     return Ok(result);
                 }
                 Err(e) => {
-                    eprintln!("Ollama parsing failed: {}. Falling back.", e);
+                    eprintln!("Ollama parsing failed: {e}. Falling back.");
                 }
             }
         }
@@ -181,7 +194,7 @@ impl NLPParser {
         // something usable (just without a fully-resolved deadline) - use that
         // rather than discarding it entirely for the empty Layer 3 fallback.
         if let Some(item) = rule_fallback {
-            let elapsed = start.elapsed().as_millis() as u64;
+            let elapsed = elapsed_ms(start);
             return Ok(ParseResult {
                 item,
                 strategy: ParseStrategy::Regex,
@@ -191,7 +204,7 @@ impl NLPParser {
         }
 
         // Layer 3: Fallback
-        let elapsed = start.elapsed().as_millis() as u64;
+        let elapsed = elapsed_ms(start);
 
         let item = ParsedItem::Task(crate::nlp::types::Task {
             title: input.to_string(),
@@ -227,7 +240,7 @@ impl NLPParser {
         Ok(result)
     }
 
-    pub fn is_ollama_available(&self) -> bool {
+    pub const fn is_ollama_available(&self) -> bool {
         self.ollama_available
     }
 }
@@ -241,7 +254,7 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+            Self::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
         }
     }
 }

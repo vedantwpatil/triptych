@@ -11,9 +11,7 @@ use tokio::signal;
 // Socket path (will be in /tmp on Unix systems). Honors `TRIPTYCH_SOCKET_PATH` so tests/tooling
 // can run an isolated daemon without colliding with a real one on the shared default path.
 fn socket_path() -> PathBuf {
-    std::env::var("TRIPTYCH_SOCKET_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("triptych.sock"))
+    std::env::var("TRIPTYCH_SOCKET_PATH").map_or_else(|_| std::env::temp_dir().join("triptych.sock"), PathBuf::from)
 }
 
 // Messages sent between CLI and daemon
@@ -40,10 +38,10 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
     // Remove old socket if exists
     let _ = std::fs::remove_file(&socket);
 
-    let listener =
-        UnixListener::bind(&socket).context(format!("Failed to bind to socket: {:?}", socket))?;
+    let listener = UnixListener::bind(&socket)
+        .context(format!("Failed to bind to socket: {}", socket.display()))?;
 
-    eprintln!("[Daemon] Started at {:?}", socket);
+    eprintln!("[Daemon] Started at {}", socket.display());
     eprintln!("[Daemon] Pre-warming Ollama and loading cache...");
 
     // Pre-warm Ollama
@@ -57,14 +55,14 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
     // Preload cache from database
     let cache_start = std::time::Instant::now();
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        r#"
+        r"
         SELECT natural_language_input, COUNT(*) as count
         FROM tasks
         WHERE natural_language_input IS NOT NULL
         GROUP BY natural_language_input
         ORDER BY count DESC
         LIMIT 100
-        "#,
+        ",
     )
     .fetch_all(&db)
     .await?;
@@ -107,7 +105,7 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
                             tokio::select! {
                                 result = handle_client(stream, db, nlp) => {
                                     if let Err(e) = result {
-                                        eprintln!("[Daemon] Client error: {}", e);
+                                        eprintln!("[Daemon] Client error: {e}");
                                     }
                                 }
                                 _ = shutdown_rx.recv() => {
@@ -117,7 +115,7 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
                         });
                     }
                     Err(e) => {
-                        eprintln!("[Daemon] Accept error: {}", e);
+                        eprintln!("[Daemon] Accept error: {e}");
                     }
                 }
             }
@@ -154,13 +152,13 @@ async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParse
     let response = match request {
         DaemonRequest::Parse { input } => match nlp.parse(&input).await {
             Ok(result) => DaemonResponse::ParseResult(result),
-            Err(e) => DaemonResponse::Error(format!("Parse error: {}", e)),
+            Err(e) => DaemonResponse::Error(format!("Parse error: {e}")),
         },
 
         DaemonRequest::AddTask { description } => {
             match add_task_to_db(&db, &nlp, &description).await {
                 Ok(id) => DaemonResponse::TaskAdded { id },
-                Err(e) => DaemonResponse::Error(format!("Database error: {}", e)),
+                Err(e) => DaemonResponse::Error(format!("Database error: {e}")),
             }
         }
 
@@ -189,7 +187,7 @@ async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParse
 }
 
 /// Add a task to the database (daemon version). Persists deadline/duration like
-/// App::add_task, but doesn't reallocate (no App/pool of blocks here) - run
+/// `App::add_task`, but doesn't reallocate (no App/pool of blocks here) - run
 /// `triptych schedule reallocate` (or reopen the TUI) to pick up new deadlines.
 async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str) -> Result<i64> {
     let parse_result = nlp.parse(description).await?;
@@ -209,10 +207,10 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
 
     // Use runtime query instead of query! macro
     let result = sqlx::query(
-        r#"
+        r"
         INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category)
         VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?)
-        "#
+        "
     )
     .bind(&task_title)
     .bind(false)
@@ -276,7 +274,7 @@ pub async fn stop_daemon() -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            eprintln!("✗ Daemon not running or failed to stop: {}", e);
+            eprintln!("✗ Daemon not running or failed to stop: {e}");
             Err(e)
         }
     }

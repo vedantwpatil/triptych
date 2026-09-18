@@ -12,14 +12,14 @@ pub async fn preload_cache(
 ) -> Result<()> {
     let preload_task = tokio::spawn(async move {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            r#"
+            r"
             SELECT natural_language_input, COUNT(*) as count
             FROM tasks
             WHERE natural_language_input IS NOT NULL
             GROUP BY natural_language_input
             ORDER BY count DESC
             LIMIT 100
-            "#,
+            ",
         )
         .fetch_all(&db)
         .await?;

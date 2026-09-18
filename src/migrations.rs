@@ -53,7 +53,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
 
     // Create schedule_blocks table
     sqlx::query(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS schedule_blocks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             day_of_week INTEGER NOT NULL CHECK(day_of_week >= 0 AND day_of_week <= 6),
@@ -65,7 +65,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
             priority INTEGER DEFAULT 1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    "#,
+    ",
     )
     .execute(pool)
     .await?;
@@ -81,7 +81,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
 
     // Task-to-block allocations produced by the smart scheduler
     sqlx::query(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS task_block_allocations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -91,7 +91,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
             allocated_minutes INTEGER NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    "#,
+    ",
     )
     .execute(pool)
     .await?;
@@ -112,11 +112,14 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+// One linear sequence of idempotent CREATE/ALTER checks - splitting it into
+// helpers would scatter that sequence without reducing its actual complexity.
+#[allow(clippy::too_many_lines)]
 pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     eprintln!("[Migration] Checking email schema...");
 
     sqlx::query(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS email_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             uid INTEGER NOT NULL,
@@ -132,7 +135,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
             task_id INTEGER REFERENCES tasks(id),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    "#,
+    ",
     )
     .execute(pool)
     .await?;
@@ -151,7 +154,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
             .await?;
 
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE email_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uid INTEGER NOT NULL,
@@ -167,20 +170,20 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
                 task_id INTEGER REFERENCES tasks(id),
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-        "#,
+        ",
         )
         .execute(pool)
         .await?;
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO email_messages
                 (id, uid, message_id, account, folder, from_addr, from_name, subject,
                  date_utc, snippet, is_read, task_id, created_at)
             SELECT id, uid, message_id, 'default', folder, from_addr, from_name, subject,
                    date_utc, snippet, is_read, task_id, created_at
             FROM email_messages_old
-        "#,
+        ",
         )
         .execute(pool)
         .await?;
@@ -213,14 +216,14 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     // UIDs) and fall back to a fresh catch-up instead of resuming from a stale,
     // no-longer-meaningful `max_uid`.
     sqlx::query(
-        r#"
+        r"
         CREATE TABLE IF NOT EXISTS email_sync_state (
             account TEXT NOT NULL,
             folder TEXT NOT NULL,
             uid_validity INTEGER NOT NULL,
             PRIMARY KEY (account, folder)
         )
-    "#,
+    ",
     )
     .execute(pool)
     .await?;
@@ -239,8 +242,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
 
 async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
     let count: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = ?",
-        table
+        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?"
     ))
     .bind(column)
     .fetch_one(pool)
