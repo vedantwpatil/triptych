@@ -32,6 +32,16 @@ use tokio::signal;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Loads `.env` from the cwd or a parent dir into the process env, without
+    // overriding any var already set (so a real shell export, or the sandbox
+    // env `tests/cli.rs` passes to the child process, always wins). Nothing
+    // else in this codebase reads `.env` - previously every IMAP_*/
+    // TRIPTYCH_EMAIL_ENABLED var only took effect if the launching shell had
+    // sourced `.env` itself; a fresh terminal or process launched without
+    // that meant `EmailConfig::all_from_env()` silently returned empty and
+    // mail sync no-op'd, with no error surfaced anywhere obvious.
+    let _ = dotenvy::dotenv();
+
     let cli_args = Cli::parse();
 
     // Handle daemon commands first
@@ -138,7 +148,7 @@ async fn handle_cli_command(
 
             // Fallback: direct execution
             match app.add_task(&description).await {
-                Ok(_) => println!("✓ Added task: \"{}\"", description),
+                Ok(id) => println!("✓ Added task: \"{}\" (ID: {})", description, id),
                 Err(e) => {
                     eprintln!("✗ Error adding task: {}", e);
                     std::process::exit(1);
@@ -330,13 +340,26 @@ async fn handle_cli_command(
 
                 let mut any_failed = false;
                 for config in &configs {
-                    let last_uid = store::max_uid(&app.db_pool, &config.account, &config.imap_folder)
+                    let cursor = store::get_sync_cursor(&app.db_pool, &config.account, &config.imap_folder)
                         .await
                         .map_err(|e| e.to_string())?;
 
                     let source = ImapMailSource::new(config.clone());
-                    match source.fetch_new(last_uid.map(|uid| uid as u32)).await {
-                        Ok(raw_messages) => {
+                    match source.fetch_new(cursor).await {
+                        Ok((uid_validity, raw_messages)) => {
+                            let epoch_changed = match (cursor, uid_validity) {
+                                (Some(c), Some(current)) => c.uid_validity as u32 != current,
+                                _ => false,
+                            };
+                            if epoch_changed {
+                                eprintln!(
+                                    "  [{}] UIDVALIDITY changed; resyncing recent mail instead of resuming",
+                                    config.account
+                                );
+                            }
+
+                            let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
+
                             let new_emails: Vec<_> = raw_messages
                                 .into_iter()
                                 .filter_map(|(uid, raw)| {
@@ -349,6 +372,25 @@ async fn handle_cli_command(
                             store::insert_new(&app.db_pool, &new_emails)
                                 .await
                                 .map_err(|e| e.to_string())?;
+                            // See sync/mail.rs's sync_mail: skip persisting a synthetic
+                            // `last_uid = 0` when the epoch changed but nothing came back,
+                            // so the next sync retries the properly-capped catch-up.
+                            if let Some(validity) = uid_validity
+                                && !(epoch_changed && fetched_max_uid.is_none())
+                            {
+                                let prior_uid =
+                                    if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
+                                let last_uid =
+                                    fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+                                store::set_sync_cursor(
+                                    &app.db_pool,
+                                    &config.account,
+                                    &config.imap_folder,
+                                    store::SyncCursor { uid_validity: validity as i64, last_uid },
+                                )
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            }
                             println!("✓ [{}] Synced {} new email(s)", config.account, count);
                         }
                         Err(e) => {

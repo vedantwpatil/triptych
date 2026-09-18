@@ -3,11 +3,13 @@ use futures::TryStreamExt;
 use std::future::Future;
 use std::sync::{Arc, Once};
 use tokio::net::TcpStream;
+use tokio::time::Duration;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 use super::config::EmailConfig;
+use super::store::SyncCursor;
 
 static INIT_CRYPTO_PROVIDER: Once = Once::new();
 
@@ -27,16 +29,32 @@ fn ensure_crypto_provider() {
 /// fetches of a real inbox's entire history can be extremely slow and memory-heavy.
 const INITIAL_SYNC_LIMIT: usize = 25;
 
+/// Upper bound on one `fetch_new` call (connect through logout). Each sync opens a
+/// fresh TCP connection with no read timeout of its own, so a server that stops
+/// responding mid-handshake or mid-fetch would otherwise hang the awaiting task
+/// forever — observed live during this fix's own verification run. `mail_sync_worker`
+/// awaits this sequentially per account inside one `tokio::select!` branch, so an
+/// unbounded hang here doesn't just fail one account: it blocks every future tick for
+/// every account, and the task never returns to poll `shutdown_rx` either.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `(uid, raw_rfc822_bytes)` for one fetched message.
+type RawMessage = (u32, Vec<u8>);
+
 /// Abstraction over where new mail comes from, so alternative auth (OAuth2, other
 /// providers) can slot in later without touching callers.
 pub trait MailSource: Send + Sync {
-    /// Returns `(uid, raw_rfc822_bytes)` for every message with a UID greater than
-    /// `since_uid`. If `since_uid` is `None` (first sync), returns only the most
-    /// recent [`INITIAL_SYNC_LIMIT`] messages rather than the whole mailbox.
+    /// Returns the mailbox's current UIDVALIDITY plus every new message. IMAP only
+    /// guarantees UIDs are stable within one UIDVALIDITY epoch (RFC 3501) — Gmail,
+    /// e.g., can change it without any user action, silently invalidating every
+    /// previously-stored UID. If the server's current UIDVALIDITY doesn't match
+    /// `since.uid_validity`, `since.last_uid` is ignored and this behaves like a
+    /// first sync (capped to [`INITIAL_SYNC_LIMIT`]) instead of resuming from a UID
+    /// that may no longer mean what it used to.
     fn fetch_new(
         &self,
-        since_uid: Option<u32>,
-    ) -> impl Future<Output = Result<Vec<(u32, Vec<u8>)>>> + Send;
+        since: Option<SyncCursor>,
+    ) -> impl Future<Output = Result<(Option<u32>, Vec<RawMessage>)>> + Send;
 }
 
 pub struct ImapMailSource {
@@ -50,7 +68,20 @@ impl ImapMailSource {
 }
 
 impl MailSource for ImapMailSource {
-    async fn fetch_new(&self, since_uid: Option<u32>) -> Result<Vec<(u32, Vec<u8>)>> {
+    async fn fetch_new(&self, since: Option<SyncCursor>) -> Result<(Option<u32>, Vec<RawMessage>)> {
+        match tokio::time::timeout(FETCH_TIMEOUT, self.fetch_new_inner(since)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP sync for '{}' timed out after {}s",
+                self.config.account,
+                FETCH_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
+impl ImapMailSource {
+    async fn fetch_new_inner(&self, since: Option<SyncCursor>) -> Result<(Option<u32>, Vec<RawMessage>)> {
         ensure_crypto_provider();
 
         let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
@@ -81,10 +112,22 @@ impl MailSource for ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        session
+        let mailbox = session
             .select(&self.config.imap_folder)
             .await
             .context("failed to select IMAP folder")?;
+        let current_uid_validity = mailbox.uid_validity;
+
+        // Only trust the stored `uid` if the server's UIDVALIDITY still matches the
+        // one it had last time we stored it. If the server didn't report a
+        // UIDVALIDITY at all (non-compliant server), fall back to trusting `since`
+        // as before rather than forcing an unnecessary re-catch-up.
+        let since_uid = match current_uid_validity {
+            Some(validity) => since.and_then(|cursor| {
+                (cursor.uid_validity as u32 == validity).then_some(cursor.last_uid as u32)
+            }),
+            None => since.map(|cursor| cursor.last_uid as u32),
+        };
 
         let search_query = match since_uid {
             Some(uid) => format!("UID {}:*", uid + 1),
@@ -128,7 +171,7 @@ impl MailSource for ImapMailSource {
 
         let _ = session.logout().await;
 
-        Ok(result)
+        Ok((current_uid_validity, result))
     }
 }
 

@@ -106,17 +106,17 @@ Create a `schedule.toml` to define recurring time blocks:
 
 ```toml
 [[blocks]]
-day_of_week = "monday_wednesday_friday"
-start_time = "09:00"
-end_time = "12:00"
-block_type = "deepwork"
+day = "monday_wednesday_friday"
+start = "09:00"
+end = "12:00"
+type = "deepwork"
 title = "Focus Time"
 
 [[blocks]]
-day_of_week = "tuesday_thursday"
-start_time = "14:00"
-end_time = "15:00"
-block_type = "admin"
+day = "tuesday_thursday"
+start = "14:00"
+end = "15:00"
+type = "admin"
 title = "Emails & Planning"
 ```
 

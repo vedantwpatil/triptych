@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::email::{EmailConfig, ImapMailSource, MailSource, message, store as email_store};
 use crate::nlp::{NLPParser, ParsedItem, Priority};
 use ratatui::widgets::ListState;
 use sqlx::{
@@ -36,6 +37,13 @@ fn default_priority() -> i32 {
 }
 
 const DB_URL: &str = "sqlite:todo.db";
+
+/// Resolves the active database URL. Honors `DATABASE_URL` (matching
+/// `src/bin/import_schedule.rs` and every other config value in this project) so
+/// tests/tooling can point at an isolated database; falls back to `DB_URL` when unset.
+fn db_url() -> String {
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| DB_URL.to_string())
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
@@ -428,6 +436,10 @@ pub struct App {
     pub deadline_edit_task_id: Option<i64>,
     pub emails: Vec<crate::email::EmailMessage>,
     pub selected_email: usize,
+    /// Set when the email detail popup is open (`v` on a selected email in
+    /// the Email view); scroll resets to 0 each time it's opened.
+    pub email_detail_open: bool,
+    pub email_detail_scroll: u16,
     /// Persisted across frames so ratatui's viewport-scroll offset carries
     /// over between renders instead of recomputing from a fresh (offset 0)
     /// state every frame, which pins the selected row to the last visible
@@ -536,6 +548,8 @@ impl App {
             deadline_edit_task_id: None,
             emails: Vec::new(),
             selected_email: 0,
+            email_detail_open: false,
+            email_detail_scroll: 0,
             todo_list_state: ListState::default(),
             email_list_state: ListState::default(),
         }
@@ -684,7 +698,95 @@ impl App {
 
     pub async fn toggle_to_email(&mut self) {
         self.view_mode = ViewMode::Email;
+        self.email_detail_open = false;
+        self.sync_email_accounts();
         let _ = self.refresh_emails().await;
+    }
+
+    /// Kicks off a background pull of new mail from IMAP for every configured
+    /// account, so the Email view catches up sooner than the next 60s
+    /// `src/sync/mail.rs` poll instead of waiting on it. Fire-and-forget
+    /// (`tokio::spawn`, not awaited) rather than the blocking call this used
+    /// to be: run inline, a slow/unreachable IMAP server stalled the whole
+    /// TUI (no redraw, no key input) until every account's TCP+TLS round-trip
+    /// finished or failed. No-ops silently if email isn't configured;
+    /// per-account failures are logged to stderr, same as the background
+    /// poller, since there's no `&mut self` left to post a status_message to
+    /// once the task is spawned.
+    fn sync_email_accounts(&self) {
+        let configs = EmailConfig::all_from_env();
+        if configs.is_empty() {
+            return;
+        }
+
+        let db_pool = self.db_pool.clone();
+        tokio::spawn(async move {
+            for config in &configs {
+                let cursor = match email_store::get_sync_cursor(
+                    &db_pool,
+                    &config.account,
+                    &config.imap_folder,
+                )
+                .await
+                {
+                    Ok(cursor) => cursor,
+                    Err(e) => {
+                        eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                        continue;
+                    }
+                };
+                let source = ImapMailSource::new(config.clone());
+                match source.fetch_new(cursor).await {
+                    Ok((uid_validity, raw_messages)) => {
+                        let epoch_changed = match (cursor, uid_validity) {
+                            (Some(c), Some(current)) => c.uid_validity as u32 != current,
+                            _ => false,
+                        };
+                        if epoch_changed {
+                            eprintln!(
+                                "[Email] UIDVALIDITY changed for '{}'; resyncing recent mail instead of resuming",
+                                config.account
+                            );
+                        }
+
+                        let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
+
+                        let new_emails: Vec<_> = raw_messages
+                            .into_iter()
+                            .filter_map(|(uid, raw)| {
+                                message::parse_raw(&config.account, uid, &config.imap_folder, &raw)
+                                    .ok()
+                            })
+                            .collect();
+                        if let Err(e) = email_store::insert_new(&db_pool, &new_emails).await {
+                            eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                        }
+                        // See sync/mail.rs's sync_mail: skip persisting a synthetic
+                        // `last_uid = 0` when the epoch changed but nothing came back, so
+                        // the next sync retries the properly-capped catch-up.
+                        if let Some(validity) = uid_validity
+                            && !(epoch_changed && fetched_max_uid.is_none())
+                        {
+                            let prior_uid =
+                                if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
+                            let last_uid =
+                                fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+                            if let Err(e) = email_store::set_sync_cursor(
+                                &db_pool,
+                                &config.account,
+                                &config.imap_folder,
+                                email_store::SyncCursor { uid_validity: validity as i64, last_uid },
+                            )
+                            .await
+                            {
+                                eprintln!("[Email] sync failed for '{}': {}", config.account, e);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[Email] sync failed for '{}': {}", config.account, e),
+                }
+            }
+        });
     }
 
     /// Tab: TodoList -> Calendar -> Email -> TodoList.
@@ -706,7 +808,7 @@ impl App {
     }
 
     pub async fn refresh_emails(&mut self) -> Result<(), sqlx::Error> {
-        self.emails = crate::email::store::get_recent(&self.db_pool, 100)
+        self.emails = email_store::get_recent(&self.db_pool, 100)
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
@@ -727,6 +829,22 @@ impl App {
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
         self.refresh_emails().await
+    }
+
+    /// Opens the email detail popup on the selected email and marks it read,
+    /// same as most mail clients do on open.
+    pub async fn open_selected_email(&mut self) -> Result<(), sqlx::Error> {
+        if self.emails.get(self.selected_email).is_none() {
+            return Ok(());
+        }
+        self.email_detail_open = true;
+        self.email_detail_scroll = 0;
+        self.mark_selected_email_read().await
+    }
+
+    pub fn close_email_detail(&mut self) {
+        self.email_detail_open = false;
+        self.email_detail_scroll = 0;
     }
 
     pub async fn convert_selected_email_to_task(&mut self) -> Result<(), sqlx::Error> {
@@ -754,11 +872,12 @@ impl App {
     }
 
     pub async fn build() -> Result<Self, sqlx::Error> {
-        if !Sqlite::database_exists(DB_URL).await.unwrap_or(false) {
-            Sqlite::create_database(DB_URL).await?;
+        let db_url = db_url();
+        if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
+            Sqlite::create_database(&db_url).await?;
         }
 
-        let db_pool = SqlitePool::connect(DB_URL).await?;
+        let db_pool = SqlitePool::connect(&db_url).await?;
         sqlx::migrate!("./migrations").run(&db_pool).await?;
 
         let app = Self::new(db_pool).await;
@@ -788,7 +907,7 @@ impl App {
         Ok(())
     }
 
-    pub async fn add_task(&mut self, description: &str) -> Result<(), sqlx::Error> {
+    pub async fn add_task(&mut self, description: &str) -> Result<i64, sqlx::Error> {
         let parse_result = self
             .nlp_parser
             .parse(description)
@@ -798,14 +917,14 @@ impl App {
         let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
             extract_task_fields(parse_result.item);
 
-        let new_order: i64;
-        if self.tasks.is_empty() {
-            new_order = 0;
+        
+        let new_order: i64 = if self.tasks.is_empty() {
+            0
         } else if self.selected == 0 {
             sqlx::query("UPDATE tasks SET item_order = item_order + 1 WHERE item_order >= 0")
                 .execute(&self.db_pool)
                 .await?;
-            new_order = 0;
+            0
         } else {
             let current_order = self.tasks[self.selected]
                 .item_order
@@ -816,8 +935,8 @@ impl App {
                 .execute(&self.db_pool)
                 .await?;
 
-            new_order = current_order + 1;
-        }
+            current_order + 1
+        };
 
         let tags_json = if tags_list.is_empty() {
             None
@@ -829,7 +948,7 @@ impl App {
         let duration_minutes =
             duration_minutes.unwrap_or_else(|| default_duration_for_category(&category));
 
-        sqlx::query(
+        let new_task_id = sqlx::query(
             "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&task_title)
@@ -843,7 +962,8 @@ impl App {
         .bind(duration_minutes)
         .bind(&category)
         .execute(&self.db_pool)
-        .await?;
+        .await?
+        .last_insert_rowid();
 
         self.load_tasks().await?;
 
@@ -857,7 +977,7 @@ impl App {
             self.on_task_changed().await?;
         }
 
-        Ok(())
+        Ok(new_task_id)
     }
 
     pub async fn delete_task(&mut self) -> Result<(), sqlx::Error> {

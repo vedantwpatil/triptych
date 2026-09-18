@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use super::message::{EmailMessage, NewEmail};
 
@@ -11,8 +11,8 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
         sqlx::query(
             r#"
             INSERT OR IGNORE INTO email_messages
-                (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(email.uid)
@@ -24,6 +24,7 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
         .bind(&email.subject)
         .bind(email.date_utc)
         .bind(&email.snippet)
+        .bind(&email.body_text)
         .execute(pool)
         .await?;
     }
@@ -31,18 +32,69 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
     Ok(())
 }
 
-/// Highest synced UID for a given account+folder, or `None` if nothing's been
-/// synced yet. Scoped by account so two accounts sharing a folder name (e.g. both
-/// have an `INBOX`) don't clobber each other's resume point.
-pub async fn max_uid(pool: &SqlitePool, account: &str, folder: &str) -> Result<Option<i64>> {
-    let last_uid: Option<i64> =
-        sqlx::query_scalar("SELECT MAX(uid) FROM email_messages WHERE account = ? AND folder = ?")
-            .bind(account)
-            .bind(folder)
-            .fetch_one(pool)
-            .await?;
+/// A sync resume point for one account+folder: the IMAP UIDVALIDITY epoch it was
+/// captured under, and the highest UID synced within that epoch. Fields are `i64`
+/// to match the SQLite columns; `client::ImapMailSource` casts to `u32` at the
+/// IMAP-protocol boundary. A named struct instead of a `(i64, i64)` tuple so the
+/// two same-typed fields can't be silently swapped at a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncCursor {
+    pub uid_validity: i64,
+    pub last_uid: i64,
+}
 
-    Ok(last_uid)
+/// This account+folder's resume point from last time, or `None` if never synced.
+/// Deliberately *not* derived from `MAX(uid)` over `email_messages`: that table
+/// can hold rows from more than one UIDVALIDITY epoch at once (dedup is by
+/// `message_id`, not `uid`, so old-epoch rows are never removed when the epoch
+/// changes), so its max would silently mix a stale epoch's UID back into a live
+/// search. This cursor is written by [`set_sync_cursor`] once per sync, scoped to
+/// whichever epoch was current then.
+pub async fn get_sync_cursor(
+    pool: &SqlitePool,
+    account: &str,
+    folder: &str,
+) -> Result<Option<SyncCursor>> {
+    let row = sqlx::query(
+        "SELECT uid_validity, last_uid FROM email_sync_state WHERE account = ? AND folder = ?",
+    )
+    .bind(account)
+    .bind(folder)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(match row {
+        Some(row) => Some(SyncCursor {
+            uid_validity: row.try_get("uid_validity")?,
+            last_uid: row.try_get("last_uid")?,
+        }),
+        None => None,
+    })
+}
+
+pub async fn set_sync_cursor(
+    pool: &SqlitePool,
+    account: &str,
+    folder: &str,
+    cursor: SyncCursor,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO email_sync_state (account, folder, uid_validity, last_uid)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(account, folder) DO UPDATE SET
+            uid_validity = excluded.uid_validity,
+            last_uid = excluded.last_uid
+        "#,
+    )
+    .bind(account)
+    .bind(folder)
+    .bind(cursor.uid_validity)
+    .bind(cursor.last_uid)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Merged inbox across all accounts, most recent first.
@@ -50,7 +102,7 @@ pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessag
     let emails = sqlx::query_as::<_, EmailMessage>(
         r#"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
-               snippet, is_read, task_id
+               snippet, is_read, task_id, body_text
         FROM email_messages
         ORDER BY date_utc DESC
         LIMIT ?

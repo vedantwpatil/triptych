@@ -5,6 +5,7 @@ use tokio::time::{Duration, interval};
 
 use crate::email::{EmailConfig, ImapMailSource, MailSource};
 use crate::email::{message, store};
+use crate::email::store::SyncCursor;
 
 /// Polls every configured IMAP account for new mail every 60s, one account after
 /// another within each tick. Not true IMAP IDLE (push) — that's a longer-lived-
@@ -42,9 +43,22 @@ pub async fn mail_sync_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiv
 }
 
 async fn sync_mail(db: &SqlitePool, source: &ImapMailSource, config: &EmailConfig) -> Result<()> {
-    let last_uid = store::max_uid(db, &config.account, &config.imap_folder).await?;
+    let cursor = store::get_sync_cursor(db, &config.account, &config.imap_folder).await?;
 
-    let raw_messages = source.fetch_new(last_uid.map(|uid| uid as u32)).await?;
+    let (uid_validity, raw_messages) = source.fetch_new(cursor).await?;
+
+    let epoch_changed = match (cursor, uid_validity) {
+        (Some(c), Some(current)) => c.uid_validity as u32 != current,
+        _ => false,
+    };
+    if epoch_changed {
+        eprintln!(
+            "[Mail] UIDVALIDITY changed for '{}'; resyncing recent mail instead of resuming",
+            config.account
+        );
+    }
+
+    let fetched_max_uid = raw_messages.iter().map(|(uid, _)| *uid).max();
 
     let new_emails: Vec<_> = raw_messages
         .into_iter()
@@ -55,6 +69,25 @@ async fn sync_mail(db: &SqlitePool, source: &ImapMailSource, config: &EmailConfi
 
     if !new_emails.is_empty() {
         store::insert_new(db, &new_emails).await?;
+    }
+
+    // If the epoch changed and nothing came back this round, don't persist a
+    // synthetic `last_uid = 0`: that would search "UID 1:*" next time, which is
+    // NOT capped by INITIAL_SYNC_LIMIT the way a `None` cursor's "ALL" search is.
+    // Leaving the stale cursor in place instead makes the next sync detect the
+    // same epoch change and retry the correctly-capped catch-up.
+    if let Some(validity) = uid_validity
+        && !(epoch_changed && fetched_max_uid.is_none())
+    {
+        let prior_uid = if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
+        let last_uid = fetched_max_uid.map_or(prior_uid, |uid| (uid as i64).max(prior_uid));
+        store::set_sync_cursor(
+            db,
+            &config.account,
+            &config.imap_folder,
+            SyncCursor { uid_validity: validity as i64, last_uid },
+        )
+        .await?;
     }
 
     Ok(())

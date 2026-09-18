@@ -8,9 +8,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
 
-// Socket path (will be in /tmp on Unix systems)
+// Socket path (will be in /tmp on Unix systems). Honors `TRIPTYCH_SOCKET_PATH` so tests/tooling
+// can run an isolated daemon without colliding with a real one on the shared default path.
 fn socket_path() -> PathBuf {
-    std::env::temp_dir().join("triptych.sock")
+    std::env::var("TRIPTYCH_SOCKET_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("triptych.sock"))
 }
 
 // Messages sent between CLI and daemon
@@ -162,9 +165,13 @@ async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParse
         }
 
         DaemonRequest::Shutdown => {
-            // Send OK then exit
+            // Send OK then exit. This bypasses the accept loop's own shutdown path, so
+            // clean up the socket here too - otherwise it's left stale on disk (harmless
+            // for a future `daemon` start, which force-removes it anyway, but confusing
+            // for anything checking `socket.exists()` as a running/not-running signal).
             let response_bytes = serde_json::to_vec(&DaemonResponse::Ok)?;
             stream.write_all(&response_bytes).await?;
+            let _ = std::fs::remove_file(socket_path());
             std::process::exit(0);
         }
 

@@ -15,6 +15,136 @@ Run all three before considering a change done. Known Issues resolved in place, 
 
 ## Changelog
 
+- 2026-09-18: Fixed mail sync silently going stale after a Gmail-side UIDVALIDITY change (user
+  report: "I've gotten more emails since 7/24, why is it not updating"). Root cause #1: `.env`
+  wasn't being loaded at all in one code path (fixed first, unblocked diagnosis). Root cause #2,
+  the deeper bug: IMAP only guarantees UIDs are stable within one UIDVALIDITY epoch (RFC 3501) -
+  Gmail changed it server-side with no user action, silently invalidating every previously-stored
+  UID, so the old `max_uid`-derived resume cursor kept searching from a UID that no longer meant
+  anything in the new epoch. Fix, in 3 layers:
+  1. `client.rs`'s `MailSource::fetch_new` now returns the mailbox's current `uid_validity`
+     alongside messages, and compares it against the caller's stored cursor before trusting
+     `last_uid` - a mismatch is treated as a first sync (`INITIAL_SYNC_LIMIT`-capped) instead of
+     resuming from a stale UID.
+  2. Discovered via a live second sync that comparing-before-trusting wasn't enough: `store::
+     max_uid` derived the cursor from `MAX(uid)` over `email_messages`, but that table can hold
+     rows from more than one UIDVALIDITY epoch at once (`insert_new`'s `INSERT OR IGNORE` dedups
+     by `(account, message_id)`, not `uid`, so old-epoch rows are never purged on an epoch
+     change) - its max kept silently returning the stale epoch's UID forever, reproducing the
+     original bug on every sync after the first. Replaced with a self-contained cursor: new
+     `email_sync_state(account, folder, uid_validity, last_uid)` table (`src/migrations.rs`,
+     same idempotent-`ALTER TABLE` pattern as the rest of the post-initial-schema columns),
+     written once per sync by `store::set_sync_cursor`/read by `store::get_sync_cursor`. `store::
+     max_uid` removed entirely (verified no other callers via `grep -rn max_uid`).
+  3. `uid_validity`/`last_uid` moved from same-typed `(u32, u32)`/`(i64, i64)` tuples to a named
+     `SyncCursor { uid_validity, last_uid }` struct (`src/email/store.rs`) - same bug class
+     (UID/epoch confusion) as root cause #2, so tuple-of-same-type felt worth eliminating rather
+     than risk swapping the two fields at a call site later. Also fixed an edge case found in
+     self-review: if the epoch changed but zero messages came back that round, persisting a
+     synthetic `last_uid = 0` would produce `since_uid = Some(0)` next time - bypassing
+     `INITIAL_SYNC_LIMIT`'s cap, which only applies when `since_uid` is `None`. Now skips the
+     cursor write in that specific case, leaving the stale-but-safe cursor in place so the next
+     sync retries the same capped catch-up.
+  All 3 duplicated call sites updated in lockstep (`src/sync/mail.rs::sync_mail`,
+  `main.rs`'s `EmailCommands::Sync`, `App::sync_email_accounts`) - see `src/email/CLAUDE.md`'s
+  "three independent callers" gotcha. Verified against the real mailbox: first post-fix sync
+  correctly did a capped 25-message catch-up and revealed the true new-epoch UID range
+  (30752-30776) coexisting with old-epoch rows up to 42978, directly confirming the UIDVALIDITY-
+  change hypothesis. A later verification run then hung for 10+ minutes with an ESTABLISHED-but-
+  silent TCP connection (`lsof` confirmed), reproduced on retry - migrations completed instantly
+  both times, so the stall was inside the IMAP session itself, not the new cursor logic. A raw
+  `openssl s_client` TLS handshake to `imap.gmail.com:993` completed fast with a valid cert
+  chain, ruling out a network/DNS/firewall problem; most likely Gmail-side throttling from the
+  repeated rapid automated logins this debugging session generated. Exposed a real gap either
+  way: `client.rs::fetch_new` had no timeout, and since `mail_sync_worker` awaits it sequentially
+  inside one `tokio::select!` branch, an unbounded hang there blocks every future tick for every
+  account and starves the `shutdown_rx` poll too - not just a failed sync. Fixed by wrapping the
+  connect-through-logout sequence in `tokio::time::timeout(FETCH_TIMEOUT, ...)`
+  (`FETCH_TIMEOUT = 120s`; body moved to a private `fetch_new_inner`, `fetch_new` is now a thin
+  timeout wrapper). Confirmed working: rerunning `email sync` against the same stalled account
+  now fails cleanly after 120s (`"IMAP sync for 'default' timed out after 120s"`) instead of
+  hanging indefinitely.
+- 2026-09-18: Fixed the Email view freezing on `m`/Tab/Esc - reported as "doesn't seem to be
+  functional/accepting action key presses". Root cause was the tradeoff called out in the entry
+  below: `App::toggle_to_email` awaited `sync_email_accounts` synchronously in the key handler,
+  so a slow/unreachable IMAP server blocked the TUI's redraw loop (no draw, no key input) for
+  the entire per-account TCP+TLS round-trip. `sync_email_accounts` (`src/app.rs`) now
+  `tokio::spawn`s the fetch→parse→store work instead of awaiting it; `toggle_to_email` returns
+  immediately after kicking it off and showing whatever's already in the DB via `refresh_emails`.
+  Per-account failures move from `status_message` to `eprintln!` (see `src/email/CLAUDE.md`),
+  since there's no `&mut App` left once the task is spawned. Also added: email body viewing.
+  `email_messages` gained a `body_text` column (`src/migrations.rs`, idempotent `ALTER TABLE`
+  like the rest of that table's post-initial-schema columns); `message::parse_raw` now extracts
+  it via `mail-parser`'s `body_text(0)` (full text/plain part, or HTML-to-text if that's all the
+  message has - same conversion `body_preview` already used for the snippet, just without
+  collapsing line breaks). New `v` key in the Email view (`src/keys.rs::handle_email_key`) opens
+  a detail popup (`render_email_detail_popup`, `src/ui.rs`, same `centered_rect` pattern as the
+  BlockForm/TaskPicker popups) showing from/date/body, scrollable with `j`/`k`, closed with
+  `Esc`/`v`; opening it also marks the email read (`App::open_selected_email`).
+- 2026-09-18: Email view now syncs IMAP before showing cached mail, instead of only refreshing
+  from the local DB. `App::toggle_to_email` (`src/app.rs`) calls new `sync_email_accounts`
+  (max_uid → fetch_new → parse_raw → insert_new per configured account, same shape as
+  `EmailCommands::Sync`) before `refresh_emails`, so `m`/Tab/Esc into the Email view always
+  pulls current mail rather than whatever the last 60s background poll or manual `email sync`
+  left cached - mail previously only synced while the TUI was the open process (see Known
+  Issues), which had left a real inbox stuck 8 weeks stale. No-ops silently if email isn't
+  configured; per-account failures land in
+  `status_message` rather than aborting the view. Tradeoff: this `.await`s synchronously in the
+  key handler, so it blocks the TUI's redraw loop until the IMAP round-trip finishes - see
+  `src/email/CLAUDE.md`'s new gotcha if that needs to become non-blocking later.
+- 2026-09-18: Fixed calendar view swallowing `m`/`u`/`e`/`d` feedback. `render_calendar_view`
+  (`src/ui.rs`) never rendered `app.status_message` - unlike `render_todo_view`/
+  `render_email_view`, which both do - so error paths like "No scheduled task here" (pressing
+  `u`/`m`/`e` on an empty cell) or "Can't move a deadline allocation directly" set the message
+  correctly in `App` but nothing ever showed it. Looked identical to the key doing nothing.
+  Added a status-line chunk (`Constraint::Length(3)`, same 3s-fade pattern as the other two
+  views), shown only in `CalendarInputMode::Navigate` since popups (`n`/`s`/`a`) cover the area
+  anyway. Root-caused by driving the compiled binary through a real pty (`expect`, isolated
+  sandbox via `DATABASE_URL`/`TRIPTYCH_SOCKET_PATH`) rather than just reading `keys.rs` -
+  dispatch logic for every calendar key was already correct, confirming `n`/`s`/`a` open their
+  popups and `u` sets its status text; the gap was purely the missing render call.
+- 2026-09-18: Extended `tests/cli.rs` with 7 more tests (13 total) covering calendar/
+  scheduling and email paths not yet exercised: `schedule reallocate` success (task with
+  a deadline+duration fits a matching deepwork block) and conflict (`"1 out of block
+  capacity"`, `"needs 120m, got 0m"`, reason text - all sourced from `AllocationResult::
+  conflict_summary`/`ConflictReason` in `src/app.rs`, not guessed); CLI-level compound/
+  group day import (`"weekdays"` + `"monday_wednesday_friday"` -> 8 blocks); the
+  overlapping-block-skip warning path (second block on the same day/time is dropped, not
+  imported, with a stderr warning); `schedule import --clear`; `email list` formatting
+  against seeded rows (inserted directly into `email_messages` via a throwaway `sqlx`
+  pool, bypassing IMAP) - read/unread marker, `(account)` tag, `from_name` vs. `from_addr`
+  fallback, most-recent-first ordering; and `email sync` against a closed local port, as a
+  fast, network-free way to exercise the per-account failure path without needing a real
+  IMAP server. All source-verified by reading the actual code first (`src/app.rs`,
+  `src/main.rs`, `src/nlp/rules.rs`, `src/migrations.rs`, `src/email/store.rs`) rather than
+  guessed - one wrong guess caught along the way: the overlap warning prints the day name
+  lowercase (`"on monday"`), not capitalized like `schedule show`'s display - not a bug,
+  just two independent naming conventions for the same day-of-week int. No product code
+  changed this round.
+- 2026-09-18: Built `tests/cli.rs` - black-box integration tests that spawn the compiled
+  `triptych` binary per-test (not an in-process `App` call), each in a throwaway sandbox dir
+  passed as `DATABASE_URL`/`TRIPTYCH_SOCKET_PATH` env vars, so `cargo test` never touches the
+  real `todo.db` or a live `$TMPDIR/triptych.sock`. Required two small, non-breaking fixes to
+  make that isolation possible: `App::build()` (`src/app.rs`) now reads `DATABASE_URL` (was
+  hardcoded to `sqlite:todo.db`, ignoring the env var entirely - see the DB gotcha below,
+  updated); `src/daemon.rs`'s `socket_path()` now reads `TRIPTYCH_SOCKET_PATH`, falling back to
+  the old `$TMPDIR/triptych.sock` default in both cases. Running this harness surfaced 2 real
+  bugs, both fixed same session:
+  - `triptych add` printed no task ID in the (default, no-daemon-running) direct-execution
+    path - only the daemon fast-path did. `App::add_task` now returns the inserted row id
+    (via `execute().await?.last_insert_rowid()`, not a separate `SELECT last_insert_rowid()`
+    query, which would be unreliable against a pool since that value is connection-scoped) and
+    `main.rs` prints it, matching the daemon path's wording. Callers that only cared about
+    `Err` (`src/keys.rs`, the email-to-task conversion in `src/app.rs`) needed no changes.
+  - `triptych stop` called `std::process::exit(0)` directly inside `handle_client`'s
+    `Shutdown` arm, bypassing `start_daemon`'s own socket cleanup at the end of its accept
+    loop - left a stale socket file on disk after every clean shutdown. Now removes the
+    socket in that arm too before exiting.
+  - Also fixed a real doc bug the harness's schedule-import test caught by using the *wrong*
+    field names on purpose first: README.md's example `schedule.toml` used
+    `day_of_week`/`start_time`/`end_time`/`block_type`, none of which match
+    `BlockDefinition`'s actual fields (`day`/`start`/`end`/`type` - `future.md`'s example had
+    it right). Copy-pasting README's example would fail to import. Fixed.
 - 2026-09-17: `install_panic_hook()` in `main.rs` — a panic mid-TUI used to skip the raw-mode/
   alt-screen teardown, breaking the terminal. Hook restores it before the panic prints.
 - 2026-09-17: Fixed calendar same-hour task collision. `src/ui.rs`: `find_task_display`/
@@ -62,6 +192,19 @@ clean, no action taken:
 - Derives: `App` has none; every field is `Debug`+`Clone`-able, so `#[derive(Debug)]` would be
   free. Low priority, not filed.
 
+## Rust Idioms Audit (2026-09-18)
+
+Ran the `rust-idioms` skill against this session's UIDVALIDITY cursor fix (`client.rs`,
+`store.rs`, `migrations.rs`, `sync/mail.rs`, `app.rs`, `main.rs`) plus the earlier-session
+email-body-popup code (`message.rs`, `ui.rs`). 2 issues found and fixed during the fix itself
+(see Changelog: the `SyncCursor` struct, the `last_uid = 0` edge case) - no further issues in
+those files on re-review. `message.rs`/`ui.rs` reviewed clean: `Context`/let-else throughout
+(no panics on malformed mail), iterator-based body rendering (`body.lines().map(Line::from)`,
+zero-copy), `sqlx::Row::try_get` chosen over tuple `FromRow` to avoid relying on an unverified
+sqlx API surface. `SyncCursor` derives `Debug, Clone, Copy, PartialEq, Eq` but not `Default` -
+deliberate, not an oversight: a "default cursor" (validity 0, uid 0) has no sensible meaning
+since epoch 0 never occurs on real IMAP servers.
+
 ## Known Issues
 
 ### Open
@@ -80,6 +223,38 @@ clean, no action taken:
 - Stale multi-account docs (`email`/`sync` `CLAUDE.md`). Fixed 2026-09-17.
 - Calendar grid actions only reached the first task of a stacked cell. Fixed 2026-09-17.
 - Deadline allocations only rendered in their block's start hour. Fixed 2026-09-17.
+- `App::build()` ignored `DATABASE_URL`, hardcoded to `sqlite:todo.db`, inconsistent with
+  `import_schedule.rs`. Fixed 2026-09-18 (see Changelog).
+- `triptych add` printed no task ID outside the daemon fast-path. Fixed 2026-09-18.
+- `triptych stop` left a stale socket file (`std::process::exit` skipped cleanup). Fixed
+  2026-09-18.
+- README.md's `schedule.toml` example used field names that don't match the code
+  (`day_of_week`/`start_time`/`end_time`/`block_type` vs. actual `day`/`start`/`end`/`type`),
+  so copy-pasting it failed to import. Fixed 2026-09-18.
+- Calendar view (`render_calendar_view`, `src/ui.rs`) never rendered `app.status_message`,
+  so `m`/`u`/`e`/`d` error feedback (e.g. "No scheduled task here") was silently dropped -
+  looked like the key did nothing. Fixed 2026-09-18 (see Changelog).
+- Mail only ever synced while the interactive TUI was the running process (`SyncDaemon`'s
+  `mail_sync_worker` is spawned in `main.rs`'s no-subcommand branch only - the `triptych
+  daemon` socket process never starts it). Entering the Email view showed whatever the last
+  TUI session or manual `email sync` had cached, which could be arbitrarily stale. Fixed
+  2026-09-18 by syncing on view entry (see Changelog).
+- Entering the Email view froze the whole TUI (no redraw, no key input accepted) until the
+  synchronous IMAP sync added by the fix above finished or timed out - the sync-on-entry fix
+  traded staleness for a blocking-in-async bug. Fixed 2026-09-18 by making the sync
+  fire-and-forget (see Changelog).
+- No way to read an email's body in the TUI - only a 200-char snippet was stored, and nothing
+  rendered it beyond the list. Fixed 2026-09-18: `body_text` column + `v` detail popup (see
+  Changelog).
+- Mail sync silently stopped picking up new mail after a Gmail-side UIDVALIDITY change (backlog
+  since 7/24 never synced). Fixed 2026-09-18: UIDVALIDITY-aware `SyncCursor` in new
+  `email_sync_state` table, replacing the old `MAX(uid)`-over-`email_messages` cursor that broke
+  permanently across an epoch change (see Changelog for the full 3-layer fix).
+- `client.rs::fetch_new` had no timeout - a stalled/throttled IMAP server could hang the awaiting
+  task forever, and since `mail_sync_worker` awaits each account sequentially inside one
+  `tokio::select!` branch, that also blocked every future tick for every account and starved
+  shutdown. Fixed 2026-09-18 with a 120s `tokio::time::timeout` around the whole connect-through-
+  logout sequence (see Changelog).
 
 ## Open Questions
 

@@ -201,6 +201,38 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await?;
 
+    if !column_exists(pool, "email_messages", "body_text").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN body_text TEXT")
+            .execute(pool)
+            .await?;
+        eprintln!("  ✓ Added body_text column to email_messages");
+    }
+
+    // Tracks each (account, folder)'s last-known IMAP UIDVALIDITY so sync can
+    // detect a server-side UID epoch change (e.g. Gmail can renumber a mailbox's
+    // UIDs) and fall back to a fresh catch-up instead of resuming from a stale,
+    // no-longer-meaningful `max_uid`.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS email_sync_state (
+            account TEXT NOT NULL,
+            folder TEXT NOT NULL,
+            uid_validity INTEGER NOT NULL,
+            PRIMARY KEY (account, folder)
+        )
+    "#,
+    )
+    .execute(pool)
+    .await?;
+    eprintln!("  ✓ Email sync state table ready");
+
+    if !column_exists(pool, "email_sync_state", "last_uid").await? {
+        sqlx::query("ALTER TABLE email_sync_state ADD COLUMN last_uid INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        eprintln!("  ✓ Added last_uid column to email_sync_state");
+    }
+
     eprintln!("[Migration] Email schema ready ✓");
     Ok(())
 }

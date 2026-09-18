@@ -12,6 +12,7 @@ dependencies = [
  "chrono-english",
  "clap",
  "crossterm",
+ "dotenvy",
  "futures",
  "icalendar",
  "lru",

@@ -18,6 +18,7 @@ pub struct EmailMessage {
     pub snippet: Option<String>,
     pub is_read: bool,
     pub task_id: Option<i64>,
+    pub body_text: Option<String>,
 }
 
 /// Fields extracted from a raw RFC822 message, ready to insert (no `id` yet).
@@ -32,6 +33,7 @@ pub struct NewEmail {
     pub subject: String,
     pub date_utc: DateTime<Utc>,
     pub snippet: Option<String>,
+    pub body_text: Option<String>,
 }
 
 /// Parse a raw RFC822 message fetched over IMAP into a `NewEmail`.
@@ -60,6 +62,7 @@ pub fn parse_raw(account: &str, uid: u32, folder: &str, raw: &[u8]) -> Result<Ne
         .unwrap_or_else(Utc::now);
 
     let snippet = message.body_preview(200).map(|s| clean_snippet(&s));
+    let body_text = message.body_text(0).map(|s| strip_hidden_chars(&s));
 
     Ok(NewEmail {
         uid: uid as i64,
@@ -71,15 +74,15 @@ pub fn parse_raw(account: &str, uid: u32, folder: &str, raw: &[u8]) -> Result<Ne
         subject,
         date_utc,
         snippet,
+        body_text,
     })
 }
 
-/// Marketers pad hidden preheader text with zero-width characters to control
-/// inbox preview length; `html_to_text` isn't CSS-aware so this junk survives
-/// straight into the snippet. Strip it and collapse the resulting whitespace.
-fn clean_snippet(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
+/// Marketers pad hidden preheader/body text with zero-width characters to
+/// control inbox preview length; `html_to_text` isn't CSS-aware so this junk
+/// survives straight into the extracted text. Strip it.
+fn strip_hidden_chars(s: &str) -> String {
+    s.chars()
         .filter(|c| {
             !matches!(
                 c,
@@ -93,9 +96,13 @@ fn clean_snippet(s: &str) -> String {
                 | '\u{00AD}' // soft hyphen
             )
         })
-        .collect();
+        .collect()
+}
 
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Snippet also collapses all whitespace to single spaces, since it's a
+/// one-line preview (unlike the full body, which keeps its line breaks).
+fn clean_snippet(s: &str) -> String {
+    strip_hidden_chars(s).split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

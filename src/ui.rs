@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
 pub fn ui(f: &mut Frame, app: &mut App) {
@@ -70,7 +70,7 @@ fn render_email_view(f: &mut Frame, app: &mut App) {
 
     let email_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(
-            "Email (m/Esc: todo, Tab: next view, j/k: move, Enter: convert to task, r: mark read)",
+            "Email (m/Esc: todo, Tab: next view, j/k: move, v: view, Enter: convert to task, r: mark read)",
         ))
         .highlight_style(
             Style::default()
@@ -89,6 +89,55 @@ fn render_email_view(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL));
         f.render_widget(status, chunks[1]);
     }
+
+    if app.email_detail_open {
+        render_email_detail_popup(f, app);
+    }
+}
+
+fn render_email_detail_popup(f: &mut Frame, app: &App) {
+    let Some(email) = app.emails.get(app.selected_email) else {
+        return;
+    };
+
+    let area = centered_rect(80, 80, f.area());
+    f.render_widget(Clear, area);
+
+    let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
+    let date_text = email
+        .date_utc
+        .with_timezone(&chrono::Local)
+        .format("%a %b %d, %Y %l:%M %P")
+        .to_string();
+
+    let mut text = vec![
+        Line::from(vec![
+            Span::styled("From: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("{} <{}>", from, email.from_addr)),
+        ]),
+        Line::from(vec![
+            Span::styled("Date: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(date_text),
+        ]),
+        Line::from(""),
+    ];
+    let body = email
+        .body_text
+        .as_deref()
+        .unwrap_or("(no body content)");
+    text.extend(body.lines().map(Line::from));
+
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{} (Esc/v: close, j/k: scroll)", email.subject))
+                .style(Style::default().bg(Color::Black)),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.email_detail_scroll, 0));
+
+    f.render_widget(popup, area);
 }
 
 fn render_todo_view(f: &mut Frame, app: &mut App) {
@@ -237,7 +286,7 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
-        .constraints([Constraint::Min(3)].as_ref())
+        .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
         .split(f.area());
 
     let calendar_data = build_calendar_grid(app);
@@ -355,6 +404,19 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
         .column_spacing(1);
 
     f.render_widget(table, chunks[0]);
+
+    // Status line for feedback from m/u/e/d (e.g. "No scheduled task here") -
+    // without this the calendar view swallows that feedback entirely, since
+    // (unlike the todo/email views) it never rendered app.status_message.
+    if app.calendar_input_mode == CalendarInputMode::Navigate
+        && let Some((msg, instant)) = &app.status_message
+        && instant.elapsed() < std::time::Duration::from_secs(3)
+    {
+        let status = Paragraph::new(msg.as_str())
+            .style(Style::default().fg(Color::Green))
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(status, chunks[1]);
+    }
 
     // Render overlays based on calendar input mode
     match app.calendar_input_mode {

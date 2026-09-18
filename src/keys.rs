@@ -269,6 +269,10 @@ async fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
 }
 
 async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    if app.email_detail_open {
+        return handle_email_detail_key(app, code);
+    }
+
     match code {
         KeyCode::Char('q') => return KeyOutcome::Quit,
         KeyCode::Char('m') | KeyCode::Esc => {
@@ -284,6 +288,11 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::Char('k') | KeyCode::Up => {
             app.selected_email = app.selected_email.saturating_sub(1);
         }
+        KeyCode::Char('v') => {
+            if let Err(e) = app.open_selected_email().await {
+                set_error(app, e);
+            }
+        }
         KeyCode::Enter => {
             if let Err(e) = app.convert_selected_email_to_task().await {
                 set_error(app, e);
@@ -293,6 +302,23 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             if let Err(e) = app.mark_selected_email_read().await {
                 set_error(app, e);
             }
+        }
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while the email detail popup (`v`) is open: scroll the body or close
+/// it. Doesn't fall through to the list keys below it, same as how
+/// `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
+fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc | KeyCode::Char('v') => app.close_email_detail(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.email_detail_scroll = app.email_detail_scroll.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.email_detail_scroll = app.email_detail_scroll.saturating_sub(1);
         }
         _ => {}
     }
