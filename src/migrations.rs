@@ -120,7 +120,8 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS email_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             uid INTEGER NOT NULL,
-            message_id TEXT NOT NULL UNIQUE,
+            message_id TEXT NOT NULL,
+            account TEXT NOT NULL DEFAULT 'default',
             folder TEXT NOT NULL DEFAULT 'INBOX',
             from_addr TEXT NOT NULL,
             from_name TEXT,
@@ -136,6 +137,65 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     eprintln!("  ✓ Email messages table ready");
+
+    // Pre-multi-account tables were created with `message_id TEXT NOT NULL UNIQUE`
+    // (global uniqueness) and no `account` column. That constraint is wrong once
+    // more than one mailbox is synced: the same Message-ID can legitimately arrive
+    // in two different accounts (mailing lists, CCs), and `INSERT OR IGNORE` would
+    // silently drop the second account's copy. SQLite can't drop a column-level
+    // UNIQUE via ALTER TABLE, so rebuild the table when `account` is missing.
+    if !column_exists(pool, "email_messages", "account").await? {
+        eprintln!("  Rebuilding email_messages to scope uniqueness by account...");
+        sqlx::query("ALTER TABLE email_messages RENAME TO email_messages_old")
+            .execute(pool)
+            .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE email_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid INTEGER NOT NULL,
+                message_id TEXT NOT NULL,
+                account TEXT NOT NULL DEFAULT 'default',
+                folder TEXT NOT NULL DEFAULT 'INBOX',
+                from_addr TEXT NOT NULL,
+                from_name TEXT,
+                subject TEXT NOT NULL,
+                date_utc TEXT NOT NULL,
+                snippet TEXT,
+                is_read INTEGER NOT NULL DEFAULT 0,
+                task_id INTEGER REFERENCES tasks(id),
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO email_messages
+                (id, uid, message_id, account, folder, from_addr, from_name, subject,
+                 date_utc, snippet, is_read, task_id, created_at)
+            SELECT id, uid, message_id, 'default', folder, from_addr, from_name, subject,
+                   date_utc, snippet, is_read, task_id, created_at
+            FROM email_messages_old
+        "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query("DROP TABLE email_messages_old")
+            .execute(pool)
+            .await?;
+        eprintln!("  ✓ email_messages rebuilt with account column");
+    }
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_account_msgid ON email_messages(account, message_id)",
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_email_messages_date ON email_messages(date_utc)")
         .execute(pool)

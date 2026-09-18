@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::nlp::{NLPParser, ParsedItem, Priority};
+use ratatui::widgets::ListState;
 use sqlx::{
     FromRow,
     migrate::MigrateDatabase,
@@ -106,6 +107,52 @@ pub(crate) fn resolve_local_datetime(naive: chrono::NaiveDateTime) -> DateTime<U
     naive.and_utc()
 }
 
+/// How far ahead `reallocate_all_tasks` looks for free blocks. A deadline past
+/// this horizon is never even considered, so a conflict on such a task doesn't
+/// mean the schedule is full - see `ConflictReason::BeyondWindow`.
+pub const ALLOCATION_WINDOW_DAYS: i64 = 14;
+
+/// Why a deadline-bearing task didn't get all the minutes it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictReason {
+    /// Deadline falls past the planning horizon, so blocks that might have fit
+    /// it were never considered. Not necessarily a capacity problem.
+    BeyondWindow,
+    /// Deadline is inside the horizon and every eligible deepwork/admin block
+    /// before it is already full (or none exists).
+    OutOfCapacity,
+}
+
+impl std::fmt::Display for ConflictReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConflictReason::BeyondWindow => {
+                write!(f, "deadline past the {ALLOCATION_WINDOW_DAYS}-day planning window")
+            }
+            ConflictReason::OutOfCapacity => {
+                write!(f, "no free deepwork/admin time before the deadline")
+            }
+        }
+    }
+}
+
+/// Exclusive UTC end of the window `get_available_deepwork_blocks(ALLOCATION_WINDOW_DAYS)`
+/// covers: instances exist for `today ..= today + (ALLOCATION_WINDOW_DAYS - 1)`, so the
+/// first uncovered instant is local midnight starting day `ALLOCATION_WINDOW_DAYS`.
+fn allocation_window_end(today: NaiveDate) -> DateTime<Utc> {
+    resolve_local_datetime(
+        (today + Duration::days(ALLOCATION_WINDOW_DAYS)).and_time(NaiveTime::MIN),
+    )
+}
+
+fn classify_conflict(deadline: DateTime<Utc>, window_end: DateTime<Utc>) -> ConflictReason {
+    if deadline >= window_end {
+        ConflictReason::BeyondWindow
+    } else {
+        ConflictReason::OutOfCapacity
+    }
+}
+
 #[derive(Debug)]
 pub struct TaskConflict {
     pub task_id: i64,
@@ -113,11 +160,46 @@ pub struct TaskConflict {
     pub needed_minutes: i32,
     pub allocated_minutes: i32,
     pub deadline: DateTime<Utc>,
+    pub reason: ConflictReason,
 }
 
 #[derive(Debug, Default)]
 pub struct AllocationResult {
     pub conflicts: Vec<TaskConflict>,
+}
+
+impl AllocationResult {
+    /// A one-line summary of every conflict, grouped by reason, or `None` when
+    /// there weren't any. Kept here so the TUI status message and the CLI's
+    /// `schedule reallocate` output can't drift into different wording.
+    pub fn conflict_summary(&self) -> Option<String> {
+        if self.conflicts.is_empty() {
+            return None;
+        }
+
+        let beyond_window = self
+            .conflicts
+            .iter()
+            .filter(|c| c.reason == ConflictReason::BeyondWindow)
+            .count();
+        let out_of_capacity = self.conflicts.len() - beyond_window;
+
+        let mut parts = Vec::new();
+        if beyond_window > 0 {
+            parts.push(format!(
+                "{beyond_window} past the {ALLOCATION_WINDOW_DAYS}-day window"
+            ));
+        }
+        if out_of_capacity > 0 {
+            parts.push(format!("{out_of_capacity} out of block capacity"));
+        }
+
+        Some(format!(
+            "{} task(s) not scheduled: {}",
+            self.conflicts.len(),
+            parts.join(", ")
+        ))
+    }
 }
 
 /// Block types eligible to receive task allocations: deepwork blocks primarily,
@@ -324,6 +406,11 @@ pub struct App {
     pub calendar_week_offset: Option<i64>,
     pub selected_day: usize,
     pub selected_time_slot: usize,
+    /// Which task `m`/`u`/`e` act on when the selected cell holds more than
+    /// one (see the same-hour-collision Known Issue) - `0` is the first
+    /// (topmost) task, cycled with `[`/`]`. Reset to `0` on any cursor move so
+    /// it never silently points at a task in a cell the cursor has left.
+    pub stack_index: usize,
     pub calendar_input_mode: CalendarInputMode,
     pub block_form: BlockFormState,
     pub task_picker_selected: usize,
@@ -341,6 +428,12 @@ pub struct App {
     pub deadline_edit_task_id: Option<i64>,
     pub emails: Vec<crate::email::EmailMessage>,
     pub selected_email: usize,
+    /// Persisted across frames so ratatui's viewport-scroll offset carries
+    /// over between renders instead of recomputing from a fresh (offset 0)
+    /// state every frame, which pins the selected row to the last visible
+    /// line whenever the list is taller than one page.
+    pub todo_list_state: ListState,
+    pub email_list_state: ListState,
 }
 
 /// A task occupying a calendar cell, resolved from the current week's cached data.
@@ -351,29 +444,49 @@ pub struct CellTask {
     pub is_allocation: bool,
 }
 
-/// Pure lookup backing `App::task_at_cell` - kept free of `&self` so it's
-/// testable without spinning up a DB pool or NLP parser.
-fn find_cell_task(
+/// Every task (manual + allocation) occupying a given day/hour, manual tasks
+/// first. Kept free of `&self` so it's testable without a DB pool or NLP
+/// parser. Callers that just want "is there anything here" use `.next()`;
+/// `App::selected_cell_task` indexes into it with `stack_index` when more
+/// than one task shares an hour (see `App::cycle_stack_next`/`cycle_stack_prev`).
+fn cell_tasks(
     scheduled_tasks: &[(NaiveDate, NaiveTime, i64, String, i32)],
     task_allocations: &[(NaiveDate, NaiveTime, i64, String, i32, i32)],
     day: NaiveDate,
     hour: u32,
-) -> Option<CellTask> {
-    if let Some((_, _, id, ..)) = scheduled_tasks.iter().find(|(d, t, ..)| *d == day && t.hour() == hour) {
-        return Some(CellTask {
+) -> Vec<CellTask> {
+    scheduled_tasks
+        .iter()
+        .filter(|(d, t, ..)| *d == day && t.hour() == hour)
+        .map(|(_, _, id, ..)| CellTask {
             id: *id,
             is_allocation: false,
-        });
-    }
+        })
+        .chain(
+            task_allocations
+                .iter()
+                .filter(|(d, start, _, _, minutes, _)| {
+                    *d == day && allocation_covers_hour(*start, *minutes, hour)
+                })
+                .map(|(_, _, id, ..)| CellTask {
+                    id: *id,
+                    is_allocation: true,
+                }),
+        )
+        .collect()
+}
 
-    if let Some((_, _, id, ..)) = task_allocations.iter().find(|(d, t, ..)| *d == day && t.hour() == hour) {
-        return Some(CellTask {
-            id: *id,
-            is_allocation: true,
-        });
-    }
-
-    None
+/// Whether an allocation starting at `start` and lasting `minutes` covers the
+/// on-the-hour instant `hour:00` - a multi-hour allocation (e.g. 90 minutes
+/// starting at 9:00) must show in every hour cell it spans, not just the one
+/// matching its exact start time. `pub(crate)` so `ui.rs`'s `cell_task_displays`
+/// shares this exact rule rather than re-deriving it.
+pub(crate) fn allocation_covers_hour(start: NaiveTime, minutes: i32, hour: u32) -> bool {
+    let Some(slot) = NaiveTime::from_hms_opt(hour, 0, 0) else {
+        return false;
+    };
+    let end = start + Duration::minutes(minutes as i64);
+    start <= slot && slot < end
 }
 
 pub(crate) fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
@@ -409,6 +522,7 @@ impl App {
             calendar_week_offset: None,
             selected_day: 0,
             selected_time_slot: 0,
+            stack_index: 0,
             calendar_input_mode: CalendarInputMode::Navigate,
             block_form: BlockFormState::new_at(0),
             task_picker_selected: 0,
@@ -422,6 +536,8 @@ impl App {
             deadline_edit_task_id: None,
             emails: Vec::new(),
             selected_email: 0,
+            todo_list_state: ListState::default(),
+            email_list_state: ListState::default(),
         }
     }
 
@@ -462,7 +578,7 @@ impl App {
             FROM task_block_allocations a
             JOIN tasks t ON a.task_id = t.id
             WHERE a.block_date BETWEEN ? AND ? AND t.completed = 0
-            ORDER BY a.block_date, a.block_start_time
+            ORDER BY a.block_date, a.block_start_time, t.id
             "#,
         )
         .bind(start)
@@ -507,14 +623,13 @@ impl App {
         &self,
         days: &[NaiveDate],
     ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32)>, sqlx::Error> {
-        let start = days[0].and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let end = days[days.len() - 1]
-            .and_hms_opt(23, 59, 59)
-            .unwrap()
-            .and_utc();
+        let start = resolve_local_datetime(days[0].and_hms_opt(0, 0, 0).unwrap());
+        let end = resolve_local_datetime(
+            days[days.len() - 1].and_hms_opt(23, 59, 59).unwrap(),
+        );
 
         let query = format!(
-            "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0 ORDER BY scheduled_at"
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0 ORDER BY scheduled_at, id"
         );
         let tasks = sqlx::query_as::<_, Task>(&query)
             .bind(start)
@@ -526,9 +641,10 @@ impl App {
             .iter()
             .filter_map(|t| {
                 t.scheduled_at.map(|dt| {
+                    let local = dt.with_timezone(&chrono::Local);
                     (
-                        dt.date_naive(),
-                        dt.time(),
+                        local.date_naive(),
+                        local.time(),
                         t.id,
                         t.description.clone(),
                         t.priority,
@@ -541,17 +657,20 @@ impl App {
     pub async fn next_week(&mut self) {
         let offset = self.calendar_week_offset.unwrap_or(0);
         self.calendar_week_offset = Some(offset + 1);
+        self.stack_index = 0;
         self.refresh_calendar_data().await;
     }
 
     pub async fn prev_week(&mut self) {
         let offset = self.calendar_week_offset.unwrap_or(0);
         self.calendar_week_offset = Some(offset - 1);
+        self.stack_index = 0;
         self.refresh_calendar_data().await;
     }
 
     pub async fn toggle_to_calendar(&mut self) {
         self.view_mode = ViewMode::Calendar;
+        self.stack_index = 0;
         self.calendar_input_mode = CalendarInputMode::Navigate;
         let _ = self.load_tasks().await;
         self.refresh_calendar_data().await;
@@ -566,6 +685,24 @@ impl App {
     pub async fn toggle_to_email(&mut self) {
         self.view_mode = ViewMode::Email;
         let _ = self.refresh_emails().await;
+    }
+
+    /// Tab: TodoList -> Calendar -> Email -> TodoList.
+    pub async fn cycle_view_next(&mut self) {
+        match self.view_mode {
+            ViewMode::TodoList => self.toggle_to_calendar().await,
+            ViewMode::Calendar => self.toggle_to_email().await,
+            ViewMode::Email => self.toggle_to_todo().await,
+        }
+    }
+
+    /// Shift+Tab: reverse of cycle_view_next.
+    pub async fn cycle_view_prev(&mut self) {
+        match self.view_mode {
+            ViewMode::TodoList => self.toggle_to_email().await,
+            ViewMode::Calendar => self.toggle_to_todo().await,
+            ViewMode::Email => self.toggle_to_calendar().await,
+        }
     }
 
     pub async fn refresh_emails(&mut self) -> Result<(), sqlx::Error> {
@@ -830,21 +967,51 @@ impl App {
     // Calendar navigation methods
     pub fn calendar_move_up(&mut self) {
         self.selected_time_slot = self.selected_time_slot.saturating_sub(1);
+        self.stack_index = 0;
     }
 
     pub fn calendar_move_down(&mut self) {
         if self.selected_time_slot < 15 {
             self.selected_time_slot += 1;
         }
+        self.stack_index = 0;
     }
 
     pub fn calendar_move_left(&mut self) {
         self.selected_day = self.selected_day.saturating_sub(1);
+        self.stack_index = 0;
     }
 
     pub fn calendar_move_right(&mut self) {
         if self.selected_day < 6 {
             self.selected_day += 1;
+        }
+        self.stack_index = 0;
+    }
+
+    /// Number of tasks (manual + allocation) occupying the selected cell -
+    /// bounds `stack_index` when cycling with `[`/`]`.
+    fn selected_cell_task_count(&self) -> usize {
+        let day = self.selected_cell_date();
+        let hour = self.selected_cell_time().hour();
+        cell_tasks(&self.cached_scheduled_tasks, &self.cached_task_allocations, day, hour).len()
+    }
+
+    /// Move `stack_index` to the next task in the selected cell, wrapping
+    /// around. No-op on a cell with 0 or 1 tasks - there's nothing to cycle to.
+    pub fn cycle_stack_next(&mut self) {
+        let count = self.selected_cell_task_count();
+        if count > 1 {
+            self.stack_index = (self.stack_index + 1) % count;
+        }
+    }
+
+    /// Move `stack_index` to the previous task in the selected cell, wrapping
+    /// around. No-op on a cell with 0 or 1 tasks.
+    pub fn cycle_stack_prev(&mut self) {
+        let count = self.selected_cell_task_count();
+        if count > 1 {
+            self.stack_index = (self.stack_index + count - 1) % count;
         }
     }
 
@@ -861,17 +1028,14 @@ impl App {
         NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
     }
 
-    /// The task (if any) occupying a given day/hour, from the cached week data.
-    /// Manually-scheduled tasks take precedence over deadline-driven allocations,
-    /// matching what ui.rs renders for that cell.
-    pub fn task_at_cell(&self, day: NaiveDate, hour: u32) -> Option<CellTask> {
-        find_cell_task(&self.cached_scheduled_tasks, &self.cached_task_allocations, day, hour)
-    }
-
+    /// The task `m`/`u`/`e` act on: the one at `stack_index` within the
+    /// selected cell, not always the first - see `cycle_stack_next`/`_prev`.
     fn selected_cell_task(&self) -> Option<CellTask> {
         let day = self.selected_cell_date();
         let hour = self.selected_cell_time().hour();
-        self.task_at_cell(day, hour)
+        let tasks = cell_tasks(&self.cached_scheduled_tasks, &self.cached_task_allocations, day, hour);
+        let idx = self.stack_index.min(tasks.len().saturating_sub(1));
+        tasks.into_iter().nth(idx)
     }
 
     /// Pick up the manually-scheduled task at the selected cell so it can be
@@ -913,10 +1077,9 @@ impl App {
             return Ok(());
         };
 
-        let datetime = self
-            .selected_cell_date()
-            .and_time(self.selected_cell_time())
-            .and_utc();
+        let datetime = resolve_local_datetime(
+            self.selected_cell_date().and_time(self.selected_cell_time()),
+        );
 
         sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
             .bind(datetime)
@@ -1121,7 +1284,7 @@ impl App {
         let task_id = unscheduled[self.task_picker_selected];
         let date = self.selected_cell_date();
         let time = self.selected_cell_time();
-        let datetime = date.and_time(time).and_utc();
+        let datetime = resolve_local_datetime(date.and_time(time));
 
         sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
             .bind(datetime)
@@ -1140,10 +1303,9 @@ impl App {
         &mut self,
         description: &str,
     ) -> Result<(), sqlx::Error> {
-        let scheduled_at = self
-            .selected_cell_date()
-            .and_time(self.selected_cell_time())
-            .and_utc();
+        let scheduled_at = resolve_local_datetime(
+            self.selected_cell_date().and_time(self.selected_cell_time()),
+        );
         let category = classify_task(description).to_string();
         let new_order = self.tasks.len() as i64;
 
@@ -1231,11 +1393,10 @@ impl App {
         .await?;
 
         // Get all scheduled tasks in this range
-        let range_start = days[0].and_hms_opt(0, 0, 0).unwrap().and_utc();
-        let range_end = days[days.len() - 1]
-            .and_hms_opt(23, 59, 59)
-            .unwrap()
-            .and_utc();
+        let range_start = resolve_local_datetime(days[0].and_hms_opt(0, 0, 0).unwrap());
+        let range_end = resolve_local_datetime(
+            days[days.len() - 1].and_hms_opt(23, 59, 59).unwrap(),
+        );
 
         let query = format!(
             "SELECT {TASK_COLUMNS} FROM tasks WHERE scheduled_at >= ? AND scheduled_at < ? AND completed = 0"
@@ -1248,7 +1409,12 @@ impl App {
 
         let occupied_slots: Vec<(NaiveDate, u32)> = scheduled_tasks
             .iter()
-            .filter_map(|t| t.scheduled_at.map(|dt| (dt.date_naive(), dt.time().hour())))
+            .filter_map(|t| {
+                t.scheduled_at.map(|dt| {
+                    let local = dt.with_timezone(&chrono::Local);
+                    (local.date_naive(), local.time().hour())
+                })
+            })
             .collect();
 
         // Strategy 1: Find a matching block type with a free hour
@@ -1280,7 +1446,7 @@ impl App {
                     // Check if slot is free
                     if !occupied_slots.contains(&(*day, hour)) {
                         let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
-                        return Ok(Some(day.and_time(time).and_utc()));
+                        return Ok(Some(resolve_local_datetime(day.and_time(time))));
                     }
                     hour += 1;
                 }
@@ -1321,7 +1487,7 @@ impl App {
 
                 // Check if slot is free
                 if !occupied_slots.contains(&(*day, hour)) {
-                    return Ok(Some(day.and_time(time).and_utc()));
+                    return Ok(Some(resolve_local_datetime(day.and_time(time))));
                 }
             }
         }
@@ -1751,14 +1917,21 @@ impl App {
             }
 
             let take = remaining.min(free);
+            // This task's own slice of the block, not the block's overall bounds -
+            // sequential per allocation so multiple tasks sharing one block land on
+            // different start times instead of every one stacking on the block's
+            // own start (see `allocation_covers_hour`/`cell_task_displays`, which
+            // read these back and expect a real per-task start/duration).
+            let allocation_start = block.start_time + Duration::minutes(used);
+            let allocation_end = allocation_start + Duration::minutes(take);
 
             sqlx::query(
                 "INSERT INTO task_block_allocations (task_id, block_date, block_start_time, block_end_time, allocated_minutes) VALUES (?, ?, ?, ?, ?)"
             )
             .bind(task_id)
             .bind(block.date.to_string())
-            .bind(block.start_time.format("%H:%M").to_string())
-            .bind(block.end_time.format("%H:%M").to_string())
+            .bind(allocation_start.format("%H:%M").to_string())
+            .bind(allocation_end.format("%H:%M").to_string())
             .bind(take as i32)
             .execute(&mut **tx)
             .await?;
@@ -1777,7 +1950,8 @@ impl App {
     /// previous allocations intact rather than a half-rewritten table.
     pub async fn reallocate_all_tasks(&mut self) -> Result<AllocationResult, sqlx::Error> {
         let tasks = self.get_tasks_by_deadline().await?;
-        let blocks = self.get_available_deepwork_blocks(14).await?;
+        let blocks = self.get_available_deepwork_blocks(ALLOCATION_WINDOW_DAYS).await?;
+        let window_end = allocation_window_end(chrono::Local::now().naive_local().date());
 
         let mut tx = self.db_pool.begin().await?;
         Self::clear_all_allocations(&mut tx).await?;
@@ -1814,6 +1988,7 @@ impl App {
                     needed_minutes: needed_minutes as i32,
                     allocated_minutes: allocated as i32,
                     deadline,
+                    reason: classify_conflict(deadline, window_end),
                 });
             }
         }
@@ -1830,14 +2005,8 @@ impl App {
     pub async fn on_task_changed(&mut self) -> Result<(), sqlx::Error> {
         let result = self.reallocate_all_tasks().await?;
 
-        if !result.conflicts.is_empty() {
-            self.status_message = Some((
-                format!(
-                    "Warning: {} task(s) cannot fit before deadline",
-                    result.conflicts.len()
-                ),
-                std::time::Instant::now(),
-            ));
+        if let Some(summary) = result.conflict_summary() {
+            self.status_message = Some((format!("Warning: {summary}"), std::time::Instant::now()));
         }
 
         Ok(())
@@ -1886,6 +2055,81 @@ mod tests {
         let resolved = resolve_local_datetime(naive);
         let local = resolved.with_timezone(&chrono::Local);
         assert_eq!(local.naive_local(), naive);
+    }
+
+    #[test]
+    fn allocation_window_end_is_local_midnight_after_the_last_covered_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let expected = resolve_local_datetime(
+            (today + Duration::days(ALLOCATION_WINDOW_DAYS)).and_hms_opt(0, 0, 0).unwrap(),
+        );
+        assert_eq!(allocation_window_end(today), expected);
+    }
+
+    #[test]
+    fn classify_conflict_flags_deadline_past_the_allocation_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let window_end = allocation_window_end(today);
+        let far_deadline = window_end + Duration::days(1);
+        assert_eq!(
+            classify_conflict(far_deadline, window_end),
+            ConflictReason::BeyondWindow
+        );
+        // Boundary: a deadline exactly at window_end wasn't considered either
+        // (get_available_deepwork_blocks stops the day before), so it counts
+        // as beyond the window rather than a capacity shortfall.
+        assert_eq!(
+            classify_conflict(window_end, window_end),
+            ConflictReason::BeyondWindow
+        );
+    }
+
+    #[test]
+    fn classify_conflict_flags_capacity_when_deadline_is_inside_the_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let window_end = allocation_window_end(today);
+        let near_deadline = window_end - Duration::days(1);
+        assert_eq!(
+            classify_conflict(near_deadline, window_end),
+            ConflictReason::OutOfCapacity
+        );
+    }
+
+    fn sample_conflict(reason: ConflictReason) -> TaskConflict {
+        TaskConflict {
+            task_id: 1,
+            description: "sample".to_string(),
+            needed_minutes: 90,
+            allocated_minutes: 0,
+            deadline: resolve_local_datetime(
+                NaiveDate::from_ymd_opt(2026, 3, 10)
+                    .unwrap()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap(),
+            ),
+            reason,
+        }
+    }
+
+    #[test]
+    fn conflict_summary_is_none_without_conflicts() {
+        let result = AllocationResult::default();
+        assert!(result.conflict_summary().is_none());
+    }
+
+    #[test]
+    fn conflict_summary_reports_both_reason_counts() {
+        let result = AllocationResult {
+            conflicts: vec![
+                sample_conflict(ConflictReason::BeyondWindow),
+                sample_conflict(ConflictReason::OutOfCapacity),
+                sample_conflict(ConflictReason::OutOfCapacity),
+            ],
+        };
+        let summary = result.conflict_summary().expect("has conflicts");
+        assert!(summary.contains("3 task(s) not scheduled"));
+        assert!(summary.contains("1 past the 14-day window"));
+        assert!(summary.contains("2 out of block capacity"));
     }
 
     #[test]
@@ -1953,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn task_at_cell_finds_manual_and_allocated_tasks() {
+    fn cell_tasks_finds_manual_and_allocated_tasks() {
         let day = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
         let other_day = NaiveDate::from_ymd_opt(2026, 3, 11).unwrap();
         let manual_time = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
@@ -1962,16 +2206,47 @@ mod tests {
         let scheduled_tasks = vec![(day, manual_time, 1i64, "write report".to_string(), 2i32)];
         let task_allocations = vec![(day, alloc_time, 2i64, "study rust".to_string(), 90i32, 1i32)];
 
-        let manual = find_cell_task(&scheduled_tasks, &task_allocations, day, 9).expect("manual task at 9am");
+        let manual = cell_tasks(&scheduled_tasks, &task_allocations, day, 9)
+            .into_iter()
+            .next()
+            .expect("manual task at 9am");
         assert_eq!(manual.id, 1);
         assert!(!manual.is_allocation);
 
-        let alloc = find_cell_task(&scheduled_tasks, &task_allocations, day, 14).expect("allocation at 2pm");
+        let alloc = cell_tasks(&scheduled_tasks, &task_allocations, day, 14)
+            .into_iter()
+            .next()
+            .expect("allocation at 2pm");
         assert_eq!(alloc.id, 2);
         assert!(alloc.is_allocation);
 
-        assert!(find_cell_task(&scheduled_tasks, &task_allocations, day, 10).is_none());
-        assert!(find_cell_task(&scheduled_tasks, &task_allocations, other_day, 9).is_none());
+        assert!(cell_tasks(&scheduled_tasks, &task_allocations, day, 10).is_empty());
+        assert!(cell_tasks(&scheduled_tasks, &task_allocations, other_day, 9).is_empty());
+    }
+
+    /// Regression for the "deadline allocations only ever render in their
+    /// block's start hour" Known Issue: two tasks allocated into the same
+    /// block must land on different, sequential start times, not both stack
+    /// onto the block's own start.
+    #[test]
+    fn cell_tasks_separates_two_allocations_in_the_same_block() {
+        let day = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let block_start = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let second_start = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        let scheduled_tasks = vec![];
+        // First task takes the block's first 60 minutes, second task the next 30.
+        let task_allocations = vec![
+            (day, block_start, 1i64, "first task".to_string(), 60i32, 1i32),
+            (day, second_start, 2i64, "second task".to_string(), 30i32, 1i32),
+        ];
+
+        let at_9am = cell_tasks(&scheduled_tasks, &task_allocations, day, 9);
+        assert_eq!(at_9am.len(), 1);
+        assert_eq!(at_9am[0].id, 1);
+
+        let at_10am = cell_tasks(&scheduled_tasks, &task_allocations, day, 10);
+        assert_eq!(at_10am.len(), 1);
+        assert_eq!(at_10am[0].id, 2);
     }
 
     /// A single-connection in-memory DB, fully migrated the same way `App::build`
@@ -2002,6 +2277,63 @@ mod tests {
             .last_insert_rowid()
     }
 
+    async fn insert_task_with_deadline(
+        pool: &SqlitePool,
+        description: &str,
+        deadline: DateTime<Utc>,
+        duration_minutes: i32,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO tasks (description, completed, item_order, priority, deadline, duration_minutes) VALUES (?, false, 0, 1, ?, ?)"
+        )
+        .bind(description)
+        .bind(deadline)
+        .bind(duration_minutes)
+        .execute(pool)
+        .await
+        .expect("insert task with deadline")
+        .last_insert_rowid()
+    }
+
+    /// A deadline task with no eligible schedule blocks at all always misses its
+    /// deadline; which `ConflictReason` it gets depends on whether the deadline
+    /// itself falls inside or beyond the allocation window - see
+    /// `reallocate_marks_far_deadline_as_beyond_window` and
+    /// `reallocate_marks_near_deadline_as_out_of_capacity` below.
+    #[tokio::test]
+    async fn reallocate_marks_far_deadline_as_beyond_window() {
+        let pool = test_pool().await;
+        let far_deadline = resolve_local_datetime(
+            (chrono::Local::now().naive_local().date() + Duration::days(30))
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        insert_task_with_deadline(&pool, "distant report", far_deadline, 90).await;
+
+        let mut app = App::new(pool).await;
+        let result = app.reallocate_all_tasks().await.expect("reallocate");
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].reason, ConflictReason::BeyondWindow);
+    }
+
+    #[tokio::test]
+    async fn reallocate_marks_near_deadline_as_out_of_capacity() {
+        let pool = test_pool().await;
+        let near_deadline = resolve_local_datetime(
+            (chrono::Local::now().naive_local().date() + Duration::days(1))
+                .and_hms_opt(9, 0, 0)
+                .unwrap(),
+        );
+        insert_task_with_deadline(&pool, "urgent report", near_deadline, 90).await;
+
+        let mut app = App::new(pool).await;
+        let result = app.reallocate_all_tasks().await.expect("reallocate");
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].reason, ConflictReason::OutOfCapacity);
+    }
+
     /// Round-trips a task through pick-up/drop: the goal of the "move a
     /// scheduled task in the calendar" half of Task 2. Regression guard for the
     /// write path (`drop_held_task`, naive-local-as-UTC) and read path
@@ -2021,10 +2353,39 @@ mod tests {
         app.drop_held_task().await.expect("drop task");
 
         let target_day = app.selected_cell_date();
-        let cell = app.task_at_cell(target_day, 10).expect("task lands in dropped cell");
+        let cell = cell_tasks(&app.cached_scheduled_tasks, &app.cached_task_allocations, target_day, 10)
+            .into_iter()
+            .next()
+            .expect("task lands in dropped cell");
         assert_eq!(cell.id, task_id);
         assert!(!cell.is_allocation);
         assert!(app.held_task.is_none());
+    }
+
+    /// Every calendar-grid write path (schedule/drop/add-at-cell/auto-schedule)
+    /// must store `scheduled_at` via `resolve_local_datetime`, the same
+    /// conversion `nlp::rules` uses for NLP-parsed times - not a naive
+    /// local-wall-clock value mislabeled as UTC. Pins the stored value itself
+    /// (not just grid-cell self-consistency) so the two write paths can't
+    /// silently drift back apart.
+    #[tokio::test]
+    async fn schedule_task_to_selected_cell_stores_true_utc_not_naive_local() {
+        let pool = test_pool().await;
+        let task_id = insert_task(&pool, "write report").await;
+
+        let mut app = App::new(pool).await;
+        app.load_tasks().await.expect("load tasks");
+        app.calendar_week_offset = Some(0);
+        app.selected_day = 2;
+        app.selected_time_slot = 3; // 7 + 3 = 10:00
+
+        app.schedule_task_to_selected_cell().await.expect("schedule task");
+
+        let task = app.get_task_by_id(task_id).await.expect("query task").expect("task exists");
+        let expected = resolve_local_datetime(
+            app.selected_cell_date().and_time(app.selected_cell_time()),
+        );
+        assert_eq!(task.scheduled_at, Some(expected));
     }
 
     /// Round-trips a task through schedule -> unschedule: it must disappear from
@@ -2043,11 +2404,11 @@ mod tests {
         app.drop_held_task().await.expect("schedule task");
 
         let day = app.selected_cell_date();
-        assert!(app.task_at_cell(day, 7).is_some());
+        assert!(!cell_tasks(&app.cached_scheduled_tasks, &app.cached_task_allocations, day, 7).is_empty());
 
         app.unschedule_task_at_selected_cell().await.expect("unschedule task");
 
-        assert!(app.task_at_cell(day, 7).is_none());
+        assert!(cell_tasks(&app.cached_scheduled_tasks, &app.cached_task_allocations, day, 7).is_empty());
         assert!(app.unscheduled_tasks().iter().any(|t| t.id == task_id));
     }
 

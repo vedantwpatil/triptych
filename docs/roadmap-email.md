@@ -1,5 +1,9 @@
 # Email Client — Slice 1 (IMAP fetch → store → view → convert-to-task)
 
+See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues (including a stale-docs item about this
+slice's `src/email/CLAUDE.md`/`src/sync/CLAUDE.md`) and [`roadmap.md`](./roadmap.md) for the
+overall feature roadmap.
+
 ## Context
 
 README's roadmap lists a full email client (IMAP IDLE, OAuth2, multi-account, triage) as a
@@ -10,9 +14,10 @@ this session can't provision).
 
 This slice builds the first working vertical: fetch mail over IMAP, store it, view it in the
 TUI, and convert an email into a task using the existing NLP/task pipeline — the reason this
-lives in Triptych rather than as a standalone client. OAuth2, multi-account, true IMAP IDLE,
-SMTP send/reply, and triage actions (archive/snooze) are explicitly deferred to later slices
-(see below) so later sessions don't reinvent this scoping conversation.
+lives in Triptych rather than as a standalone client. OAuth2, true IMAP IDLE, SMTP send/reply,
+and triage actions (archive/snooze) are explicitly deferred to later slices (see below) so
+later sessions don't reinvent this scoping conversation. Multi-account landed later as Slice 4
+(see below) — this doc's title still says "Slice 1" for historical reasons but now covers both.
 
 ## Conventions this slice follows
 
@@ -25,10 +30,8 @@ SMTP send/reply, and triage actions (archive/snooze) are explicitly deferred to 
   conditionally in `SyncDaemon::start` based on a bool in `SyncConfig::from_env()`. Mail sync
   follows this: `src/sync/mail.rs` + `mail_sync_enabled` from `TRIPTYCH_EMAIL_ENABLED`.
 - **Views**: `ViewMode` enum in `app.rs`, matched in `ui.rs::ui()` for rendering and in
-  `main.rs`'s inline key match (inside `run_app`'s event loop) for input.
-  **Note:** `src/keys.rs` defines a `handle_key_event` dispatcher but nothing declares
-  `mod keys;` in `main.rs` — it's dead code, not compiled in. The live dispatch is the inline
-  match in `main.rs`. This is a pre-existing inconsistency, not something this feature fixes.
+  `src/keys.rs::handle_key_event` (declared via `mod keys;` in `main.rs`, single dispatch
+  entry point) for input.
 - **Task creation**: `App::add_task(&mut self, description: &str)` (`app.rs`) runs the full NLP
   pipeline and inserts a `Task`. Email→task conversion calls this directly with the subject
   line rather than duplicating insert logic.
@@ -42,27 +45,53 @@ SMTP send/reply, and triage actions (archive/snooze) are explicitly deferred to 
 ## What's in this slice
 
 1. **Deps** (`Cargo.toml`): `async-imap`, `tokio-rustls`, `rustls-native-certs`, `mail-parser`.
-2. **Schema**: `email_messages` table (`uid`, `message_id` unique, `folder`, `from_addr`,
-   `from_name`, `subject`, `date_utc`, `snippet`, `is_read`, `task_id` FK → `tasks(id)`).
-   No `accounts` table yet — single account via env.
-3. **`src/email/` module**: `config.rs` (`EmailConfig::from_env`), `message.rs` (`EmailMessage`
-   + `parse_raw`), `client.rs` (`MailSource` trait + `ImapMailSource`), `store.rs` (insert/
-   query/mark-read/link-task helpers).
+2. **Schema**: `email_messages` table (`uid`, `message_id`, `account`, `folder`, `from_addr`,
+   `from_name`, `subject`, `date_utc`, `snippet`, `is_read`, `task_id` FK → `tasks(id)`),
+   uniqueness on `(account, message_id)` — not `message_id` alone, since the same Message-ID
+   can land in more than one account. No dedicated `accounts` table — see the multi-account
+   note below.
+3. **`src/email/` module**: `config.rs` (`EmailConfig::all_from_env`), `message.rs`
+   (`EmailMessage` + `parse_raw`), `client.rs` (`MailSource` trait + `ImapMailSource`),
+   `store.rs` (insert/query/mark-read/link-task/`max_uid` helpers).
 4. **Daemon wiring**: `src/sync/mail.rs::mail_sync_worker` polls (not true IDLE) every 60s,
    spawned from `SyncDaemon::start` when `mail_sync_enabled`.
 5. **TUI**: `ViewMode::Email`, list view, `'m'` to toggle from the todo list, `Enter` to convert
    the selected email into a task, `r` to mark read.
 6. **CLI**: `triptych email sync` / `triptych email list` for testing without the daemon/TUI.
 
+## Multi-account (Slice 4, done)
+
+Config: `IMAP_ACCOUNTS="label1,label2"` (comma-separated), then per-account vars suffixed
+`_<LABEL>` (label upper-cased, non-alphanumeric → `_`), e.g. `IMAP_SERVER_WORK`,
+`IMAP_USERNAME_WORK`, `IMAP_PASSWORD_WORK`, `IMAP_PORT_WORK`, `IMAP_FOLDER_WORK`. Unset
+`IMAP_ACCOUNTS` and the legacy flat `IMAP_*` vars are read as a single account labeled
+`"default"` — existing single-account `.env` files need no changes. See `.env` for a
+commented example block.
+
+Chose env vars over the originally-planned `accounts` table (`EmailConfig::all_from_env` in
+`src/email/config.rs`) because there's no schema-editing UI to manage DB-backed accounts with
+yet, and env vars match every other config value in this project. `mail_sync_worker`
+(`src/sync/mail.rs`) loops all configured accounts sequentially each 60s tick, one
+`ImapMailSource` per account; a failure syncing one account is logged and doesn't stop the
+others. The TUI email view (`ui.rs::render_email_view`) is a merged inbox tagged with each
+message's account — no per-account switcher/filter.
+
 ## Explicitly deferred
 
 - True IMAP IDLE (push) — polling stands in for now.
 - OAuth2 / Gmail-native auth.
-- Multi-account (needs an `accounts` table).
 - SMTP send/reply — `SMTP_*` env vars stay unused this slice.
 - Archive/snooze/delete triage actions.
 - Smart NLP extraction from email body (task title = subject only, for now).
 - UIDVALIDITY tracking — a folder UID reset could in theory skip mail; not handled.
+- Per-account UI (switcher/filter) — the merged inbox view added in Slice 4 shows every
+  account's mail together, tagged by account, with no way to filter to just one yet.
+- **Unified inbox with AI-driven triage.** Not started, no design work done. Idea: rank/
+  surface the most important mail across all accounts using the Ollama integration already in
+  this codebase (`src/sync/ollama.rs`'s warmup, `src/nlp/`'s parsing) instead of adding a new
+  LLM dependency — e.g. a local model call that scores each synced message's importance and
+  the TUI sorts/highlights on that score. Distinct from the plain archive/snooze triage above:
+  this is automatic ranking, not manual action. Also tracked in `docs/roadmap.md` as Slice 6.
 
 ## Known limitations
 

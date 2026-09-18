@@ -14,11 +14,16 @@ pub enum KeyOutcome {
     Quit,
 }
 
+fn set_error(app: &mut App, e: impl std::fmt::Display) {
+    app.status_message = Some((format!("Error: {}", e), std::time::Instant::now()));
+}
+
 pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match app.input_mode {
         InputMode::Normal => match app.view_mode {
             ViewMode::TodoList => handle_todo_key(app, key.code).await,
             ViewMode::Calendar => handle_calendar_key(app, key.code).await,
+            ViewMode::Email => handle_email_key(app, key.code).await,
         },
         InputMode::Editing => {
             handle_editing_key(app, key.code).await;
@@ -31,23 +36,26 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     match code {
         KeyCode::Char('q') => return KeyOutcome::Quit,
         KeyCode::Char('c') => app.toggle_to_calendar().await,
+        KeyCode::Char('m') => app.toggle_to_email().await,
+        KeyCode::Tab => app.cycle_view_next().await,
+        KeyCode::BackTab => app.cycle_view_prev().await,
         KeyCode::Char('a') => {
             app.input_mode = InputMode::Editing;
             app.input_buffer.clear();
         }
         KeyCode::Char('x') => {
             if let Err(e) = app.delete_task().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Char('s') => {
             if let Err(e) = app.auto_schedule_task().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Enter => {
             if let Err(e) = app.toggle_completed().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Char('k') => {
@@ -107,7 +115,7 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
         KeyCode::Char('m') => {
             if app.held_task.is_some() {
                 if let Err(e) = app.drop_held_task().await {
-                    app.set_error(e);
+                    set_error(app, e);
                 }
             } else {
                 app.pick_up_task_at_selected_cell();
@@ -115,15 +123,21 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
         }
         KeyCode::Char('u') => {
             if let Err(e) = app.unschedule_task_at_selected_cell().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Char('e') => app.start_deadline_edit_at_selected_cell(),
+        // Cycle which task in a stacked cell (see the "+N more" overflow
+        // indicator) subsequent m/u/e presses act on.
+        KeyCode::Char(']') => app.cycle_stack_next(),
+        KeyCode::Char('[') => app.cycle_stack_prev(),
         KeyCode::Char('d') => {
             if let Err(e) = app.delete_block_at_selected_cell().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
+        KeyCode::Tab => app.cycle_view_next().await,
+        KeyCode::BackTab => app.cycle_view_prev().await,
         _ => {}
     }
     KeyOutcome::Continue
@@ -140,7 +154,7 @@ async fn handle_block_form_key(app: &mut App, code: KeyCode) {
             if !app.block_form.title.is_empty()
                 && let Err(e) = app.create_schedule_block().await
             {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Char(c) => match app.block_form.active_field {
@@ -199,7 +213,7 @@ async fn handle_task_picker_key(app: &mut App, code: KeyCode) {
             if !app.unscheduled_tasks().is_empty()
                 && let Err(e) = app.schedule_task_to_selected_cell().await
             {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         _ => {}
@@ -217,7 +231,7 @@ async fn handle_task_input_key(app: &mut App, code: KeyCode) {
             if !description.is_empty()
                 && let Err(e) = app.add_task_at_selected_cell(&description).await
             {
-                app.set_error(e);
+                set_error(app, e);
             }
             app.input_buffer.clear();
             app.calendar_input_mode = CalendarInputMode::Navigate;
@@ -241,7 +255,7 @@ async fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Enter => {
             if let Err(e) = app.submit_deadline_edit().await {
-                app.set_error(e);
+                set_error(app, e);
             }
         }
         KeyCode::Char(c) => {
@@ -254,6 +268,37 @@ async fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
     }
 }
 
+async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Char('q') => return KeyOutcome::Quit,
+        KeyCode::Char('m') | KeyCode::Esc => {
+            app.toggle_to_todo().await;
+        }
+        KeyCode::Tab => app.cycle_view_next().await,
+        KeyCode::BackTab => app.cycle_view_prev().await,
+        KeyCode::Char('j') | KeyCode::Down
+            if !app.emails.is_empty() && app.selected_email < app.emails.len() - 1 =>
+        {
+            app.selected_email += 1;
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.selected_email = app.selected_email.saturating_sub(1);
+        }
+        KeyCode::Enter => {
+            if let Err(e) = app.convert_selected_email_to_task().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Err(e) = app.mark_selected_email_read().await {
+                set_error(app, e);
+            }
+        }
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
 async fn handle_editing_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => {
@@ -261,7 +306,7 @@ async fn handle_editing_key(app: &mut App, code: KeyCode) {
             if !description.is_empty()
                 && let Err(e) = app.add_task(&description).await
             {
-                app.set_error(e);
+                set_error(app, e);
             }
             app.input_mode = InputMode::Normal;
         }

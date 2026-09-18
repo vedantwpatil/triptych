@@ -1,3 +1,4 @@
+use crate::app::resolve_local_datetime;
 use crate::nlp::types::{Event, ParsedItem, Priority, Task};
 use chrono::{DateTime, Datelike, Duration, Local, Utc};
 use chrono_english::{Dialect, parse_date_string};
@@ -365,14 +366,9 @@ fn parse_day_after_tomorrow(
 
         let target = now + Duration::days(2);
         // Default to 9am
-        let dt = target
-            .date_naive()
-            .and_hms_opt(9, 0, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap();
+        let dt = resolve_local_datetime(target.date_naive().and_hms_opt(9, 0, 0).unwrap());
 
-        Ok((input, TemporalContext::Point(dt.with_timezone(&Utc))))
+        Ok((input, TemporalContext::Point(dt)))
     }
 }
 
@@ -391,25 +387,16 @@ fn parse_time_range(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, T
         let s_hour = resolve_24h(start_h, effective_start_ampm);
         let e_hour = resolve_24h(end_h, end_ampm);
 
-        let start_dt = now
-            .date_naive()
-            .and_hms_opt(s_hour, start_m, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap();
-
-        let end_dt = now
-            .date_naive()
-            .and_hms_opt(e_hour, end_m, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap();
+        let start_dt =
+            resolve_local_datetime(now.date_naive().and_hms_opt(s_hour, start_m, 0).unwrap());
+        let end_dt =
+            resolve_local_datetime(now.date_naive().and_hms_opt(e_hour, end_m, 0).unwrap());
 
         Ok((
             input,
             TemporalContext::Range {
-                start: start_dt.with_timezone(&Utc),
-                end: end_dt.with_timezone(&Utc),
+                start: start_dt,
+                end: end_dt,
             },
         ))
     }
@@ -425,47 +412,42 @@ fn parse_business_time(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str
         ))(input)?;
 
         let dt = match token.to_lowercase().as_str() {
-            "eod" | "cob" => now
-                .date_naive()
-                .and_hms_opt(17, 0, 0)
-                .unwrap()
-                .and_local_timezone(Local)
-                .unwrap(),
+            "eod" | "cob" => resolve_local_datetime(now.date_naive().and_hms_opt(17, 0, 0).unwrap()),
             "eow" => {
                 let days_until_fri = (4i64 - now.weekday().num_days_from_monday() as i64 + 7) % 7;
-                (now + Duration::days(days_until_fri))
-                    .date_naive()
-                    .and_hms_opt(17, 0, 0)
-                    .unwrap()
-                    .and_local_timezone(Local)
-                    .unwrap()
+                resolve_local_datetime(
+                    (now + Duration::days(days_until_fri))
+                        .date_naive()
+                        .and_hms_opt(17, 0, 0)
+                        .unwrap(),
+                )
             }
             "eom" => {
-                // Naive end of month calculation
-                let next_month = if now.month() == 12 {
-                    now.with_year(now.year() + 1)
+                // Reset the day to 1 first (always valid in every month) before
+                // changing month/year, so a 31st never gets carried into a
+                // shorter target month - e.g. Jan 31 -> with_month(2) would
+                // compute "Feb 31", which doesn't exist and panics `.unwrap()`.
+                let first_of_this_month = now.with_day(1).unwrap();
+                let first_of_next_month = if now.month() == 12 {
+                    first_of_this_month
+                        .with_year(now.year() + 1)
                         .unwrap()
                         .with_month(1)
                         .unwrap()
-                        .with_day(1)
-                        .unwrap()
                 } else {
-                    now.with_month(now.month() + 1)
-                        .unwrap()
-                        .with_day(1)
-                        .unwrap()
+                    first_of_this_month.with_month(now.month() + 1).unwrap()
                 };
-                (next_month - Duration::days(1))
-                    .date_naive()
-                    .and_hms_opt(17, 0, 0)
-                    .unwrap()
-                    .and_local_timezone(Local)
-                    .unwrap()
+                resolve_local_datetime(
+                    (first_of_next_month - Duration::days(1))
+                        .date_naive()
+                        .and_hms_opt(17, 0, 0)
+                        .unwrap(),
+                )
             }
             _ => unreachable!(),
         };
 
-        Ok((input, TemporalContext::Point(dt.with_timezone(&Utc))))
+        Ok((input, TemporalContext::Point(dt)))
     }
 }
 
@@ -623,7 +605,7 @@ fn quantize_time(dt: DateTime<Utc>, grid_minutes: i64) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveTime;
+    use chrono::{NaiveDate, NaiveTime};
 
     fn parse_task(input: &str) -> Task {
         match RuleParser::try_parse(input).expect("expected a parsed item") {
@@ -679,5 +661,47 @@ mod tests {
         let tomorrow = (Local::now() + Duration::days(1)).date_naive();
         assert_eq!(deadline.with_timezone(&Local).date_naive(), tomorrow);
         assert_eq!(task.title, "call dentist");
+    }
+
+    /// Regression: "eom" used to call `.with_month(...)` before resetting the
+    /// day to 1, so parsing this on the last day of a 31-day month whose
+    /// successor is shorter (Jan -> Feb) computed an invalid "Feb 31" and
+    /// panicked. `now` is injected directly (bypassing `Local::now()`) so the
+    /// test is deterministic regardless of what day it actually runs on.
+    #[test]
+    fn eom_on_the_31st_does_not_panic_rolling_into_a_shorter_month() {
+        let now = NaiveDate::from_ymd_opt(2026, 1, 31)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+
+        let (_, temporal) = parse_business_time(now)("eom").expect("eom should parse");
+        let TemporalContext::Point(dt) = temporal else {
+            panic!("expected a Point");
+        };
+        let local = dt.with_timezone(&Local);
+        assert_eq!(local.date_naive(), NaiveDate::from_ymd_opt(2026, 1, 31).unwrap());
+        assert_eq!(local.time(), NaiveTime::from_hms_opt(17, 0, 0).unwrap());
+    }
+
+    /// December's "eom" must roll into January *of the following year*, not
+    /// panic or wrap within the same year.
+    #[test]
+    fn eom_in_december_rolls_into_next_year() {
+        let now = NaiveDate::from_ymd_opt(2026, 12, 15)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap();
+
+        let (_, temporal) = parse_business_time(now)("eom").expect("eom should parse");
+        let TemporalContext::Point(dt) = temporal else {
+            panic!("expected a Point");
+        };
+        let local = dt.with_timezone(&Local);
+        assert_eq!(local.date_naive(), NaiveDate::from_ymd_opt(2026, 12, 31).unwrap());
     }
 }

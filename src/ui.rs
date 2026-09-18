@@ -1,5 +1,6 @@
 use crate::app::{
-    App, BlockFormField, CalendarInputMode, InputMode, ScheduleBlock, ViewMode, parse_time_string,
+    App, BlockFormField, CalendarInputMode, InputMode, ScheduleBlock, ViewMode,
+    allocation_covers_hour, parse_time_string,
 };
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
 use ratatui::{
@@ -7,10 +8,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
 };
 
-pub fn ui(f: &mut Frame, app: &App) {
+pub fn ui(f: &mut Frame, app: &mut App) {
     match app.view_mode {
         ViewMode::TodoList => render_todo_view(f, app),
         ViewMode::Calendar => render_calendar_view(f, app),
@@ -18,7 +19,7 @@ pub fn ui(f: &mut Frame, app: &App) {
     }
 }
 
-fn render_email_view(f: &mut Frame, app: &App) {
+fn render_email_view(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, f.area());
 
     let chunks = Layout::default()
@@ -32,9 +33,14 @@ fn render_email_view(f: &mut Frame, app: &App) {
         .iter()
         .map(|email| {
             let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
-            let date_text = email.date_utc.format("%m/%d %H:%M").to_string();
+            let date_text = email
+                .date_utc
+                .with_timezone(&chrono::Local)
+                .format("%m/%d %H:%M")
+                .to_string();
 
             let mut spans = vec![
+                Span::styled(format!("({}) ", email.account), Style::default().fg(Color::Magenta)),
                 Span::styled(format!("[{}] ", date_text), Style::default().fg(Color::Green)),
                 Span::styled(format!("{:20} ", from), Style::default().fg(Color::Cyan)),
             ];
@@ -56,14 +62,15 @@ fn render_email_view(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let mut state = ListState::default();
-    if !app.emails.is_empty() {
-        state.select(Some(app.selected_email));
+    if app.emails.is_empty() {
+        app.email_list_state.select(None);
+    } else {
+        app.email_list_state.select(Some(app.selected_email));
     }
 
     let email_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(
-            "Email (m/Esc: back, j/k: move, Enter: convert to task, r: mark read)",
+            "Email (m/Esc: todo, Tab: next view, j/k: move, Enter: convert to task, r: mark read)",
         ))
         .highlight_style(
             Style::default()
@@ -72,7 +79,7 @@ fn render_email_view(f: &mut Frame, app: &App) {
         )
         .highlight_symbol("> ");
 
-    f.render_stateful_widget(email_list, chunks[0], &mut state);
+    f.render_stateful_widget(email_list, chunks[0], &mut app.email_list_state);
 
     if let Some((msg, instant)) = &app.status_message
         && instant.elapsed() < std::time::Duration::from_secs(3)
@@ -84,7 +91,7 @@ fn render_email_view(f: &mut Frame, app: &App) {
     }
 }
 
-fn render_todo_view(f: &mut Frame, app: &App) {
+fn render_todo_view(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, f.area());
 
     let chunks = Layout::default()
@@ -119,7 +126,8 @@ fn render_todo_view(f: &mut Frame, app: &App) {
 
             // Add schedule indicator with date and time info
             if let Some(scheduled) = task.scheduled_at {
-                let now = chrono::Utc::now();
+                let scheduled = scheduled.with_timezone(&chrono::Local);
+                let now = chrono::Local::now();
                 let scheduled_date = scheduled.date_naive();
                 let today = now.date_naive();
                 let tomorrow = today + chrono::Duration::days(1);
@@ -165,14 +173,17 @@ fn render_todo_view(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let mut state = ListState::default();
-    state.select(Some(app.selected));
+    if app.tasks.is_empty() {
+        app.todo_list_state.select(None);
+    } else {
+        app.todo_list_state.select(Some(app.selected));
+    }
 
     let tasks_list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("To-Do (q: quit, a: add, x: delete, s: schedule, k/j: move, ENTER: toggle)"),
+                .title("To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x: delete, s: schedule, k/j: move, ENTER: toggle)"),
         )
         .highlight_style(
             Style::default()
@@ -181,7 +192,7 @@ fn render_todo_view(f: &mut Frame, app: &App) {
         )
         .highlight_symbol("> ");
 
-    f.render_stateful_widget(tasks_list, chunks[0], &mut state);
+    f.render_stateful_widget(tasks_list, chunks[0], &mut app.todo_list_state);
 
     match app.input_mode {
         InputMode::Editing => {
@@ -212,6 +223,14 @@ fn render_todo_view(f: &mut Frame, app: &App) {
     }
 }
 
+/// The "today / now" accent, shared by the header's today column and the
+/// current-hour row so the two can't visually drift apart.
+fn today_accent() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+}
+
 fn render_calendar_view(f: &mut Frame, app: &App) {
     f.render_widget(Clear, f.area());
 
@@ -238,15 +257,17 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
         .collect();
 
     let today = chrono::Local::now().naive_local().date();
+    let now = chrono::Local::now().naive_local();
+    // Only accent a "now" row when today is actually in the displayed week -
+    // paging to another week (H/L) has no current-hour row to show.
+    let now_hour: Option<u32> = calendar_data.days.contains(&today).then(|| now.hour());
 
     let header_cells: Vec<Cell> = header_strings
         .iter()
         .enumerate()
         .map(|(idx, h)| {
             let style = if idx > 0 && calendar_data.days[idx - 1] == today {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                today_accent()
             } else {
                 Style::default()
                     .fg(Color::Cyan)
@@ -264,33 +285,49 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(slot_idx, slot)| {
-            let mut cells = vec![Cell::from(slot.time_label.clone())];
+            let is_now_row = now_hour == Some(slot.time.hour());
+
+            let time_cell = if is_now_row {
+                Cell::from(format!("▸{}", slot.time_label)).style(today_accent())
+            } else {
+                Cell::from(slot.time_label.clone())
+            };
+            let mut cells = vec![time_cell];
 
             for day_idx in 0..7 {
-                let mut cell_content = build_cell_content(&calendar_data, day_idx, &slot.time);
-
-                // Highlight selected cell
-                if day_idx == app.selected_day
+                let is_selected = day_idx == app.selected_day
                     && slot_idx == app.selected_time_slot
-                    && app.calendar_input_mode == CalendarInputMode::Navigate
-                {
-                    let display_text = if is_empty
-                        && slot_idx == app.selected_time_slot
-                        && day_idx == app.selected_day
-                    {
-                        "[n: add block]".to_string()
-                    } else {
-                        // Get existing text or empty
-                        get_cell_text(&calendar_data, day_idx, &slot.time)
-                    };
-                    cell_content = Cell::from(display_text).style(
-                        Style::default()
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    && app.calendar_input_mode == CalendarInputMode::Navigate;
+
+                // Non-selected cells always show the first (topmost) task;
+                // the selected cell shows whichever one `[`/`]` cycled to.
+                let task_index = if is_selected { app.stack_index } else { 0 };
+                let view = build_cell_view(&calendar_data, day_idx, &slot.time, task_index);
+
+                let headline = if is_selected && is_empty {
+                    "[n: add block]".to_string()
+                } else {
+                    view.headline
+                };
+
+                let mut style = view.style;
+                if is_now_row && calendar_data.days[day_idx] == today {
+                    style = style.patch(Style::default().add_modifier(Modifier::UNDERLINED));
+                }
+                if is_selected {
+                    style = Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD);
                 }
 
-                cells.push(cell_content);
+                let lines = vec![
+                    Line::from(headline),
+                    Line::from(Span::styled(
+                        view.overflow.unwrap_or_default(),
+                        Style::default().add_modifier(Modifier::DIM),
+                    )),
+                ];
+                cells.push(Cell::from(lines).style(style));
             }
 
             Row::new(cells).height(2)
@@ -309,7 +346,7 @@ fn render_calendar_view(f: &mut Frame, app: &App) {
     let title = if let Some(task_id) = app.held_task {
         format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel")
     } else {
-        "Weekly Calendar (t: todo, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, d: delete block, q: quit)".to_string()
+        "Weekly Calendar (t: todo, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string()
     };
 
     let table = Table::new(rows, widths)
@@ -375,37 +412,54 @@ fn build_calendar_grid(app: &App) -> CalendarGrid<'_> {
     }
 }
 
-/// A task showing up in a calendar cell: its description, priority, and whether
-/// it's a manually-scheduled task (false) or a deadline-driven allocation (true).
-fn find_task_display<'a>(
+/// What one calendar cell shows, before per-frame emphasis (cursor selection,
+/// current-hour accent) is patched on by the caller in `render_calendar_view`.
+struct CellView {
+    headline: String,
+    /// `Some("position/total")` when more than one task shares this cell's
+    /// hour - the grid is hour-granularity, so a second task at the same
+    /// day+hour (two manual tasks, or a manual task and a deadline
+    /// allocation, or two allocations whose blocks/durations happen to
+    /// overlap the same hour) would otherwise be silently invisible. Which
+    /// one is addressable via `m`/`u`/`e` is `App::stack_index`, cycled with
+    /// `[`/`]` - see `App::cycle_stack_next`/`_prev`.
+    overflow: Option<String>,
+    style: Style,
+}
+
+/// Every task occupying one calendar cell: description, priority, and whether
+/// it's a deadline allocation (true) or a manually-scheduled task (false).
+/// Manual tasks first, matching `App::selected_cell_task`'s precedence.
+fn cell_task_displays<'a>(
     grid: &CalendarGrid<'a>,
     day: NaiveDate,
     slot_time: &NaiveTime,
-) -> Option<(&'a str, i32, bool)> {
-    if let Some((_, _, _, desc, priority)) = grid
-        .scheduled_tasks
+) -> Vec<(&'a str, i32, bool)> {
+    grid.scheduled_tasks
         .iter()
-        .find(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
-    {
-        return Some((desc.as_str(), *priority, false));
-    }
-
-    if let Some((_, _, _, desc, _, priority)) = grid
-        .task_allocations
-        .iter()
-        .find(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
-    {
-        return Some((desc.as_str(), *priority, true));
-    }
-
-    None
+        .filter(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
+        .map(|(_, _, _, desc, priority)| (desc.as_str(), *priority, false))
+        .chain(
+            grid.task_allocations
+                .iter()
+                .filter(|(d, start, _, _, minutes, _)| {
+                    *d == day && allocation_covers_hour(*start, *minutes, slot_time.hour())
+                })
+                .map(|(_, _, _, desc, _, priority)| (desc.as_str(), *priority, true)),
+        )
+        .collect()
 }
 
-fn build_cell_content<'a>(
+/// `task_index` selects which of the cell's tasks (if more than one shares
+/// this hour) supplies the headline - `0` for every cell except the one the
+/// cursor is on, which can cycle further with `[`/`]`. `overflow` always
+/// reports "position/total" so a stack is visible even before cycling.
+fn build_cell_view(
     grid: &CalendarGrid<'_>,
     day_idx: usize,
     slot_time: &NaiveTime,
-) -> Cell<'a> {
+    task_index: usize,
+) -> CellView {
     let day = grid.days[day_idx];
 
     // Parse time strings to NaiveTime for comparison
@@ -423,9 +477,12 @@ fn build_cell_content<'a>(
         }
     });
 
-    let task = find_task_display(grid, day, slot_time);
+    let tasks = cell_task_displays(grid, day, slot_time);
+    let overflow = (tasks.len() > 1)
+        .then(|| format!("{}/{}", task_index.min(tasks.len() - 1) + 1, tasks.len()));
+    let selected_task = tasks.get(task_index.min(tasks.len().saturating_sub(1))).copied();
 
-    match (schedule_block, task) {
+    match (schedule_block, selected_task) {
         (Some((_, block)), Some((task_desc, priority, is_allocation))) => {
             // Task scheduled in this block - high priority overrides block color
             let style = if priority >= 3 {
@@ -434,13 +491,18 @@ fn build_cell_content<'a>(
                 get_block_style(&block.block_type).add_modifier(Modifier::BOLD)
             };
             let symbol = if is_allocation { "◆" } else { "●" };
-            Cell::from(format!("{} {}", symbol, truncate_text(task_desc, 12))).style(style)
+            CellView {
+                headline: format!("{} {}", symbol, truncate_text(task_desc, 12)),
+                overflow,
+                style,
+            }
         }
-        (Some((_, block)), None) => {
+        (Some((_, block)), None) => CellView {
             // Empty schedule block
-            let style = get_block_style(&block.block_type);
-            Cell::from(format!("[{}]", block.block_type)).style(style)
-        }
+            headline: format!("[{}]", block.block_type),
+            overflow,
+            style: get_block_style(&block.block_type),
+        },
         (None, Some((task_desc, priority, is_allocation))) => {
             // Task without schedule block - use priority color
             let color = match priority {
@@ -449,13 +511,18 @@ fn build_cell_content<'a>(
                 _ => Color::White,
             };
             let symbol = if is_allocation { "◇" } else { "•" };
-            Cell::from(format!("{} {}", symbol, truncate_text(task_desc, 12)))
-                .style(Style::default().fg(color))
+            CellView {
+                headline: format!("{} {}", symbol, truncate_text(task_desc, 12)),
+                overflow,
+                style: Style::default().fg(color),
+            }
         }
-        (None, None) => {
+        (None, None) => CellView {
             // Empty cell
-            Cell::from("")
-        }
+            headline: String::new(),
+            overflow: None,
+            style: Style::default(),
+        },
     }
 }
 
@@ -484,40 +551,6 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         format!("{}...", truncated)
     } else {
         text.to_string()
-    }
-}
-
-fn get_cell_text(grid: &CalendarGrid<'_>, day_idx: usize, slot_time: &NaiveTime) -> String {
-    let day = grid.days[day_idx];
-
-    let schedule_block = grid.schedule_blocks.iter().find(|(d, block)| {
-        *d == day && {
-            if let (Some(start), Some(end)) = (
-                parse_time_string(&block.start_time),
-                parse_time_string(&block.end_time),
-            ) {
-                start <= *slot_time && end > *slot_time
-            } else {
-                false
-            }
-        }
-    });
-
-    let task = find_task_display(grid, day, slot_time);
-
-    match (schedule_block, task) {
-        (Some((_, _block)), Some((task_desc, _, is_allocation))) => {
-            let symbol = if is_allocation { "◆" } else { "●" };
-            format!("{} {}", symbol, truncate_text(task_desc, 12))
-        }
-        (Some((_, block)), None) => {
-            format!("[{}]", block.block_type)
-        }
-        (None, Some((task_desc, _, is_allocation))) => {
-            let symbol = if is_allocation { "◇" } else { "•" };
-            format!("{} {}", symbol, truncate_text(task_desc, 12))
-        }
-        (None, None) => String::new(),
     }
 }
 
@@ -720,4 +753,135 @@ fn render_deadline_input(f: &mut Frame, app: &App) {
         x: inner.x + app.input_buffer.chars().count() as u16,
         y: inner.y,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn day(offset: i64) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 3, 10).unwrap() + Duration::days(offset)
+    }
+
+    fn time(hour: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn cell_task_displays_returns_every_task_sharing_an_hour() {
+        let d = day(0);
+        let scheduled_tasks = vec![
+            (d, time(9), 1, "manual one".to_string(), 1),
+            (d, time(9), 2, "manual two".to_string(), 1),
+        ];
+        let task_allocations = vec![(d, time(9), 3, "alloc one".to_string(), 30, 1)];
+        let grid = CalendarGrid {
+            days: vec![d],
+            time_slots: vec![],
+            schedule_blocks: &[],
+            scheduled_tasks: &scheduled_tasks,
+            task_allocations: &task_allocations,
+        };
+
+        let displays = cell_task_displays(&grid, d, &time(9));
+        assert_eq!(displays.len(), 3);
+        assert_eq!(displays[0].0, "manual one");
+        assert_eq!(displays[1].0, "manual two");
+        assert_eq!(displays[2].0, "alloc one");
+        assert!(!displays[0].2);
+        assert!(!displays[1].2);
+        assert!(displays[2].2);
+    }
+
+    #[test]
+    fn build_cell_view_marks_overflow_when_hour_is_shared() {
+        let d = day(0);
+        let no_allocations = vec![];
+
+        let two_tasks = vec![
+            (d, time(9), 1, "first".to_string(), 1),
+            (d, time(9), 2, "second".to_string(), 1),
+        ];
+        let grid_two = CalendarGrid {
+            days: vec![d],
+            time_slots: vec![],
+            schedule_blocks: &[],
+            scheduled_tasks: &two_tasks,
+            task_allocations: &no_allocations,
+        };
+        let view_two = build_cell_view(&grid_two, 0, &time(9), 0);
+        assert_eq!(view_two.overflow.as_deref(), Some("1/2"));
+        assert!(view_two.headline.contains("first"));
+
+        let view_second = build_cell_view(&grid_two, 0, &time(9), 1);
+        assert_eq!(view_second.overflow.as_deref(), Some("2/2"));
+        assert!(view_second.headline.contains("second"));
+
+        let one_task = vec![(d, time(9), 1, "only".to_string(), 1)];
+        let grid_one = CalendarGrid {
+            days: vec![d],
+            time_slots: vec![],
+            schedule_blocks: &[],
+            scheduled_tasks: &one_task,
+            task_allocations: &no_allocations,
+        };
+        let view_one = build_cell_view(&grid_one, 0, &time(9), 0);
+        assert!(view_one.overflow.is_none());
+    }
+
+    #[test]
+    fn build_cell_view_keeps_block_label_when_cell_has_no_task() {
+        let d = day(0);
+        let blocks = vec![(
+            d,
+            ScheduleBlock {
+                id: 1,
+                day_of_week: 0,
+                start_time: "09:00".to_string(),
+                end_time: "10:00".to_string(),
+                block_type: "deepwork".to_string(),
+                title: "Deep work".to_string(),
+                description: None,
+                priority: 1,
+            },
+        )];
+        let no_tasks = vec![];
+        let no_allocations = vec![];
+        let grid = CalendarGrid {
+            days: vec![d],
+            time_slots: vec![],
+            schedule_blocks: &blocks,
+            scheduled_tasks: &no_tasks,
+            task_allocations: &no_allocations,
+        };
+
+        let view = build_cell_view(&grid, 0, &time(9), 0);
+        assert_eq!(view.headline, "[deepwork]");
+        assert!(view.overflow.is_none());
+    }
+
+    /// Allocation spanning multiple hours must show in every hour cell it
+    /// covers, not just the one matching its start time - and land on the
+    /// exact per-task start `allocate_task_to_blocks` now writes, not the
+    /// block's own start.
+    #[test]
+    fn cell_task_displays_finds_multi_hour_allocation_by_range() {
+        let d = day(0);
+        let no_tasks = vec![];
+        // 90-minute allocation starting at 9:00 - should show at 9am and 10am,
+        // not 11am, and not at all on a different day.
+        let allocations = vec![(d, time(9), 1, "study rust".to_string(), 90, 1)];
+        let grid = CalendarGrid {
+            days: vec![d],
+            time_slots: vec![],
+            schedule_blocks: &[],
+            scheduled_tasks: &no_tasks,
+            task_allocations: &allocations,
+        };
+
+        assert_eq!(cell_task_displays(&grid, d, &time(9)).len(), 1);
+        assert_eq!(cell_task_displays(&grid, d, &time(10)).len(), 1);
+        assert!(cell_task_displays(&grid, d, &time(11)).is_empty());
+        assert!(cell_task_displays(&grid, day(1), &time(9)).is_empty());
+    }
 }

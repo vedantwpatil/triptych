@@ -140,16 +140,17 @@ Import with `triptych schedule import schedule.toml`.
 - TOML-based schedule import/export
 - Auto-scheduling to available time slots
 
-### Planned: Email Client
+### Email Client — In Progress
 
-A future major feature will add a full email client with:
+IMAP fetch, storage, TUI view, email-to-task conversion, and multi-account are already
+working (see `docs/roadmap-email.md` for details). Still planned:
 
 - IMAP IDLE for real-time notifications
 - Keyboard-driven email triage (archive, reply, snooze)
-- Email-to-task conversion
 - OAuth2 support for Gmail and other providers
-- Multi-account management
+- SMTP send/reply
 - Enhance the nlp parsing and the automatic scheduling
+- Unified inbox with AI-driven triage (using the existing Ollama integration) — not started
 
 The goal is to bring Superhuman-like email productivity to the terminal, fully integrated with task and calendar workflows.
 

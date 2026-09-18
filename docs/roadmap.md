@@ -2,7 +2,8 @@
 
 Formal, living roadmap across all planned features. Supersedes `future.md` (kept in place as
 historical implementation notes for the scheduling work below, now largely shipped) as the
-place to check current status before starting new work.
+place to check current status before starting new work. See [`DEVELOPMENT.md`](./DEVELOPMENT.md)
+for the dev changelog and known issues, and [`../CLAUDE.md`](../CLAUDE.md) for the module map.
 
 Status legend: **Done** / **In Progress** / **Planned**
 
@@ -29,10 +30,22 @@ Full detail and phase breakdown in [`docs/roadmap-email.md`](./roadmap-email.md)
 - **Slice 2 (planned)**: true IMAP IDLE (push instead of poll).
 - **Slice 3 (planned)**: OAuth2 for Gmail and other providers (needs external OAuth client
   setup — a user action, not something buildable unilaterally).
-- **Slice 4 (planned)**: multi-account (`accounts` table, per-account config instead of env
-  vars).
+- **Slice 4 (done)**: multi-account. Shipped as env-var config (`IMAP_ACCOUNTS=label1,label2`
+  plus `IMAP_*_<LABEL>` suffixed vars per account, see `.env`) rather than the originally
+  planned `accounts` table — no schema-editing UI exists yet, so a DB-backed accounts table
+  would have needed one just to be usable; env vars fit the existing config convention (see
+  `src/email/config.rs`). `email_messages` gained an `account` column (uniqueness now scoped
+  to `(account, message_id)`, not just `message_id`); the TUI email view shows a merged inbox
+  across all configured accounts, no account switcher. Revisit the `accounts` table if
+  per-account state needs to live in the DB (e.g. sync cursors, enable/disable toggles from the
+  UI).
 - **Slice 5 (planned)**: SMTP send/reply, keyboard-driven triage (archive, snooze), enhanced
   NLP parsing and auto-scheduling integration for email-derived tasks.
+- **Slice 6 (planned, not started)**: unified inbox with AI-driven importance triage. Rank/
+  surface the most important mail across all accounts using the existing Ollama integration
+  (`src/sync/ollama.rs`, `src/nlp/`) rather than a new LLM dependency. Distinct from Slice 5's
+  keyboard triage (archive/snooze are manual actions; this is automatic ranking). No design
+  work done yet — see `docs/roadmap-email.md`'s "Explicitly deferred" section.
 
 Goal: Superhuman-like email productivity in the terminal, integrated with task/calendar
 workflows — not a standalone mail client bolted on.
