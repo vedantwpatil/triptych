@@ -204,13 +204,24 @@ fn done_and_rm_report_missing_ids() {
 #[test]
 fn nlp_parses_tags_priority_and_relative_date() {
     let sb = Sandbox::new();
-    let add = sb.run(&["add", "Submit report tomorrow #work !!"]);
+    let add = sb.run(&["add", "Submit report on 12/25/2099 #work !!"]);
     assert!(add.status.success(), "add failed: {}", stderr(&add));
 
     let list_out = stdout(&sb.run(&["list"]));
     assert!(list_out.contains("#work"), "tag not parsed: {list_out}");
     assert!(list_out.contains("[HIGH]"), "priority not parsed: {list_out}");
+    assert!(list_out.contains("[12/25]"), "date not parsed: {list_out}");
+}
+
+#[test]
+fn priority_rises_when_the_date_is_near() {
+    let sb = Sandbox::new();
+    let add = sb.run(&["add", "Submit report tomorrow #work"]);
+    assert!(add.status.success(), "add failed: {}", stderr(&add));
+
+    let list_out = stdout(&sb.run(&["list"]));
     assert!(list_out.contains("[TOMORROW]"), "date not parsed: {list_out}");
+    assert!(list_out.contains("[URGENT↑]"), "priority not raised: {list_out}");
 }
 
 #[test]

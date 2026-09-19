@@ -40,7 +40,7 @@ shows as `EXITED code=N`.
 
 ## tui_suite.py: scenario suite
 
-82 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+89 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tools/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
@@ -48,11 +48,11 @@ python3 tools/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4]
 
 | Group     | Count | Covers                                                                        |
 | --------- | ----- | ----------------------------------------------------------------------------- |
-| `cli_*`   | 7     | add/list/done/rm/clear, priorities, bad usage                                 |
+| `cli_*`   | 10    | add/list/done/rm/clear, priorities, badges, escalation, bad usage             |
 | `daemon_*`| 5     | start/status/stop, add through the socket, second instance                    |
-| `nlp_*`   | 15    | dates, times, ranges, durations, tags, priorities                             |
+| `nlp_*`   | 17    | dates, weekdays, times, ranges, durations, tags, priorities                   |
 | `sched_*` | 9     | schedule import/export/show/clear/reallocate, overlaps, bad input             |
-| `todo_*`  | 13    | add/cancel/toggle/delete, insert order, badges, persist, `s`, view cycle |
+| `todo_*`  | 15    | add/cancel/toggle/delete, insert order, badges, persist, `s`, view cycle |
 | `cal_*`   | 23    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking    |
 | `email_*` | 10    | list, detail popup, mark read, convert to task, `email list` (seeded rows)    |
 
@@ -69,7 +69,8 @@ In `tools/tui_suite.py`: `@scenario("name", known=None)` (name up to 28 chars) o
 `Ctx` gives `c.cli(...)`, `c.db(sql)`, `c.tasks()`, `c.add(text)`, `c.seed_blocks(...)`,
 `c.seed_emails(n)`, `c.tui()` / `c.cal()` (returns a `Term`), `c.see(text, gone=, timeout=)`,
 `c.check(cond, msg)` and `c.eq(got, want, msg)`. `Term` has `press`, `type`, `text`, `has`,
-`wait_for`, `cursor`, `resize`. Assert on DB rows and screen text, not on timing.
+`wait_for`, `cursor`, `resize`, `style_of(text)` (fg hex and bold of a word; palette slots 0-15 show as
+the xterm hex, e.g. `ff0000` = slot 9). Assert on DB rows and screen text, not on timing.
 
 ## Known limits
 

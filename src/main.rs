@@ -6,6 +6,7 @@ mod keys;
 mod nlp;
 mod sync;
 mod ui;
+mod urgency;
 
 use crate::keys::KeyOutcome;
 use crate::ui::ui;
@@ -207,11 +208,8 @@ async fn handle_cli_command(
                             let status = if task.completed { "✓" } else { "○" };
                             let mut indicators = Vec::new();
 
-                            match task.priority {
-                                3 => indicators.push("[URGENT]".to_string()),
-                                2 => indicators.push("[HIGH]".to_string()),
-                                1 => indicators.push("[MED]".to_string()),
-                                _ => {}
+                            if let Some((_, badge)) = urgency::priority_badge(task, chrono::Utc::now()) {
+                                indicators.push(badge);
                             }
 
                             if let Some(scheduled) = task.scheduled_at {
@@ -229,6 +227,10 @@ async fn handle_cli_command(
                                     &format!("[{}]", scheduled.format("%m/%d"))
                                 };
                                 indicators.push(date_text.to_string());
+                            }
+
+                            if let (Some(deadline), false) = (task.deadline, task.completed) {
+                                indicators.push(urgency::deadline_badge(deadline, chrono::Local::now()));
                             }
 
                             let indicators_str = if indicators.is_empty() {

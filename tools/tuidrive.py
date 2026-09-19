@@ -364,6 +364,15 @@ class Term:
                 return re.findall(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (\d\d/\d\d)", l)
         return []
 
+    def style_of(self, needle: str) -> dict | None:
+        """Foreground colour and bold flag of the first cell of `needle` on screen, None if absent."""
+        for y, line in enumerate(self.screen.display):
+            x = line.find(needle)
+            if x >= 0:
+                cell = self.screen.buffer[y][x]
+                return {"fg": cell.fg, "bold": cell.bold}
+        return None
+
     def spans(self) -> list[dict]:
         """Runs of cells with a non-default background or reverse video (selection/highlight debugging)."""
         out = []

@@ -2,6 +2,7 @@ use crate::app::{
     App, BlockFormField, CalendarInputMode, InputMode, ScheduleBlock, ViewMode,
     allocation_covers_hour, parse_time_string,
 };
+use crate::urgency;
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
 use ratatui::{
     Frame,
@@ -146,6 +147,17 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
     f.render_widget(popup.scroll((app.email_detail_scroll, 0)), area);
 }
 
+/// Todo badge style by effective priority: dim, neutral, red, then bold bright red as it gets more
+/// urgent. Only named ANSI colours, so the terminal's own palette decides the actual shades.
+fn urgency_style(level: i32) -> Style {
+    match level {
+        3 => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        2 => Style::default().fg(Color::Red),
+        1 => Style::default().fg(Color::Gray),
+        _ => Style::default().fg(Color::DarkGray),
+    }
+}
+
 // One screen's worth of rendering - splitting it into helpers would scatter
 // widget-building state without reducing its actual complexity.
 #[allow(clippy::too_many_lines)]
@@ -172,12 +184,11 @@ fn render_todo_view(f: &mut Frame, app: &mut App) {
             // Build the display line with colors and indicators
             let mut spans = vec![Span::raw(format!("{status} "))];
 
-            // Add priority indicator with text
-            match task.priority {
-                3 => spans.push(Span::styled("[URGENT] ", Style::default().fg(Color::Red))),
-                2 => spans.push(Span::styled("[HIGH] ", Style::default().fg(Color::Yellow))),
-                1 => spans.push(Span::styled("[MED] ", Style::default().fg(Color::Blue))),
-                _ => {}
+            // Priority, date and deadline badges share one urgency style
+            let level = urgency::effective_priority(task, chrono::Utc::now());
+            let badge_style = urgency_style(level);
+            if let Some((_, badge)) = urgency::priority_badge(task, chrono::Utc::now()) {
+                spans.push(Span::styled(format!("{badge} "), badge_style));
             }
 
             // Add schedule indicator with date and time info
@@ -188,20 +199,26 @@ fn render_todo_view(f: &mut Frame, app: &mut App) {
                 let today = now.date_naive();
                 let tomorrow = today + chrono::Duration::days(1);
 
-                let time_str = scheduled.format("%l:%M%P").to_string().trim().to_string();
-
-                let date_text = if scheduled_date == today {
-                    format!("[TODAY {time_str}]")
-                } else if scheduled_date == tomorrow {
-                    format!("[TMR {time_str}]")
+                let time_str = if scheduled.time() == NaiveTime::MIN {
+                    String::new()
                 } else {
-                    format!("[{} {}]", scheduled.format("%m/%d"), time_str)
+                    format!(" {}", scheduled.format("%l:%M%P").to_string().trim())
                 };
 
-                spans.push(Span::styled(
-                    format!("{date_text} "),
-                    Style::default().fg(Color::Green),
-                ));
+                let date_text = if scheduled_date == today {
+                    format!("[TODAY{time_str}]")
+                } else if scheduled_date == tomorrow {
+                    format!("[TMR{time_str}]")
+                } else {
+                    format!("[{}{}]", scheduled.format("%m/%d"), time_str)
+                };
+
+                spans.push(Span::styled(format!("{date_text} "), badge_style));
+            }
+
+            if let (Some(deadline), false) = (task.deadline, task.completed) {
+                let badge = urgency::deadline_badge(deadline, chrono::Local::now());
+                spans.push(Span::styled(format!("{badge} "), badge_style));
             }
 
             // Add description with category color
@@ -851,6 +868,19 @@ mod tests {
 
     fn time(hour: u32) -> NaiveTime {
         NaiveTime::from_hms_opt(hour, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn urgency_style_gets_brighter_red_and_stays_in_the_terminal_palette() {
+        let styles: Vec<Style> = (0..=3).map(urgency_style).collect();
+        assert_eq!(styles[3].fg, Some(Color::LightRed));
+        assert!(styles[3].add_modifier.contains(Modifier::BOLD));
+        assert_eq!(styles[2].fg, Some(Color::Red));
+        assert!(!styles[2].add_modifier.contains(Modifier::BOLD));
+        assert_ne!(styles[0].fg, styles[1].fg);
+        for style in styles {
+            assert!(!matches!(style.fg, Some(Color::Rgb(..) | Color::Indexed(_))), "{style:?}");
+        }
     }
 
     #[test]

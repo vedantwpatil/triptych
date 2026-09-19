@@ -617,7 +617,17 @@ fn parse_chrono_candidate(input: &str) -> IResult<&str, &str> {
             space1,
             take_while1(|c: char| c.is_alphabetic()),
         ))),
-        // 3. Absolute dates (tuple returns complex type, must squash to &str)
+        // 3. Bare weekday ("on sunday", "friday at 3pm"); full names only, "sat"/"sun" are words
+        alt((
+            tag_no_case("monday"),
+            tag_no_case("tuesday"),
+            tag_no_case("wednesday"),
+            tag_no_case("thursday"),
+            tag_no_case("friday"),
+            tag_no_case("saturday"),
+            tag_no_case("sunday"),
+        )),
+        // 4. Absolute dates (tuple returns complex type, must squash to &str)
         recognize(tuple((
             alt((parse_month_full, parse_month_abbr)),
             space1,
@@ -814,6 +824,32 @@ mod tests {
 
     fn tomorrow() -> NaiveDate {
         (Local::now() + Duration::days(1)).date_naive()
+    }
+
+    #[test]
+    fn bare_weekday_is_the_next_such_day() {
+        let today = Local::now().date_naive();
+        for name in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] {
+            for input in [format!("call mom on {name}"), format!("call mom {name}")] {
+                let task = parse_task(&input);
+                let (date, ..) = local_hm(task.due_date.unwrap_or_else(|| panic!("no date: {input}")));
+                assert_eq!(date.weekday().to_string().to_lowercase(), name[..3], "{input}");
+                assert!(date > today && date <= today + chrono::Duration::days(7), "{input} -> {date}");
+                assert_eq!(task.title, "call mom", "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn weekday_combines_with_time_and_ignores_abbreviations() {
+        let task = parse_task("study group friday at 3pm");
+        let (date, h, m) = local_hm(task.due_date.unwrap());
+        assert_eq!((date.weekday(), h, m), (chrono::Weekday::Fri, 15, 0));
+        assert_eq!(task.title, "study group");
+
+        let task = parse_task("fix sat nav sundays");
+        assert!(task.due_date.is_none());
+        assert_eq!(task.title, "fix sat nav sundays");
     }
 
     #[test]

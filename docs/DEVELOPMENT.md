@@ -21,6 +21,13 @@ python3 tools/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Iss
 
 ## Changelog
 
+- 2026-09-19 (latest): Fixed KI-14..KI-17, found by a sandboxed todo-list test with college-student
+  tasks. Bare weekday parsing (`src/nlp/rules.rs`), `[LOW]` and `[DUE ...]` badges, and automatic
+  priority escalation near a date, all in the new `src/urgency.rs` and shared by `ui.rs` and the
+  CLI `list`; the TUI badges are colour-coded by urgency (brighter red as it rises). Suite: 89
+  scenarios, 0 XFAIL; 60 unit + 14 CLI tests. The CLI test
+  `nlp_parses_tags_priority_and_relative_date` moved to a far-future date, because "tomorrow !!" now
+  correctly shows `[URGENT↑]`; `priority_rises_when_the_date_is_near` covers the raise.
 - 2026-09-19 (later): Fixed KI-1..KI-13 using the driver: each scenario reproduced its bug before the
   fix and passes after (suite: 82 scenarios, 0 XFAIL). Details and file references are under
   Resolved. Largest changes: `src/nlp/rules.rs` time/date parsing (KI-2, 8 new unit tests), the
@@ -319,12 +326,32 @@ since epoch 0 never occurs on real IMAP servers.
 
 ### Open
 
-None. Every 2026-09-19 audit finding (KI-1..KI-13) is fixed and covered by a passing suite scenario.
+None. Every 2026-09-19 audit finding (KI-1..KI-17) is fixed and covered by a passing suite scenario.
 
 ### Resolved
 
-Found in the 2026-09-19 audit; fixed the same day, each verified with its `tools/tui_suite.py` scenario
-(named at the end of each entry).
+Found in the 2026-09-19 audit and the todo-list test that followed; fixed the same day, each verified
+with its `tools/tui_suite.py` scenario (named at the end of each entry).
+
+- **KI-14** A bare weekday was not parsed: "call mom on sunday" kept "on sunday" in the title and got
+  no date; "friday at 3pm" failed too. `parse_chrono_candidate` (`src/nlp/rules.rs`) now accepts full
+  weekday names, resolved to the next such day (never today). Abbreviations (`sat`, `sun`) are left
+  alone because they are ordinary words. `nlp_on_weekday`, `nlp_bare_weekday_time`.
+- **KI-15** Priority 0 (Low) showed no badge in the TUI or `triptych list`. Both now show `[LOW]`
+  through `urgency::priority_badge`. `cli_low_badge`, `todo_escalation_badges`.
+- **KI-16** Deadlines ("by friday") showed no badge. Both views now show `[DUE Fri]`, `[DUE TMR]`,
+  `[DUE 09/30]` (plus a time when it is not end of day) or `[OVERDUE]`; finished tasks show none.
+  `cli_deadline_badge`, `todo_escalation_badges`.
+- **KI-17** (feature) Priority now rises as the date nears. `urgency::effective_priority` takes the
+  earlier of `scheduled_at` and `deadline` and sets a floor: <=24h or overdue is Urgent, <=3 days
+  High, <=7 days Medium. The stored priority never changes and never goes down, so moving the date
+  away undoes the raise; a raised badge carries an arrow (`[URGENT↑]`). Finished tasks keep their own
+  priority. Display only: the auto-scheduler still orders by deadline and calendar colours are
+  unchanged. Also: the TUI hides the time on date-only tasks (`[09/20]`, not `[09/20 12:00am]`).
+  The TUI colours the priority, date and deadline badges by the effective level (`urgency_style` in
+  `src/ui.rs`): LOW dark gray, MED gray, HIGH red, URGENT bold bright red. Only named ANSI colours
+  are used, never RGB or 256-colour indexes, so the user's terminal theme picks the shades.
+  `cli_priority_escalates`, `todo_escalation_badges`, `todo_urgency_colors`.
 
 - **KI-1** Fuzzy NLP cache returned the wrong item ("Call dad tomorrow" saved as "Call mom" once
   similarity passed 0.85). Removed the Jaro-Winkler layer and the `strsim` dependency; only exact

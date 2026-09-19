@@ -150,6 +150,32 @@ def _(c: Ctx):
         c.check(any(tag in l and word in l for l in out.splitlines()), f"{tag} missing for {word!r}: {out!r}")
 
 
+@scenario("cli_low_badge")
+def _(c: Ctx):
+    c.cli("add", "water plants priority:low")
+    out = c.cli("list").out
+    c.check(any("[LOW]" in l and "water plants" in l for l in out.splitlines()), f"no [LOW] badge: {out!r}")
+
+
+@scenario("cli_deadline_badge")
+def _(c: Ctx):
+    c.cli("add", "essay by friday")
+    out = c.cli("list").out
+    c.check(any("[DUE" in l and "essay" in l for l in out.splitlines()), f"no [DUE ...] badge: {out!r}")
+
+
+@scenario("cli_priority_escalates")
+def _(c: Ctx):
+    c.cli("add", "gym priority:low in 2 hours")
+    c.cli("add", "someday thing priority:low")
+    c.eq([t["priority"] for t in c.tasks()], [0, 0], "stored priority must stay as typed")
+    lines = c.cli("list").out.splitlines()
+    c.check(any("gym" in l and "[URGENT↑]" in l for l in lines), f"due-soon task not escalated: {lines!r}")
+    c.check(any("someday" in l and "[LOW]" in l for l in lines), f"undated task changed: {lines!r}")
+    c.cli("done", "1")
+    c.check(any("gym" in l and "[LOW]" in l for l in c.cli("list").out.splitlines()), "done task still escalated")
+
+
 @scenario("cli_list_empty")
 def _(c: Ctx):
     out = c.cli("list").out
@@ -255,7 +281,8 @@ def _(c: Ctx):
 # ---------------------------------------------------------------- NLP (one-shot CLI, so no persistent fuzzy cache)
 
 def nlp(c: Ctx, text: str, desc: str | None = None, hour=None, minute=None, day: int | None = None, date: tuple | None = None,
-        dur: int | None = None, prio: int | None = None, dl_weekday: int | None = None, in_hours: float | None = None):
+        dur: int | None = None, prio: int | None = None, dl_weekday: int | None = None, in_hours: float | None = None,
+        weekday: int | None = None):
     r = c.cli("add", text, timeout=45)
     c.check(r.rc == 0, f"add rc={r.rc} {r.clean_err!r}")
     rows = c.tasks()
@@ -271,6 +298,8 @@ def nlp(c: Ctx, text: str, desc: str | None = None, hour=None, minute=None, day:
         c.check(s and s.date() == (now + timedelta(days=day)).date(), f"scheduled date {s and s.date()} want today+{day}")
     if date is not None:
         c.check(s and (s.month, s.day) == date, f"scheduled date {s and (s.month, s.day)} want {date}")
+    if weekday is not None:
+        c.check(s and s.weekday() == weekday and s.date() > now.date(), f"scheduled {s} want next weekday {weekday}")
     if in_hours is not None:
         c.check(s and abs((s - now) - timedelta(hours=in_hours)) < timedelta(minutes=20), f"scheduled {s} want now+{in_hours}h")
     if dur is not None:
@@ -355,6 +384,16 @@ def _(c: Ctx):
 @scenario("nlp_for_duration")
 def _(c: Ctx):
     nlp(c, "read book for 30m", desc="read book", dur=30)
+
+
+@scenario("nlp_on_weekday")
+def _(c: Ctx):
+    nlp(c, "call mom on sunday", desc="call mom", weekday=6)
+
+
+@scenario("nlp_bare_weekday_time")
+def _(c: Ctx):
+    nlp(c, "study group friday at 3pm", desc="study group", weekday=4, hour=15)
 
 
 # ---------------------------------------------------------------- schedule CLI
@@ -525,6 +564,38 @@ def _(c: Ctx):
     c.check(t.has("[TODAY") or t.has("[TMR"), "scheduled-date badge not rendered")
 
 
+@scenario("todo_escalation_badges")
+def _(c: Ctx):
+    c.cli("add", "gym priority:low in 2 hours")
+    c.cli("add", "water plants priority:low")
+    c.cli("add", "essay by friday")
+    t = c.tui()
+    c.check(t.has("[URGENT↑]"), "escalated badge not rendered")
+    c.check(t.has("[LOW]"), "[LOW] badge not rendered")
+    c.check(t.has("[DUE"), "deadline badge not rendered")
+
+
+@scenario("todo_urgency_colors")
+def _(c: Ctx):
+    c.cli("add", "selected row")  # the highlighted first row overrides badge colours
+    c.cli("add", "water plants priority:low")
+    c.cli("add", "read a book")
+    c.cli("add", "pay bill on 12/25/2099 !!")
+    c.cli("add", "gym priority:low in 2 hours")
+    t = c.tui()
+    # Only ANSI palette slots 0-15 (the terminal theme picks the shades). pyte reports them as the
+    # xterm default hex: slot 8 = 7f7f7f, 7 = e5e5e5, 1 = cd0000, 9 = ff0000.
+    want = {
+        "[LOW] water": ("7f7f7f", False),
+        "[MED] read": ("e5e5e5", False),
+        "[HIGH]": ("cd0000", False),
+        "[URGENT↑]": ("ff0000", True),
+    }
+    for badge, (fg, bold) in want.items():
+        got = t.style_of(badge)
+        c.check(got == {"fg": fg, "bold": bold}, f"{badge} style {got}, want fg={fg} bold={bold}")
+
+
 @scenario("todo_persist_restart")
 def _(c: Ctx):
     t = c.tui()
@@ -553,7 +624,7 @@ def _(c: Ctx):
     row = c.tasks()[0]
     c.eq(row["description"], "pay rent", "description")
     c.check(row["scheduled_at"] and row["priority"] == 2, f"nlp fields not applied: {row}")
-    c.check(t.has("#bills") and t.has("[HIGH]"), "badges not shown after TUI add")
+    c.check(t.has("#bills") and t.has("[URGENT↑]"), "badges not shown after TUI add (HIGH raised: due in 2h)")
 
 
 @scenario("todo_fuzzy_cache")
