@@ -21,6 +21,11 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-19 (ui split): `src/tui/ui.rs` (873 lines) split into a 44-line root (`ui()` dispatch,
+  `centered_rect`) plus `src/tui/ui/{todo,calendar,email,grid,popups}.rs`. `triptych::ui::*` paths
+  are unchanged: the root re-exports `CalendarGrid`, `CellView`, `TimeSlot`, `build_cell_view`,
+  `cell_task_displays` and `urgency_style`, so `tests/it/ui.rs` did not change. Added
+  `src/tui/CLAUDE.md`. Suite 89/89, 75 tests, clippy clean.
 - 2026-09-19 (tui/cli dirs): Grouped the flat `src/` files into two directories, the same
   `foo.rs` + `foo/` pattern `app` uses. `src/tui.rs` now parents `tui/{keys,ui}.rs`; `src/cli.rs`
   (clap definitions) parents `cli/{commands,daemon}.rs`. `triptych::ui` is unchanged (`lib.rs`
