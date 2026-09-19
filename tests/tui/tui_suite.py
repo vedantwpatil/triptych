@@ -479,7 +479,7 @@ def _(c: Ctx):
     c.cli("schedule", "import", str(c.write("s.toml", block_toml(("monday", "deepwork", "09:00", "10:00", "Tiny")))))
     c.cli("add", "huge job by friday 30h")
     r = c.cli("schedule", "reallocate")
-    c.check("⚠" in r.out and "huge job" in r.out and "needs 1800m" in r.out, f"conflict output: {r.out!r}")
+    c.check("▲" in r.out and "huge job" in r.out and "needs 1800m" in r.out, f"conflict output: {r.out!r}")
 
 
 @scenario("sched_show_allocations")
@@ -542,6 +542,53 @@ def _(c: Ctx):
     t.press("x")
     c.check(victim not in c.descs() and len(c.descs()) == 2, f"x did not delete {victim!r}: {c.descs()}")
     c.check(not t.has(victim), "deleted task still on screen")
+
+
+@scenario("todo_visual_delete")
+def _(c: Ctx):
+    for s in ("a1", "b2", "c3", "d4", "e5"):
+        c.cli("add", s)
+    t = c.tui()
+    before = c.descs()
+    t.press("j", "v", "j", "j")
+    c.see("VISUAL")
+    t.press("d")
+    c.see("VISUAL", gone=True, msg="visual mode still on after d")
+    c.see("Deleted 3 task")
+    c.eq(c.descs(), [before[0], before[4]], "rows left after deleting the 3-row selection")
+    t.press("V", "D")
+    c.eq(c.descs(), [before[0]], "cursor lands on the row after the range; V then D deletes it")
+
+
+@scenario("todo_visual_cancel")
+def _(c: Ctx):
+    for s in ("a1", "b2", "c3"):
+        c.cli("add", s)
+    t = c.tui()
+    t.press("v", "j")
+    c.see("VISUAL")
+    t.press("ESC")
+    c.see("VISUAL", gone=True, msg="Esc did not leave visual mode")
+    c.eq(len(c.descs()), 3, "Esc must not delete anything")
+    t.press("v", "j", "c")
+    c.see("Weekly Calendar")
+    t.press("t")
+    c.see("VISUAL", gone=True, msg="visual mode survived a view switch")
+    t.press("d")
+    c.eq(len(c.descs()), 2, "d after cancel deletes only the cursor row")
+
+
+@scenario("todo_delete_email_linked")
+def _(c: Ctx):
+    c.seed_emails(1, subject="Pay invoice tomorrow")
+    t = c.tui()
+    t.press("m", "ENTER")
+    c.see("Email converted to task")
+    t.press("m")
+    t.press("x")
+    c.check(not t.has("FOREIGN KEY"), "FK error shown on delete")
+    c.eq(c.descs(), [], "linked task not deleted")
+    c.eq(c.db("select task_id from email_messages")[0][0], None, "email still linked to the deleted task")
 
 
 @scenario("todo_insert_order")

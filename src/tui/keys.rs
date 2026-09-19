@@ -33,8 +33,18 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
 }
 
 async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    // Any key that is not a motion, a delete or a `v` toggle ends visual selection; Esc only ends it.
+    if app.visual_anchor.is_some()
+        && !matches!(code, KeyCode::Char('j' | 'k' | 'v' | 'V' | 'd' | 'D' | 'x'))
+    {
+        app.visual_anchor = None;
+        if code == KeyCode::Esc {
+            return KeyOutcome::Continue;
+        }
+    }
     match code {
         KeyCode::Char('q') => return KeyOutcome::Quit,
+        KeyCode::Char('v' | 'V') => app.toggle_visual(),
         KeyCode::Char('c') => app.toggle_to_calendar().await,
         KeyCode::Char('m') => app.toggle_to_email().await,
         KeyCode::Tab => app.cycle_view_next().await,
@@ -43,8 +53,8 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             app.input_mode = InputMode::Editing;
             app.input_buffer.clear();
         }
-        KeyCode::Char('x') => {
-            if let Err(e) = app.delete_task().await {
+        KeyCode::Char('x' | 'd' | 'D') => {
+            if let Err(e) = app.delete_selected_tasks().await {
                 set_error(app, e);
             }
         }

@@ -266,7 +266,30 @@ async fn test_pool() -> SqlitePool {
     triptych::migrations::run_calendar_migration(&pool)
         .await
         .expect("calendar schema migration");
+    triptych::migrations::run_email_migration(&pool)
+        .await
+        .expect("email schema migration");
     pool
+}
+
+/// Inserts an email already converted into task `task_id`, returning the email row id.
+async fn insert_linked_email(pool: &SqlitePool, task_id: i64) -> i64 {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc, task_id) VALUES (1, 'm1', 'a@b.c', 'hi', '2026-01-01T00:00:00Z', ?)",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .expect("insert email")
+    .last_insert_rowid()
+}
+
+async fn email_task_id(pool: &SqlitePool, email_id: i64) -> Option<i64> {
+    sqlx::query_scalar("SELECT task_id FROM email_messages WHERE id = ?")
+        .bind(email_id)
+        .fetch_one(pool)
+        .await
+        .expect("read email link")
 }
 
 async fn insert_task(pool: &SqlitePool, description: &str) -> i64 {
@@ -477,4 +500,132 @@ async fn submit_deadline_edit_persists_parsed_deadline_and_reloads_task() {
         deadline.with_timezone(&chrono::Local).date_naive(),
         expected_date
     );
+}
+
+#[tokio::test]
+async fn delete_task_unlinks_the_email_it_came_from() {
+    let pool = test_pool().await;
+    let task_id = insert_task(&pool, "reply to advisor").await;
+    let email_id = insert_linked_email(&pool, task_id).await;
+
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load tasks");
+    app.delete_task().await.expect("delete linked task");
+
+    assert!(app.get_task_by_id(task_id).await.expect("query").is_none());
+    assert_eq!(email_task_id(&pool, email_id).await, None);
+}
+
+#[tokio::test]
+async fn remove_task_by_id_unlinks_the_email_it_came_from() {
+    let pool = test_pool().await;
+    let task_id = insert_task(&pool, "reply to advisor").await;
+    let email_id = insert_linked_email(&pool, task_id).await;
+
+    let mut app = App::new(pool.clone()).await;
+    assert!(
+        app.remove_task_by_id(task_id)
+            .await
+            .expect("remove linked task")
+    );
+    assert_eq!(email_task_id(&pool, email_id).await, None);
+}
+
+#[tokio::test]
+async fn clear_completed_tasks_unlinks_the_emails_they_came_from() {
+    let pool = test_pool().await;
+    let task_id = insert_task(&pool, "reply to advisor").await;
+    sqlx::query("UPDATE tasks SET completed = 1 WHERE id = ?")
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .expect("complete task");
+    let email_id = insert_linked_email(&pool, task_id).await;
+
+    let mut app = App::new(pool.clone()).await;
+    assert_eq!(
+        app.clear_completed_tasks().await.expect("clear completed"),
+        1
+    );
+    assert_eq!(email_task_id(&pool, email_id).await, None);
+}
+
+async fn app_with_tasks(descriptions: &[&str]) -> (App, SqlitePool) {
+    let pool = test_pool().await;
+    for (i, d) in descriptions.iter().enumerate() {
+        sqlx::query("INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, ?, 1)")
+            .bind(d)
+            .bind(i64::try_from(i).expect("small index"))
+            .execute(&pool)
+            .await
+            .expect("insert task");
+    }
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load tasks");
+    (app, pool)
+}
+
+fn descriptions(app: &App) -> Vec<&str> {
+    app.tasks.iter().map(|t| t.description.as_str()).collect()
+}
+
+#[tokio::test]
+async fn visual_range_spans_anchor_to_cursor_in_either_direction() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b", "c", "d"]).await;
+    assert_eq!(app.visual_range(), None);
+
+    app.selected = 2;
+    app.toggle_visual();
+    assert_eq!(app.visual_range(), Some(2..=2));
+    app.selected = 3;
+    assert_eq!(app.visual_range(), Some(2..=3));
+    app.selected = 0;
+    assert_eq!(app.visual_range(), Some(0..=2));
+
+    app.toggle_visual();
+    assert_eq!(app.visual_range(), None);
+}
+
+#[tokio::test]
+async fn toggle_visual_does_nothing_on_an_empty_list() {
+    let (mut app, _pool) = app_with_tasks(&[]).await;
+    app.toggle_visual();
+    assert_eq!(app.visual_anchor, None);
+}
+
+#[tokio::test]
+async fn delete_selected_tasks_removes_the_whole_range() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b", "c", "d"]).await;
+    app.selected = 1;
+    app.toggle_visual();
+    app.selected = 2;
+
+    app.delete_selected_tasks().await.expect("delete range");
+
+    assert_eq!(descriptions(&app), ["a", "d"]);
+    assert_eq!(app.visual_anchor, None);
+    assert_eq!(app.selected, 1);
+}
+
+#[tokio::test]
+async fn delete_selected_tasks_at_the_end_clamps_the_cursor() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b", "c"]).await;
+    app.selected = 2;
+    app.toggle_visual();
+    app.selected = 1;
+
+    app.delete_selected_tasks().await.expect("delete range");
+
+    assert_eq!(descriptions(&app), ["a"]);
+    assert_eq!(app.selected, 0);
+}
+
+#[tokio::test]
+async fn delete_selected_tasks_without_a_selection_deletes_only_the_cursor_row() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b", "c"]).await;
+    app.selected = 1;
+
+    app.delete_selected_tasks().await.expect("delete one");
+
+    assert_eq!(descriptions(&app), ["a", "c"]);
 }

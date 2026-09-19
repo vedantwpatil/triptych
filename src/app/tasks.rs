@@ -220,6 +220,58 @@ impl App {
         Ok(())
     }
 
+    /// Todo rows covered by the visual selection, or `None` when not selecting.
+    #[must_use]
+    pub fn visual_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let anchor = self.visual_anchor?;
+        Some(anchor.min(self.selected)..=anchor.max(self.selected))
+    }
+
+    /// Starts visual selection at the cursor row, or cancels it if already active.
+    pub const fn toggle_visual(&mut self) {
+        self.visual_anchor = match self.visual_anchor {
+            None if !self.tasks.is_empty() => Some(self.selected),
+            _ => None,
+        };
+    }
+
+    /// Deletes every task in the visual selection in one transaction, or just the cursor row
+    /// when nothing is selected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn delete_selected_tasks(&mut self) -> Result<(), sqlx::Error> {
+        let Some(range) = self.visual_range() else {
+            return self.delete_task().await;
+        };
+        self.visual_anchor = None;
+        let ids: Vec<i64> = self
+            .tasks
+            .get(range.clone())
+            .into_iter()
+            .flatten()
+            .map(|t| t.id)
+            .collect();
+
+        let mut tx = self.db_pool.begin().await?;
+        for id in &ids {
+            sqlx::query("DELETE FROM tasks WHERE id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+
+        self.selected = *range.start();
+        self.load_tasks().await?;
+        self.status_message = Some((
+            format!("Deleted {} task(s)", ids.len()),
+            std::time::Instant::now(),
+        ));
+        self.on_task_changed().await
+    }
+
     /// Toggles the selected task between done and not done.
     ///
     /// # Errors

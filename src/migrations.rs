@@ -221,6 +221,22 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         tracing::info!("  ✓ Added body_text column to email_messages");
     }
 
+    // `email_messages.task_id` was created without `ON DELETE`, so deleting a task an email was
+    // converted into failed with a FOREIGN KEY error. SQLite can't alter an FK in place; this
+    // trigger gives it `ON DELETE SET NULL`. It must be created after the table rebuild above,
+    // since `RENAME TO` would repoint the trigger at the dropped `email_messages_old`.
+    sqlx::query(
+        r"
+        CREATE TRIGGER IF NOT EXISTS email_messages_unlink_task
+        BEFORE DELETE ON tasks
+        BEGIN
+            UPDATE email_messages SET task_id = NULL WHERE task_id = OLD.id;
+        END
+    ",
+    )
+    .execute(pool)
+    .await?;
+
     // Tracks each (account, folder)'s last-known IMAP UIDVALIDITY so sync can
     // detect a server-side UID epoch change (e.g. Gmail can renumber a mailbox's
     // UIDs) and fall back to a fresh catch-up instead of resuming from a stale,

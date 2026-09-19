@@ -37,10 +37,12 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
         .split(f.area());
 
+    let visual = app.visual_range();
     let items: Vec<ListItem> = app
         .tasks
         .iter()
-        .map(|task| {
+        .enumerate()
+        .map(|(row, task)| {
             let status = if task.completed { "[✓]" } else { "[ ]" };
 
             // Parse tags for display
@@ -109,7 +111,12 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
                 ));
             }
 
-            ListItem::new(Line::from(spans))
+            let item = ListItem::new(Line::from(spans));
+            if visual.as_ref().is_some_and(|r| r.contains(&row)) {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
         })
         .collect();
 
@@ -119,12 +126,13 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
         app.todo_list_state.select(Some(app.selected));
     }
 
+    let title = if app.visual_anchor.is_some() {
+        "-- VISUAL -- (j/k: extend, d/x: delete, v/Esc: cancel)"
+    } else {
+        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, k/j: move, ENTER: toggle)"
+    };
     let tasks_list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x: delete, s: schedule, k/j: move, ENTER: toggle)"),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(
             Style::default()
                 .fg(Color::Blue)

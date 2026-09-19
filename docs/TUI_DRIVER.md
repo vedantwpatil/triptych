@@ -40,7 +40,7 @@ shows as `EXITED code=N`.
 
 ## tui_suite.py: scenario suite
 
-89 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+92 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
@@ -52,7 +52,7 @@ python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-
 | `daemon_*`| 5     | start/status/stop, add through the socket, second instance                    |
 | `nlp_*`   | 17    | dates, weekdays, times, ranges, durations, tags, priorities                   |
 | `sched_*` | 9     | schedule import/export/show/clear/reallocate, overlaps, bad input             |
-| `todo_*`  | 15    | add/cancel/toggle/delete, insert order, badges, persist, `s`, view cycle |
+| `todo_*`  | 18    | add/cancel/toggle/delete, `v` visual delete, linked-email delete, badges, persist, `s`, view cycle |
 | `cal_*`   | 23    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking    |
 | `email_*` | 10    | list, detail popup, mark read, convert to task, `email list` (seeded rows)    |
 

@@ -40,6 +40,9 @@ pub struct App {
     pub db_pool: SqlitePool,
     pub tasks: Vec<Task>,
     pub selected: usize,
+    /// Row where visual selection (`v`/`V`) started in the todo list; the selection is this row
+    /// through `selected`. `None` when not selecting.
+    pub visual_anchor: Option<usize>,
     pub input_mode: InputMode,
     pub view_mode: ViewMode,
     pub calendar_week_offset: Option<i64>,
@@ -91,6 +94,7 @@ impl App {
             db_pool: pool,
             tasks: Vec::new(),
             selected: 0,
+            visual_anchor: None,
             input_mode: InputMode::Normal,
             view_mode: ViewMode::TodoList,
             calendar_week_offset: None,

@@ -55,7 +55,8 @@ cargo run
 | `j/k`   | Navigate tasks                |
 | `a`     | Add new task                  |
 | `Enter` | Toggle completion             |
-| `x`     | Delete task                   |
+| `x`/`d` | Delete task (or selection)    |
+| `v`/`V` | Select rows (`j/k` extend, `Esc` cancels) |
 | `s`     | Auto-schedule task            |
 | `c`     | Switch to calendar view       |
 | `H/L`   | Previous/next week (calendar) |

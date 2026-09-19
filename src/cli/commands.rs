@@ -28,15 +28,15 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
                         return Ok(());
                     }
                     Ok(DaemonResponse::Error(e)) => {
-                        eprintln!("⚠ Daemon error: {e}");
+                        eprintln!("▲ Daemon error: {e}");
                         eprintln!("   Falling back to direct mode...");
                     }
                     Err(e) => {
-                        eprintln!("⚠ Daemon communication error: {e}");
+                        eprintln!("▲ Daemon communication error: {e}");
                         eprintln!("   Falling back to direct mode...");
                     }
                     _ => {
-                        eprintln!("⚠ Unexpected daemon response");
+                        eprintln!("▲ Unexpected daemon response");
                         eprintln!("   Falling back to direct mode...");
                     }
                 }
@@ -57,7 +57,7 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             match app.get_enhanced_task_list().await {
                 Ok(enhanced_tasks) => {
                     if enhanced_tasks.is_empty() {
-                        println!("ℹ No tasks yet! Add one with: triptych add \"Your task\"");
+                        println!("∅ No tasks yet! Add one with: triptych add \"Your task\"");
                     } else {
                         println!("▸ Current Tasks:");
                         for enhanced in &enhanced_tasks {
@@ -208,7 +208,7 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             ScheduleCommands::Reallocate => match app.reallocate_all_tasks().await {
                 Ok(result) => {
                     if let Some(summary) = result.conflict_summary() {
-                        println!("⚠ {summary}");
+                        println!("▲ {summary}");
                         for conflict in &result.conflicts {
                             println!(
                                 "  - \"{}\" (ID: {}) needs {}m, got {}m (due {}) - {}",
@@ -332,7 +332,7 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
                     .await
                     .map_err(|e| e.to_string())?;
                 if emails.is_empty() {
-                    println!("📭 No emails yet! Sync with: triptych email sync");
+                    println!("∅ No emails yet! Sync with: triptych email sync");
                 } else {
                     for email in &emails {
                         let status = if email.is_read { " " } else { "*" };

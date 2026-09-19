@@ -21,6 +21,10 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-19 (delete fix, visual select): Deleting a task that an email was converted into failed
+  with `FOREIGN KEY constraint failed` (KI-18). New: `v`/`V` in the todo list start a visual
+  selection (`j`/`k` extend, `Esc` or any other key cancels) and `x`/`d`/`D` delete the whole range in
+  one transaction; with no selection they delete the cursor row. Tests: 83 in-process, suite 92/92.
 - 2026-09-19 (ui split): `src/tui/ui.rs` (873 lines) split into a 44-line root (`ui()` dispatch,
   `centered_rect`) plus `src/tui/ui/{todo,calendar,email,grid,popups}.rs`. `triptych::ui::*` paths
   are unchanged: the root re-exports `CalendarGrid`, `CellView`, `TimeSlot`, `build_cell_view`,
@@ -374,6 +378,13 @@ None. Every 2026-09-19 audit finding (KI-1..KI-17) is fixed and covered by a pas
 Found in the 2026-09-19 audit and the todo-list test that followed; fixed the same day, each verified
 with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
 
+- **KI-18** Deleting a todo that came from an email (`x`, `triptych rm`, `clear`) failed with
+  `FOREIGN KEY constraint failed`: `email_messages.task_id` references `tasks(id)` with no `ON DELETE`
+  rule, and SQLite cannot alter one in place. `run_email_migration` now creates the
+  `email_messages_unlink_task` trigger (`BEFORE DELETE ON tasks` sets the link to NULL), which covers
+  every delete path and existing databases on next start. It must stay after the table rebuild, because
+  `RENAME TO` would repoint it at the dropped table. `tests/it/app.rs` (three `*_unlinks_*` tests),
+  `todo_delete_email_linked`.
 - **KI-14** A bare weekday was not parsed: "call mom on sunday" kept "on sunday" in the title and got
   no date; "friday at 3pm" failed too. `parse_chrono_candidate` (`src/nlp/rules.rs`) now accepts full
   weekday names, resolved to the next such day (never today). Abbreviations (`sat`, `sun`) are left

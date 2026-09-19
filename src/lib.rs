@@ -67,12 +67,12 @@ pub async fn run() -> Result<(), BoxError> {
     let mut app = App::build().await?;
 
     if let Err(e) = run_calendar_migration(&app.db_pool).await {
-        eprintln!("⚠ Calendar migration failed: {e}");
+        eprintln!("▲ Calendar migration failed: {e}");
         eprintln!("   Calendar features will be disabled");
     }
 
     if let Err(e) = run_email_migration(&app.db_pool).await {
-        eprintln!("⚠ Email migration failed: {e}");
+        eprintln!("▲ Email migration failed: {e}");
         eprintln!("   Email features will be disabled");
     }
 
