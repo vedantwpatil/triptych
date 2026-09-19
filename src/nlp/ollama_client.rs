@@ -32,6 +32,7 @@ struct StructuredOutput {
     duration_minutes: Option<i32>,
 }
 
+#[derive(Debug)]
 pub struct OllamaClient {
     client: Client,
     model: String,

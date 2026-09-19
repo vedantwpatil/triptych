@@ -11,7 +11,10 @@ use tokio::signal;
 // Socket path (will be in /tmp on Unix systems). Honors `TRIPTYCH_SOCKET_PATH` so tests/tooling
 // can run an isolated daemon without colliding with a real one on the shared default path.
 fn socket_path() -> PathBuf {
-    std::env::var("TRIPTYCH_SOCKET_PATH").map_or_else(|_| std::env::temp_dir().join("triptych.sock"), PathBuf::from)
+    std::env::var("TRIPTYCH_SOCKET_PATH").map_or_else(
+        |_| std::env::temp_dir().join("triptych.sock"),
+        PathBuf::from,
+    )
 }
 
 // Messages sent between CLI and daemon

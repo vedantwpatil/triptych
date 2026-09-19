@@ -1,7 +1,7 @@
 use std::env;
 
 /// IMAP app-password config for a single account, read from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmailConfig {
     /// Label distinguishing this account's stored mail from others (e.g. `"default"`,
     /// `"work"`). Never empty.
@@ -11,6 +11,20 @@ pub struct EmailConfig {
     pub imap_username: String,
     pub imap_password: String,
     pub imap_folder: String,
+}
+
+// Manual `Debug` so the app password never reaches a log line or panic message.
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("account", &self.account)
+            .field("imap_server", &self.imap_server)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &self.imap_username)
+            .field("imap_password", &"<redacted>")
+            .field("imap_folder", &self.imap_folder)
+            .finish()
+    }
 }
 
 impl EmailConfig {
@@ -25,9 +39,10 @@ impl EmailConfig {
     /// `IMAP_USERNAME` / `IMAP_PASSWORD` / `IMAP_PORT` / `IMAP_FOLDER` vars as a
     /// single account labeled `"default"`, so existing single-account `.env` files
     /// keep working unmodified.
+    #[must_use]
     pub fn all_from_env() -> Vec<Self> {
-        let enabled = env::var("TRIPTYCH_EMAIL_ENABLED")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("true"));
+        let enabled =
+            env::var("TRIPTYCH_EMAIL_ENABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true"));
 
         if !enabled {
             return Vec::new();
@@ -89,43 +104,25 @@ impl EmailConfig {
 
 /// Turns an account label into the upper-cased, underscore-delimited suffix used to
 /// look up its env vars, e.g. `"work"` -> `"_WORK"`, `"my-personal"` -> `"_MY_PERSONAL"`.
-fn env_suffix(label: &str) -> String {
+#[must_use]
+pub fn env_suffix(label: &str) -> String {
     let normalized: String = label
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("_{normalized}")
 }
 
-fn parse_account_labels(raw: &str) -> Vec<String> {
+pub fn parse_account_labels(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_comma_separated_labels() {
-        assert_eq!(
-            parse_account_labels("work, personal ,  "),
-            vec!["work".to_string(), "personal".to_string()]
-        );
-    }
-
-    #[test]
-    fn parses_empty_string_to_no_labels() {
-        assert_eq!(parse_account_labels(""), Vec::<String>::new());
-    }
-
-    #[test]
-    fn env_suffix_normalizes_label() {
-        assert_eq!(env_suffix("work"), "_WORK");
-        assert_eq!(env_suffix("my-personal"), "_MY_PERSONAL");
-    }
 }

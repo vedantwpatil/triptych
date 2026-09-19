@@ -3,17 +3,22 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
 
+use crate::email::store::SyncCursor;
 use crate::email::{EmailConfig, ImapMailSource, MailSource};
 use crate::email::{message, store};
-use crate::email::store::SyncCursor;
 
 /// Polls every configured IMAP account for new mail every 60s, one account after
 /// another within each tick. Not true IMAP IDLE (push) — that's a longer-lived-
 /// connection concern, deferred to a later slice.
-pub async fn mail_sync_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiver<()>) -> Result<()> {
+pub async fn mail_sync_worker(
+    db: SqlitePool,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) -> Result<()> {
     let configs = EmailConfig::all_from_env();
     if configs.is_empty() {
-        tracing::info!("[Mail] no IMAP accounts configured (TRIPTYCH_EMAIL_ENABLED/IMAP_*), mail sync disabled");
+        tracing::info!(
+            "[Mail] no IMAP accounts configured (TRIPTYCH_EMAIL_ENABLED/IMAP_*), mail sync disabled"
+        );
         return Ok(());
     }
 
@@ -81,13 +86,20 @@ async fn sync_mail(db: &SqlitePool, source: &ImapMailSource, config: &EmailConfi
     if let Some(validity) = uid_validity
         && !(epoch_changed && fetched_max_uid.is_none())
     {
-        let prior_uid = if epoch_changed { 0 } else { cursor.map_or(0, |c| c.last_uid) };
+        let prior_uid = if epoch_changed {
+            0
+        } else {
+            cursor.map_or(0, |c| c.last_uid)
+        };
         let last_uid = fetched_max_uid.map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
         store::set_sync_cursor(
             db,
             &config.account,
             &config.imap_folder,
-            SyncCursor { uid_validity: i64::from(validity), last_uid },
+            SyncCursor {
+                uid_validity: i64::from(validity),
+                last_uid,
+            },
         )
         .await?;
     }

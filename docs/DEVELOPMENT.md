@@ -7,8 +7,8 @@ map, build/test/lint), [`roadmap.md`](./roadmap.md), [`roadmap-email.md`](./road
 
 ```
 cargo build
-cargo test      # in-memory sqlite; tests in src/app.rs + pure-fn tests in src/ui.rs, src/email/, src/nlp/
-cargo clippy
+cargo test      # tests/it/ (in-process, in-memory sqlite) + tests/it/cli.rs (spawns the binary)
+cargo clippy --all-targets
 ```
 
 Run all three before considering a change done. Known Issues resolved in place, never deleted.
@@ -16,11 +16,47 @@ Run all three before considering a change done. Known Issues resolved in place, 
 End-to-end check (drives the real binary in sandboxes, ~1 min; see [`TUI_DRIVER.md`](./TUI_DRIVER.md)):
 
 ```
-python3 tools/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Issue; XPASS = fixed, drop its marker
+python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Issue; XPASS = fixed, drop its marker
 ```
 
 ## Changelog
 
+- 2026-09-19 (tui/cli dirs): Grouped the flat `src/` files into two directories, the same
+  `foo.rs` + `foo/` pattern `app` uses. `src/tui.rs` now parents `tui/{keys,ui}.rs`; `src/cli.rs`
+  (clap definitions) parents `cli/{commands,daemon}.rs`. `triptych::ui` is unchanged (`lib.rs`
+  re-exports `tui::ui`), so no test imports moved. `keys`, `commands` and `daemon` stay private.
+  Not moved: `urgency.rs` (shared by `ui` and the CLI `list`), `logging.rs`, `migrations.rs`. The
+  entries below name the old flat paths.
+- 2026-09-19 (rust-idioms follow-up): Closed the items the app split left open. `run()` and the
+  other entry points return `BoxError` (`Box<dyn Error + Send + Sync>`, alias in `src/lib.rs`).
+  `App`, `NLPParser`, `OllamaClient` and `ImapMailSource` derive `Debug`, and `missing_debug_implementations`
+  is now a lint. `EmailConfig` has a hand-written `Debug` that prints the IMAP password as
+  `<redacted>` (the derived one would have leaked it into any log line; covered by
+  `debug_output_redacts_the_password`). `tests/cli.rs` moved to `tests/it/cli.rs`, so all 75 tests
+  link as one binary. The four crate-wide clippy allows (`missing_errors_doc`, `missing_panics_doc`,
+  `must_use_candidate`, `too_long_first_doc_paragraph`) are gone: 35 `# Errors` sections, 29
+  `#[must_use]` attributes and 13 shortened doc summaries. Observation: `NLPParser::parse` never
+  returns `Err` (`ParseError::InvalidInput` is never built), so its `# Errors` section says so;
+  making `parse` infallible is a possible follow-up. Flake: `daemon_lifecycle` failed twice in a row at
+  `-j 4` under machine load (load average ~10) and passed 3 of 3 alone and on every rerun.
+- 2026-09-19 (app split): `src/app.rs` (2250 lines) split into `src/app.rs` (the `App` struct, `build`,
+  view toggles) plus `src/app/{model,time,tasks,allocation,calendar,placement,schedule_io,mail}.rs`;
+  public paths (`triptych::app::*`) are unchanged via `pub use`. Methods and helpers shared between
+  the files are `pub(super)`. A repo-wide `cargo fmt` was run (it reformatted `daemon.rs`,
+  `email/client.rs`, `nlp/parser.rs`, `sync/{config,mail}.rs`), and a `rust-idioms` review narrowed
+  module visibility (`cli`, `commands`, `daemon`, `keys`, `sync`, `tui` private; `email::{client,store}`
+  and `nlp::ollama_client` `pub(crate)`), added `Debug` to seven public types and set `publish = false`.
+  The items this left open are closed in the entry above. See
+  [`../src/app/CLAUDE.md`](../src/app/CLAUDE.md). Older entries below name `src/app.rs`.
+- 2026-09-19 (restructure): Repo laid out like a standard Rust package. The crate is now a library
+  (`src/lib.rs`, named `triptych`) plus a 5-line `src/main.rs`; the old `main.rs` split into
+  `src/commands.rs` (non-interactive CLI), `src/tui.rs` (terminal setup and event loop) and
+  `src/logging.rs`. The binary is `target/debug/triptych` (was `Triptych`). All tests now live under
+  `tests/`: the inline `mod tests` blocks became `tests/it/` (one test binary, 60 tests), `tools/`
+  became `tests/tui/`, and `tests/cli.rs` is unchanged (it later moved to `tests/it/cli.rs`). Lints moved into `[lints]` in `Cargo.toml`,
+  and clippy is clean with `--all-targets` (the old `EmailMessage` dead-code warnings vanished
+  because the library's `pub` items are no longer dead). Items the tests call became `pub`. See
+  [`../tests/CLAUDE.md`](../tests/CLAUDE.md). Older entries below name the old paths.
 - 2026-09-19 (latest): Fixed KI-14..KI-17, found by a sandboxed todo-list test with college-student
   tasks. Bare weekday parsing (`src/nlp/rules.rs`), `[LOW]` and `[DUE ...]` badges, and automatic
   priority escalation near a date, all in the new `src/urgency.rs` and shared by `ui.rs` and the
@@ -34,10 +70,10 @@ python3 tools/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Iss
   async deadline parse (KI-13), and removal of the fuzzy cache (KI-1). No known bugs remain open.
 - 2026-09-19: Feature audit plus a headless TUI driver. Audited every shipped feature by running the
   real binary (CLI, daemon, TUI) in sandboxes and found 13 bugs, all filed under Known Issues
-  (KI-1..KI-13) and none fixed yet. Built `tools/tuidrive.py` (detached pty session an agent can
+  (KI-1..KI-13) and none fixed yet. Built `tests/tui/tuidrive.py` (detached pty session an agent can
   `send` keys to and read the screen from, plus `db`/`cli` against the same sandbox) and
-  `tools/tui_suite.py` (81 scenarios: 57 pass, 24 are expected failures that reproduce the open
-  issues). Docs: [`TUI_DRIVER.md`](./TUI_DRIVER.md), [`../tools/CLAUDE.md`](../tools/CLAUDE.md),
+  `tests/tui/tui_suite.py` (81 scenarios: 57 pass, 24 are expected failures that reproduce the open
+  issues). Docs: [`TUI_DRIVER.md`](./TUI_DRIVER.md), [`../tests/tui/CLAUDE.md`](../tests/tui/CLAUDE.md),
   and the `triptych-tui` skill. No Rust code changed. Two findings worth remembering: the NLP regex
   fast path returns 0.95 confidence on partial parses, so Ollama never gets a chance to fix them
   (KI-2); and a stale `triptych daemon` from an earlier test run was found holding the real
@@ -331,7 +367,7 @@ None. Every 2026-09-19 audit finding (KI-1..KI-17) is fixed and covered by a pas
 ### Resolved
 
 Found in the 2026-09-19 audit and the todo-list test that followed; fixed the same day, each verified
-with its `tools/tui_suite.py` scenario (named at the end of each entry).
+with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
 
 - **KI-14** A bare weekday was not parsed: "call mom on sunday" kept "on sunday" in the title and got
   no date; "friday at 3pm" failed too. `parse_chrono_candidate` (`src/nlp/rules.rs`) now accepts full

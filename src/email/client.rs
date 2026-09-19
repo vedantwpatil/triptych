@@ -67,11 +67,13 @@ pub trait MailSource: Send + Sync {
     ) -> impl Future<Output = Result<(Option<u32>, Vec<RawMessage>)>> + Send;
 }
 
+#[derive(Debug)]
 pub struct ImapMailSource {
     config: EmailConfig,
 }
 
 impl ImapMailSource {
+    #[must_use]
     pub const fn new(config: EmailConfig) -> Self {
         Self { config }
     }
@@ -104,7 +106,8 @@ impl ImapMailSource {
 
         tracing::debug!(
             "[Mail:{account}] connecting to {}:{}",
-            self.config.imap_server, self.config.imap_port
+            self.config.imap_server,
+            self.config.imap_port
         );
         let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
             .await
@@ -166,8 +169,8 @@ impl ImapMailSource {
             },
         );
 
-        let search_query = since_uid
-            .map_or_else(|| "ALL".to_string(), |uid| format!("UID {}:*", uid + 1));
+        let search_query =
+            since_uid.map_or_else(|| "ALL".to_string(), |uid| format!("UID {}:*", uid + 1));
 
         tracing::debug!("[Mail:{account}] UID search: {search_query}");
         let uids = session
@@ -197,7 +200,10 @@ impl ImapMailSource {
 
             // Cheap pre-check: sizes only, no bodies. Splits the batch so oversized
             // messages (attachments) don't cost a full RFC822 download below.
-            tracing::debug!("[Mail:{account}] checking size of {} message(s)", sorted.len());
+            tracing::debug!(
+                "[Mail:{account}] checking size of {} message(s)",
+                sorted.len()
+            );
             let mut size_stream = session
                 .uid_fetch(&uid_set, "(RFC822.SIZE)")
                 .await
@@ -217,7 +223,10 @@ impl ImapMailSource {
             let mut small_uids = Vec::new();
             let mut large_uids = Vec::new();
             for uid in &sorted {
-                if sizes.get(uid).is_some_and(|&size| size > LARGE_MESSAGE_BYTES) {
+                if sizes
+                    .get(uid)
+                    .is_some_and(|&size| size > LARGE_MESSAGE_BYTES)
+                {
                     large_uids.push(*uid);
                 } else {
                     small_uids.push(*uid);

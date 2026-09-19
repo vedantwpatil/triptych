@@ -1,5 +1,5 @@
 //! Integration tests that drive the compiled `triptych` binary as a real user would -
-//! `Command::new(env!("CARGO_BIN_EXE_Triptych"))`, not an in-process call into `App`.
+//! `Command::new(env!("CARGO_BIN_EXE_triptych"))`, not an in-process call into `App`.
 //!
 //! Each test gets its own throwaway `Sandbox`: a unique temp directory holding an
 //! isolated `DATABASE_URL` sqlite file and `TRIPTYCH_SOCKET_PATH` daemon socket, passed
@@ -10,11 +10,6 @@
 //!
 //! Email/IMAP env vars are explicitly stripped from every child process so these tests
 //! are deterministic regardless of what's `source`d in the shell that runs `cargo test`.
-
-// unwrap/expect on setup (spawning the binary, reading its output) are the correct failure
-// mode here: a panic fails the test with a clear message, which is exactly what's wanted.
-// The project-wide `deny` in Cargo.toml's `[lints.clippy]` is aimed at production code paths.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::{Datelike, TimeZone, Utc, Weekday};
 use std::path::{Path, PathBuf};
@@ -58,10 +53,13 @@ impl Sandbox {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_Triptych"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_triptych"));
         cmd.args(args)
             .current_dir(&self.dir)
-            .env("DATABASE_URL", format!("sqlite:{}", self.db_path().display()))
+            .env(
+                "DATABASE_URL",
+                format!("sqlite:{}", self.db_path().display()),
+            )
             .env("TRIPTYCH_SOCKET_PATH", self.socket_path())
             .env_remove("TRIPTYCH_EMAIL_ENABLED")
             .env_remove("IMAP_ACCOUNTS")
@@ -178,14 +176,20 @@ fn add_list_done_rm_clear_roundtrip() {
     assert!(rm.status.success(), "rm failed: {}", stderr(&rm));
 
     let list2 = stdout(&sb.run(&["list"]));
-    assert!(!list2.contains("Walk dog"), "removed task still listed: {list2}");
+    assert!(
+        !list2.contains("Walk dog"),
+        "removed task still listed: {list2}"
+    );
 
     let clear = sb.run(&["clear"]);
     assert!(clear.status.success(), "clear failed: {}", stderr(&clear));
     assert!(stdout(&clear).contains("Cleared 1 completed task"));
 
     let list3 = stdout(&sb.run(&["list"]));
-    assert!(!list3.contains("Buy milk"), "cleared task still listed: {list3}");
+    assert!(
+        !list3.contains("Buy milk"),
+        "cleared task still listed: {list3}"
+    );
 }
 
 #[test]
@@ -209,7 +213,10 @@ fn nlp_parses_tags_priority_and_relative_date() {
 
     let list_out = stdout(&sb.run(&["list"]));
     assert!(list_out.contains("#work"), "tag not parsed: {list_out}");
-    assert!(list_out.contains("[HIGH]"), "priority not parsed: {list_out}");
+    assert!(
+        list_out.contains("[HIGH]"),
+        "priority not parsed: {list_out}"
+    );
     assert!(list_out.contains("[12/25]"), "date not parsed: {list_out}");
 }
 
@@ -220,8 +227,14 @@ fn priority_rises_when_the_date_is_near() {
     assert!(add.status.success(), "add failed: {}", stderr(&add));
 
     let list_out = stdout(&sb.run(&["list"]));
-    assert!(list_out.contains("[TOMORROW]"), "date not parsed: {list_out}");
-    assert!(list_out.contains("[URGENT↑]"), "priority not raised: {list_out}");
+    assert!(
+        list_out.contains("[TOMORROW]"),
+        "date not parsed: {list_out}"
+    );
+    assert!(
+        list_out.contains("[URGENT↑]"),
+        "priority not raised: {list_out}"
+    );
 }
 
 #[test]
@@ -245,16 +258,27 @@ title = "Focus Time"
     .unwrap();
 
     let import = sb.run(&["schedule", "import", toml_path.to_str().unwrap()]);
-    assert!(import.status.success(), "import failed: {}", stderr(&import));
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stderr(&import)
+    );
     assert!(stdout(&import).contains("Imported 1 schedule block"));
 
     let show = stdout(&sb.run(&["schedule", "show"]));
-    assert!(show.contains("Focus Time"), "block missing from show: {show}");
+    assert!(
+        show.contains("Focus Time"),
+        "block missing from show: {show}"
+    );
     assert!(show.contains("Monday"));
 
     let export_path = sb.path("out.toml");
     let export = sb.run(&["schedule", "export", export_path.to_str().unwrap()]);
-    assert!(export.status.success(), "export failed: {}", stderr(&export));
+    assert!(
+        export.status.success(),
+        "export failed: {}",
+        stderr(&export)
+    );
     let exported = std::fs::read_to_string(&export_path).expect("read exported toml");
     assert!(exported.contains("Focus Time"));
 
@@ -283,7 +307,10 @@ fn daemon_start_status_stop_cleans_up_socket() {
     }
 
     let status = stdout(&sb.run(&["status"]));
-    assert!(status.contains("Daemon is running"), "unexpected status: {status}");
+    assert!(
+        status.contains("Daemon is running"),
+        "unexpected status: {status}"
+    );
 
     let stop = sb.run(&["stop"]);
     assert!(stop.status.success(), "stop failed: {}", stderr(&stop));
@@ -292,11 +319,14 @@ fn daemon_start_status_stop_cleans_up_socket() {
     assert!(exit.success(), "daemon exited non-zero: {exit:?}");
     assert!(
         !sb.socket_path().exists(),
-        "socket left behind after stop (regression: see src/daemon.rs Shutdown handling)"
+        "socket left behind after stop (regression: see src/cli/daemon.rs Shutdown handling)"
     );
 
     let status_after = stdout(&sb.run(&["status"]));
-    assert!(status_after.contains("not running"), "unexpected status: {status_after}");
+    assert!(
+        status_after.contains("not running"),
+        "unexpected status: {status_after}"
+    );
 }
 
 #[test]
@@ -304,7 +334,10 @@ fn email_commands_fail_gracefully_without_config() {
     let sb = Sandbox::new();
 
     let sync = sb.run(&["email", "sync"]);
-    assert!(!sync.status.success(), "sync should fail without IMAP config");
+    assert!(
+        !sync.status.success(),
+        "sync should fail without IMAP config"
+    );
     assert!(
         stderr(&sync).contains("Email not configured"),
         "unexpected error: {}",
@@ -312,14 +345,24 @@ fn email_commands_fail_gracefully_without_config() {
     );
 
     let list = sb.run(&["email", "list"]);
-    assert!(list.status.success(), "email list failed: {}", stderr(&list));
+    assert!(
+        list.status.success(),
+        "email list failed: {}",
+        stderr(&list)
+    );
     assert!(stdout(&list).contains("No emails yet"));
 }
 
 #[test]
 fn schedule_reallocate_fits_deadline_task_into_available_block() {
     let sb = Sandbox::new();
-    let tomorrow_day = weekday_name(chrono::Local::now().date_naive().succ_opt().unwrap().weekday());
+    let tomorrow_day = weekday_name(
+        chrono::Local::now()
+            .date_naive()
+            .succ_opt()
+            .unwrap()
+            .weekday(),
+    );
 
     let toml_path = sb.path("schedule.toml");
     std::fs::write(
@@ -338,7 +381,11 @@ title = "Focus Time"
     .unwrap();
 
     let import = sb.run(&["schedule", "import", toml_path.to_str().unwrap()]);
-    assert!(import.status.success(), "import failed: {}", stderr(&import));
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stderr(&import)
+    );
 
     // "by tomorrow 2h" resolves fully via the regex fast path (deadline + explicit
     // duration, no start time) - see src/nlp/rules.rs - so this never touches Ollama.
@@ -346,7 +393,11 @@ title = "Focus Time"
     assert!(add.status.success(), "add failed: {}", stderr(&add));
 
     let reallocate = sb.run(&["schedule", "reallocate"]);
-    assert!(reallocate.status.success(), "reallocate failed: {}", stderr(&reallocate));
+    assert!(
+        reallocate.status.success(),
+        "reallocate failed: {}",
+        stderr(&reallocate)
+    );
     assert!(
         stdout(&reallocate).contains("All deadline tasks fit within available blocks"),
         "unexpected reallocate output: {}",
@@ -363,10 +414,20 @@ fn schedule_reallocate_reports_conflict_with_reason() {
     assert!(add.status.success(), "add failed: {}", stderr(&add));
 
     let reallocate = sb.run(&["schedule", "reallocate"]);
-    assert!(reallocate.status.success(), "reallocate failed: {}", stderr(&reallocate));
+    assert!(
+        reallocate.status.success(),
+        "reallocate failed: {}",
+        stderr(&reallocate)
+    );
     let out = stdout(&reallocate);
-    assert!(out.contains("task(s) not scheduled: 1 out of block capacity"), "unexpected output: {out}");
-    assert!(out.contains("needs 120m, got 0m"), "unexpected output: {out}");
+    assert!(
+        out.contains("task(s) not scheduled: 1 out of block capacity"),
+        "unexpected output: {out}"
+    );
+    assert!(
+        out.contains("needs 120m, got 0m"),
+        "unexpected output: {out}"
+    );
     assert!(
         out.contains("no free deepwork/admin time before the deadline"),
         "unexpected output: {out}"
@@ -398,13 +459,29 @@ title = "MWF Admin"
     .unwrap();
 
     let import = sb.run(&["schedule", "import", toml_path.to_str().unwrap()]);
-    assert!(import.status.success(), "import failed: {}", stderr(&import));
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stderr(&import)
+    );
     // 5 weekday instances of the first block + 3 (Mon/Wed/Fri) of the second.
-    assert!(stdout(&import).contains("Imported 8 schedule blocks"), "unexpected output: {}", stdout(&import));
+    assert!(
+        stdout(&import).contains("Imported 8 schedule blocks"),
+        "unexpected output: {}",
+        stdout(&import)
+    );
 
     let show = stdout(&sb.run(&["schedule", "show"]));
-    assert_eq!(show.matches("Weekday Focus").count(), 5, "expected 5 weekday instances: {show}");
-    assert_eq!(show.matches("MWF Admin").count(), 3, "expected 3 Mon/Wed/Fri instances: {show}");
+    assert_eq!(
+        show.matches("Weekday Focus").count(),
+        5,
+        "expected 5 weekday instances: {show}"
+    );
+    assert_eq!(
+        show.matches("MWF Admin").count(),
+        3,
+        "expected 3 Mon/Wed/Fri instances: {show}"
+    );
 }
 
 #[test]
@@ -432,8 +509,16 @@ title = "Block B"
     .unwrap();
 
     let import = sb.run(&["schedule", "import", toml_path.to_str().unwrap()]);
-    assert!(import.status.success(), "import failed: {}", stderr(&import));
-    assert!(stdout(&import).contains("Imported 1 schedule blocks"), "unexpected output: {}", stdout(&import));
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stderr(&import)
+    );
+    assert!(
+        stdout(&import).contains("Imported 1 schedule blocks"),
+        "unexpected output: {}",
+        stdout(&import)
+    );
     assert!(
         stderr(&import).contains("Warning: Skipping overlapping block 'Block B' on monday"),
         "unexpected stderr: {}",
@@ -442,7 +527,10 @@ title = "Block B"
 
     let show = stdout(&sb.run(&["schedule", "show"]));
     assert!(show.contains("Block A"), "missing surviving block: {show}");
-    assert!(!show.contains("Block B"), "overlapping block should have been skipped: {show}");
+    assert!(
+        !show.contains("Block B"),
+        "overlapping block should have been skipped: {show}"
+    );
 }
 
 #[test]
@@ -463,7 +551,11 @@ title = "Old Block"
     )
     .unwrap();
     let import1 = sb.run(&["schedule", "import", first_toml.to_str().unwrap()]);
-    assert!(import1.status.success(), "first import failed: {}", stderr(&import1));
+    assert!(
+        import1.status.success(),
+        "first import failed: {}",
+        stderr(&import1)
+    );
 
     let second_toml = sb.path("second.toml");
     std::fs::write(
@@ -478,14 +570,34 @@ title = "New Block"
 "#,
     )
     .unwrap();
-    let import2 = sb.run(&["schedule", "import", "--clear", second_toml.to_str().unwrap()]);
-    assert!(import2.status.success(), "second import failed: {}", stderr(&import2));
-    assert!(stdout(&import2).contains("Cleared existing blocks"), "unexpected output: {}", stdout(&import2));
-    assert!(stdout(&import2).contains("Imported 1 schedule blocks"), "unexpected output: {}", stdout(&import2));
+    let import2 = sb.run(&[
+        "schedule",
+        "import",
+        "--clear",
+        second_toml.to_str().unwrap(),
+    ]);
+    assert!(
+        import2.status.success(),
+        "second import failed: {}",
+        stderr(&import2)
+    );
+    assert!(
+        stdout(&import2).contains("Cleared existing blocks"),
+        "unexpected output: {}",
+        stdout(&import2)
+    );
+    assert!(
+        stdout(&import2).contains("Imported 1 schedule blocks"),
+        "unexpected output: {}",
+        stdout(&import2)
+    );
 
     let show = stdout(&sb.run(&["schedule", "show"]));
     assert!(show.contains("New Block"), "missing new block: {show}");
-    assert!(!show.contains("Old Block"), "--clear should have removed the old block: {show}");
+    assert!(
+        !show.contains("Old Block"),
+        "--clear should have removed the old block: {show}"
+    );
 }
 
 #[test]
@@ -528,20 +640,39 @@ fn email_list_formats_seeded_messages_with_read_marker_and_account_tag() {
     );
 
     let list = sb.run(&["email", "list"]);
-    assert!(list.status.success(), "email list failed: {}", stderr(&list));
+    assert!(
+        list.status.success(),
+        "email list failed: {}",
+        stderr(&list)
+    );
     let out = stdout(&list);
 
     assert!(out.contains("(work)"), "missing account tag: {out}");
     assert!(out.contains("(personal)"), "missing account tag: {out}");
     assert!(out.contains("Alice"), "missing from_name: {out}");
-    assert!(out.contains("bob@example.com"), "missing from_addr fallback: {out}");
+    assert!(
+        out.contains("bob@example.com"),
+        "missing from_addr fallback: {out}"
+    );
     assert!(out.contains("Q3 Planning"), "missing subject: {out}");
     assert!(out.contains("Weekend Trip"), "missing subject: {out}");
 
-    let unread_line = out.lines().find(|l| l.contains("Q3 Planning")).expect("unread line present");
-    assert!(unread_line.contains('*'), "unread message missing '*' marker: {unread_line}");
-    let read_line = out.lines().find(|l| l.contains("Weekend Trip")).expect("read line present");
-    assert!(!read_line.contains('*'), "read message should not have '*' marker: {read_line}");
+    let unread_line = out
+        .lines()
+        .find(|l| l.contains("Q3 Planning"))
+        .expect("unread line present");
+    assert!(
+        unread_line.contains('*'),
+        "unread message missing '*' marker: {unread_line}"
+    );
+    let read_line = out
+        .lines()
+        .find(|l| l.contains("Weekend Trip"))
+        .expect("read line present");
+    assert!(
+        !read_line.contains('*'),
+        "read message should not have '*' marker: {read_line}"
+    );
 
     // Merged inbox orders most-recent-first regardless of account.
     let newer_pos = out.find("Weekend Trip").unwrap();
@@ -561,7 +692,10 @@ fn email_sync_fails_gracefully_against_unreachable_server() {
         .env("IMAP_PASSWORD", "testpass");
     let sync = cmd.output().expect("spawn triptych");
 
-    assert!(!sync.status.success(), "sync against a closed port should fail");
+    assert!(
+        !sync.status.success(),
+        "sync against a closed port should fail"
+    );
     assert!(
         stderr(&sync).contains("[default] Sync failed"),
         "unexpected error: {}",

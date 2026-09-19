@@ -17,7 +17,9 @@ use nom::{
 /// instead of panicking, so a future edit that breaks the invariant fails the parse
 /// rather than crashing the process.
 fn require<T>(opt: Option<T>, input: &str) -> Result<T, nom::Err<nom::error::Error<&str>>> {
-    opt.ok_or_else(|| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+    opt.ok_or_else(|| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })
 }
 
 // ============================================================================
@@ -47,7 +49,7 @@ enum Segment {
 }
 
 #[derive(Debug, Clone)]
-enum TemporalContext {
+pub enum TemporalContext {
     /// A resolved point in time (eod, in 2 hours)
     Point(DateTime<Utc>),
     /// A resolved duration (for 3 days)
@@ -58,13 +60,15 @@ enum TemporalContext {
 // MAIN PARSER
 // ============================================================================
 
+#[derive(Debug)]
 pub struct RuleParser;
 
-/// True if the input has a deadline-intent word ("by"/"due"/"before") as a
-/// standalone token that `parse_deadline_segment` could not resolve into an
-/// actual deadline (e.g. "before the end of next month"). Used by the parser
-/// to decide whether to fall through to Ollama instead of silently dropping
-/// the user's intended deadline.
+/// True if a deadline-intent word ("by"/"due"/"before") was left unresolved.
+///
+/// The word must appear as a standalone token that `parse_deadline_segment` could not turn into an
+/// actual deadline (e.g. "before the end of next month"). The parser uses this to fall through to
+/// Ollama instead of silently dropping the user's intended deadline.
+#[must_use]
 pub fn has_unresolved_deadline_intent(input: &str, resolved_deadline: bool) -> bool {
     if resolved_deadline {
         return false;
@@ -75,6 +79,7 @@ pub fn has_unresolved_deadline_intent(input: &str, resolved_deadline: bool) -> b
 }
 
 impl RuleParser {
+    #[must_use]
     pub fn try_parse(input: &str) -> Option<ParsedItem> {
         let (remaining, segments) = parse_segments(input).ok()?;
 
@@ -255,7 +260,7 @@ fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
 }
 
 fn weekday_from_name(name: &str) -> Option<chrono::Weekday> {
-    use chrono::Weekday::{Mon, Tue, Wed, Thu, Fri, Sat, Sun};
+    use chrono::Weekday::{Fri, Mon, Sat, Sun, Thu, Tue, Wed};
     Some(match name.to_lowercase().as_str() {
         "monday" | "mon" => Mon,
         "tuesday" | "tue" | "tues" => Tue,
@@ -294,12 +299,18 @@ fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
         amount
     };
 
-    Ok((input, Segment::ExplicitDuration(i32::try_from(minutes).unwrap_or(i32::MAX))))
+    Ok((
+        input,
+        Segment::ExplicitDuration(i32::try_from(minutes).unwrap_or(i32::MAX)),
+    ))
 }
 
 /// A recoverable parse failure: `alt`/`many0` backtrack past it (unlike `nom::Err::Failure`).
 fn reject<T>(input: &str) -> IResult<&str, T> {
-    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Verify,
+    )))
 }
 
 /// Succeeds only if the next character isn't alphanumeric (or input is exhausted)
@@ -421,7 +432,9 @@ fn parse_time_of_day_segment(input: &str) -> IResult<&str, Segment> {
     }
 }
 
-fn parse_business_time(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, TemporalContext> {
+pub fn parse_business_time(
+    now: DateTime<Local>,
+) -> impl FnMut(&str) -> IResult<&str, TemporalContext> {
     move |input| {
         let (input, token) = alt((
             tag_no_case("eod"),
@@ -435,9 +448,12 @@ fn parse_business_time(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str
                 resolve_local_datetime(require(now.date_naive().and_hms_opt(17, 0, 0), input)?)
             }
             "eow" => {
-                let days_until_fri = (4i64 - i64::from(now.weekday().num_days_from_monday()) + 7) % 7;
+                let days_until_fri =
+                    (4i64 - i64::from(now.weekday().num_days_from_monday()) + 7) % 7;
                 let naive = require(
-                    (now + Duration::days(days_until_fri)).date_naive().and_hms_opt(17, 0, 0),
+                    (now + Duration::days(days_until_fri))
+                        .date_naive()
+                        .and_hms_opt(17, 0, 0),
                     input,
                 )?;
                 resolve_local_datetime(naive)
@@ -455,7 +471,9 @@ fn parse_business_time(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str
                     require(first_of_this_month.with_month(now.month() + 1), input)?
                 };
                 let naive = require(
-                    (first_of_next_month - Duration::days(1)).date_naive().and_hms_opt(17, 0, 0),
+                    (first_of_next_month - Duration::days(1))
+                        .date_naive()
+                        .and_hms_opt(17, 0, 0),
                     input,
                 )?;
                 resolve_local_datetime(naive)
@@ -533,10 +551,11 @@ fn parse_date_segment(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str,
     }
 }
 
-/// US-style "12/25" or "12/25/2026". A year-less date the calendar has already passed rolls to
-/// next year. "1/2" or "3/4" is far likelier a fraction than a date, so a bare month/day needs a
-/// leading "on" or a day above 12.
-fn parse_numeric_date(
+/// US-style "12/25" or "12/25/2026".
+///
+/// A year-less date the calendar has already passed rolls to next year. "1/2" or "3/4" is far
+/// likelier a fraction than a date, so a bare month/day needs a leading "on" or a day above 12.
+pub fn parse_numeric_date(
     now: DateTime<Local>,
     has_on: bool,
 ) -> impl FnMut(&str) -> IResult<&str, DateTime<Utc>> {
@@ -557,13 +576,14 @@ fn parse_numeric_date(
         );
         let midnight = NaiveDate::from_ymd_opt(full_year, month, day)
             .map(|d| {
-                if year.is_none() && d < today { d.with_year(d.year() + 1).unwrap_or(d) } else { d }
+                if year.is_none() && d < today {
+                    d.with_year(d.year() + 1).unwrap_or(d)
+                } else {
+                    d
+                }
             })
             .and_then(|d| d.and_hms_opt(0, 0, 0));
-        midnight.map_or_else(
-            || reject(input),
-            |m| Ok((rest, resolve_local_datetime(m))),
-        )
+        midnight.map_or_else(|| reject(input), |m| Ok((rest, resolve_local_datetime(m))))
     }
 }
 
@@ -703,235 +723,5 @@ fn quantize_time(dt: DateTime<Utc>, grid_minutes: i64) -> DateTime<Utc> {
     } else {
         let diff = grid_seconds - remainder;
         dt + Duration::seconds(diff)
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
-    use chrono::Timelike;
-
-    fn parse_task(input: &str) -> Task {
-        match RuleParser::try_parse(input).expect("expected a parsed item") {
-            ParsedItem::Task(task) => task,
-            ParsedItem::Event(event) => panic!("expected Task, got Event: {event:?}"),
-        }
-    }
-
-    #[test]
-    fn deadline_by_weekday_sets_end_of_day() {
-        let task = parse_task("finish slides by friday");
-        let deadline = task.deadline.expect("deadline should be set");
-        let local = deadline.with_timezone(&Local);
-        assert_eq!(local.weekday(), chrono::Weekday::Fri);
-        assert_eq!(local.time(), NaiveTime::from_hms_opt(23, 59, 59).unwrap());
-        assert_eq!(task.title, "finish slides");
-    }
-
-    #[test]
-    fn bare_hour_duration_converts_to_minutes() {
-        let task = parse_task("write report 3h");
-        assert_eq!(task.duration_minutes, Some(180));
-        assert_eq!(task.title, "write report");
-    }
-
-    #[test]
-    fn bare_minute_duration_is_not_hours() {
-        let task = parse_task("quick call 90m");
-        assert_eq!(task.duration_minutes, Some(90));
-    }
-
-    #[test]
-    fn deadline_and_duration_combine_without_becoming_an_event() {
-        let task = parse_task("MATH 475 homework by wednesday 3h");
-        assert!(task.deadline.is_some());
-        assert_eq!(task.duration_minutes, Some(180));
-        assert_eq!(task.title, "MATH 475 homework");
-        assert!(task.due_date.is_none());
-    }
-
-    #[test]
-    fn word_boundary_guard_prevents_false_positive_duration() {
-        // "3 more things" must not be misparsed as a "3m" duration.
-        let task = parse_task("buy 3 more things");
-        assert_eq!(task.duration_minutes, None);
-        assert_eq!(task.title, "buy 3 more things");
-    }
-
-    #[test]
-    fn due_tomorrow_sets_deadline() {
-        let task = parse_task("call dentist due tomorrow");
-        let deadline = task.deadline.expect("deadline should be set");
-        let tomorrow = (Local::now() + Duration::days(1)).date_naive();
-        assert_eq!(deadline.with_timezone(&Local).date_naive(), tomorrow);
-        assert_eq!(task.title, "call dentist");
-    }
-
-    /// Regression: "eom" used to call `.with_month(...)` before resetting the
-    /// day to 1, so parsing this on the last day of a 31-day month whose
-    /// successor is shorter (Jan -> Feb) computed an invalid "Feb 31" and
-    /// panicked. `now` is injected directly (bypassing `Local::now()`) so the
-    /// test is deterministic regardless of what day it actually runs on.
-    #[test]
-    fn eom_on_the_31st_does_not_panic_rolling_into_a_shorter_month() {
-        let now = NaiveDate::from_ymd_opt(2026, 1, 31)
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap();
-
-        let (_, temporal) = parse_business_time(now)("eom").expect("eom should parse");
-        let TemporalContext::Point(dt) = temporal else {
-            panic!("expected a Point");
-        };
-        let local = dt.with_timezone(&Local);
-        assert_eq!(local.date_naive(), NaiveDate::from_ymd_opt(2026, 1, 31).unwrap());
-        assert_eq!(local.time(), NaiveTime::from_hms_opt(17, 0, 0).unwrap());
-    }
-
-    /// December's "eom" must roll into January *of the following year*, not
-    /// panic or wrap within the same year.
-    #[test]
-    fn eom_in_december_rolls_into_next_year() {
-        let now = NaiveDate::from_ymd_opt(2026, 12, 15)
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap();
-
-        let (_, temporal) = parse_business_time(now)("eom").expect("eom should parse");
-        let TemporalContext::Point(dt) = temporal else {
-            panic!("expected a Point");
-        };
-        let local = dt.with_timezone(&Local);
-        assert_eq!(local.date_naive(), NaiveDate::from_ymd_opt(2026, 12, 31).unwrap());
-    }
-
-    fn parse_event(input: &str) -> Event {
-        match RuleParser::try_parse(input).expect("expected a parsed item") {
-            ParsedItem::Event(event) => event,
-            ParsedItem::Task(task) => panic!("expected Event, got Task: {task:?}"),
-        }
-    }
-
-    fn local_hm(dt: DateTime<Utc>) -> (NaiveDate, u32, u32) {
-        let local = dt.with_timezone(&Local);
-        (local.date_naive(), local.hour(), local.minute())
-    }
-
-    fn tomorrow() -> NaiveDate {
-        (Local::now() + Duration::days(1)).date_naive()
-    }
-
-    #[test]
-    fn bare_weekday_is_the_next_such_day() {
-        let today = Local::now().date_naive();
-        for name in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] {
-            for input in [format!("call mom on {name}"), format!("call mom {name}")] {
-                let task = parse_task(&input);
-                let (date, ..) = local_hm(task.due_date.unwrap_or_else(|| panic!("no date: {input}")));
-                assert_eq!(date.weekday().to_string().to_lowercase(), name[..3], "{input}");
-                assert!(date > today && date <= today + chrono::Duration::days(7), "{input} -> {date}");
-                assert_eq!(task.title, "call mom", "{input}");
-            }
-        }
-    }
-
-    #[test]
-    fn weekday_combines_with_time_and_ignores_abbreviations() {
-        let task = parse_task("study group friday at 3pm");
-        let (date, h, m) = local_hm(task.due_date.unwrap());
-        assert_eq!((date.weekday(), h, m), (chrono::Weekday::Fri, 15, 0));
-        assert_eq!(task.title, "study group");
-
-        let task = parse_task("fix sat nav sundays");
-        assert!(task.due_date.is_none());
-        assert_eq!(task.title, "fix sat nav sundays");
-    }
-
-    #[test]
-    fn date_and_time_of_day_merge_into_one_moment() {
-        let task = parse_task("submit report tomorrow at 3pm");
-        assert_eq!(local_hm(task.due_date.unwrap()), (tomorrow(), 15, 0));
-        assert_eq!(task.title, "submit report");
-    }
-
-    #[test]
-    fn time_with_no_date_means_today() {
-        let today = Local::now().date_naive();
-        for (input, hm) in [("call mom at 3pm", (15, 0)), ("standup 6pm", (18, 0)), ("gym 15:30", (15, 30))] {
-            let task = parse_task(input);
-            assert_eq!(local_hm(task.due_date.unwrap()), (today, hm.0, hm.1), "{input}");
-        }
-    }
-
-    #[test]
-    fn month_day_and_weekday_combine_with_time() {
-        let task = parse_task("dentist Sep 25 at 2pm");
-        let (date, h, m) = local_hm(task.due_date.unwrap());
-        assert_eq!((date.month(), date.day(), h, m), (9, 25, 14, 0));
-        assert_eq!(task.title, "dentist");
-
-        let task = parse_task("review next friday at 10am");
-        let (date, h, _) = local_hm(task.due_date.unwrap());
-        assert_eq!((date.weekday(), h), (chrono::Weekday::Fri, 10));
-    }
-
-    #[test]
-    fn time_range_becomes_an_event_with_its_duration() {
-        let event = parse_event("team sync 3pm-5pm");
-        let (_, h, _) = local_hm(event.start_time);
-        assert_eq!(h, 15);
-        assert_eq!((event.end_time.unwrap() - event.start_time).num_minutes(), 120);
-        assert_eq!(event.title, "team sync");
-
-        let event = parse_event("lab tomorrow 2-4pm");
-        assert_eq!(local_hm(event.start_time), (tomorrow(), 14, 0));
-        assert_eq!(local_hm(event.end_time.unwrap()), (tomorrow(), 16, 0));
-    }
-
-    #[test]
-    fn plain_numbers_are_not_times_or_ranges() {
-        for input in ["read pages 5-7", "look at 5 things", "buy 1/2 cup sugar", "room 24"] {
-            let item = RuleParser::try_parse(input);
-            assert!(
-                item.is_none_or(|i| matches!(&i, ParsedItem::Task(t) if t.due_date.is_none())),
-                "{input} parsed as a time"
-            );
-        }
-    }
-
-    #[test]
-    fn out_of_range_clock_values_fall_back_to_text() {
-        for input in ["meet 25:99", "call 13pm", "call 0am"] {
-            let item = RuleParser::try_parse(input);
-            assert!(
-                item.is_none_or(|i| matches!(&i, ParsedItem::Task(t) if t.due_date.is_none())),
-                "{input} parsed as a time"
-            );
-        }
-    }
-
-    #[test]
-    fn for_prefix_is_part_of_an_explicit_duration() {
-        let task = parse_task("stretch for 30m");
-        assert_eq!(task.duration_minutes, Some(30));
-        assert_eq!(task.title, "stretch");
-    }
-
-    #[test]
-    fn numeric_date_needs_year_on_or_day_above_twelve() {
-        let now = NaiveDate::from_ymd_opt(2026, 9, 19).unwrap().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(Local).unwrap();
-        let date = |input| parse_numeric_date(now, false)(input).map(|(_, dt)| dt.with_timezone(&Local).date_naive());
-
-        assert_eq!(date("12/25").unwrap(), NaiveDate::from_ymd_opt(2026, 12, 25).unwrap());
-        assert_eq!(date("9/13").unwrap(), NaiveDate::from_ymd_opt(2027, 9, 13).unwrap());
-        assert_eq!(date("3/4/2028").unwrap(), NaiveDate::from_ymd_opt(2028, 3, 4).unwrap());
-        assert!(date("1/2").is_err());
-        assert!(date("13/45").is_err());
-        assert!(parse_numeric_date(now, true)("1/2").is_ok());
     }
 }

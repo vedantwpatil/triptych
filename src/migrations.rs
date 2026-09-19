@@ -1,6 +1,11 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+/// Adds the calendar columns and tables if they are missing. Safe to run on every start.
+///
+/// # Errors
+///
+/// Returns an error if a schema change fails.
 pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     tracing::debug!("[Migration] Checking calendar schema...");
 
@@ -114,6 +119,11 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
 
 // One linear sequence of idempotent CREATE/ALTER checks - splitting it into
 // helpers would scatter that sequence without reducing its actual complexity.
+/// Adds the email tables if they are missing. Safe to run on every start.
+///
+/// # Errors
+///
+/// Returns an error if a schema change fails.
 #[allow(clippy::too_many_lines)]
 pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     tracing::debug!("[Migration] Checking email schema...");

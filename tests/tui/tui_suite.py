@@ -5,7 +5,7 @@ Every scenario gets a throwaway sandbox (own DB, socket, log). `known="KI-n"` ma
 the *correct* behaviour of a bug documented in docs/DEVELOPMENT.md: it must fail today (XFAIL) and
 turns into XPASS once the bug is fixed, at which point the marker should be removed.
 
-    python3 tools/tui_suite.py [--list] [--only 'cal_*,todo_add'] [-j N] [--build] [--strict] [-v]
+    python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add'] [-j N] [--build] [--strict] [-v]
 """
 from __future__ import annotations
 

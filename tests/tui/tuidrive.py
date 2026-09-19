@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless pty driver for the Triptych TUI. Usage and design: docs/TUI_DRIVER.md.
 
-Library layer (used by tools/tui_suite.py): Sandbox, Term, parse_keys.
+Library layer (used by tests/tui/tui_suite.py): Sandbox, Term, parse_keys.
 CLI layer: `start` spawns a detached server that owns a pty + terminal emulator, so separate
 shell invocations (`send`, `screen`, `wait`, `db`, `cli`, `stop`) can drive one live TUI session.
 Every session runs against a throwaway sandbox dir; it never touches the real todo.db or socket.
@@ -28,7 +28,7 @@ import termios
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 VENV = ROOT / "target" / "tuidrive-venv"
 
 try:
@@ -43,7 +43,7 @@ except ImportError:  # first run: build a private venv under target/ (gitignored
     os.environ["TUIDRIVE_BOOTSTRAPPED"] = "1"
     os.execv(str(venv_py), [str(venv_py), *sys.argv])
 
-BIN = Path(os.environ.get("TRIPTYCH_BIN") or ROOT / "target" / "debug" / "Triptych")
+BIN = Path(os.environ.get("TRIPTYCH_BIN") or ROOT / "target" / "debug" / "triptych")
 HOME = Path(os.environ.get("TUIDRIVE_HOME") or f"/tmp/tuidrive-{os.getuid()}")
 PROTECTED_ENV = {"DATABASE_URL", "TRIPTYCH_SOCKET_PATH", "TRIPTYCH_LOG_PATH"}
 ALT_ON = b"\x1b[?1049h"

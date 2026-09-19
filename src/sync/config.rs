@@ -22,8 +22,8 @@ impl Default for SyncConfig {
 
 impl SyncConfig {
     pub fn from_env() -> Self {
-        let mail_sync_enabled = std::env::var("TRIPTYCH_EMAIL_ENABLED")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("true"));
+        let mail_sync_enabled =
+            std::env::var("TRIPTYCH_EMAIL_ENABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true"));
 
         Self {
             ollama_warmup_enabled: true,

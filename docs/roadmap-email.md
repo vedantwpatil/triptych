@@ -29,8 +29,8 @@ later sessions don't reinvent this scoping conversation. Multi-account landed la
   `ollama.rs`), each a `worker(pool, shutdown_rx: broadcast::Receiver<()>)` fn spawned
   conditionally in `SyncDaemon::start` based on a bool in `SyncConfig::from_env()`. Mail sync
   follows this: `src/sync/mail.rs` + `mail_sync_enabled` from `TRIPTYCH_EMAIL_ENABLED`.
-- **Views**: `ViewMode` enum in `app.rs`, matched in `ui.rs::ui()` for rendering and in
-  `src/keys.rs::handle_key_event` (declared via `mod keys;` in `main.rs`, single dispatch
+- **Views**: `ViewMode` enum in `app.rs`, matched in `tui/ui.rs::ui()` for rendering and in
+  `src/tui/keys.rs::handle_key_event` (declared via `mod keys;` in `tui.rs`, single dispatch
   entry point) for input.
 - **Task creation**: `App::add_task(&mut self, description: &str)` (`app.rs`) runs the full NLP
   pipeline and inserts a `Task`. Email→task conversion calls this directly with the subject

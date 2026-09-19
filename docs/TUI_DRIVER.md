@@ -1,6 +1,6 @@
 # TUI Driver and Scenario Suite
 
-Two Python tools in [`../tools/`](../tools/CLAUDE.md) that run the real `Triptych` binary in a
+Two Python tools in [`../tests/tui/`](../tests/tui/CLAUDE.md) that run the real `triptych` binary in a
 pseudo-terminal so an agent (or a human) can drive and inspect the TUI without a real terminal.
 Part of the dev workflow in [`DEVELOPMENT.md`](./DEVELOPMENT.md); module map in
 [`../CLAUDE.md`](../CLAUDE.md). The Claude Code skill `triptych-tui` points here.
@@ -21,14 +21,14 @@ aware), so separate shell calls drive one live TUI. First run bootstraps `pyte` 
 bytes on macOS.
 
 ```
-python3 tools/tuidrive.py start [--size 130x42] [--seed file.sql] [--pre 'add "x !!"'] [--build]
-python3 tools/tuidrive.py send c a t:"buy milk #home !!" ENTER     # keys, then prints the screen
-python3 tools/tuidrive.py screen [--compact]                       # current screen, no input
-python3 tools/tuidrive.py wait "Weekly Calendar" [--gone --regex --timeout 10]
-python3 tools/tuidrive.py db "SELECT id, description FROM tasks"   # read or write session DB
-python3 tools/tuidrive.py cli list                                 # CLI in the same sandbox
-python3 tools/tuidrive.py cli --bg daemon                          # flags go BEFORE args
-python3 tools/tuidrive.py resize 20 60 | restart | ls | path | stop [--keep] [--all]
+python3 tests/tui/tuidrive.py start [--size 130x42] [--seed file.sql] [--pre 'add "x !!"'] [--build]
+python3 tests/tui/tuidrive.py send c a t:"buy milk #home !!" ENTER     # keys, then prints the screen
+python3 tests/tui/tuidrive.py screen [--compact]                       # current screen, no input
+python3 tests/tui/tuidrive.py wait "Weekly Calendar" [--gone --regex --timeout 10]
+python3 tests/tui/tuidrive.py db "SELECT id, description FROM tasks"   # read or write session DB
+python3 tests/tui/tuidrive.py cli list                                 # CLI in the same sandbox
+python3 tests/tui/tuidrive.py cli --bg daemon                          # flags go BEFORE args
+python3 tests/tui/tuidrive.py resize 20 60 | restart | ls | path | stop [--keep] [--all]
 ```
 
 Key tokens for `send`: `ENTER ESC TAB BTAB BS SPACE UP DOWN LEFT RIGHT HOME END PGUP PGDN DEL`,
@@ -43,7 +43,7 @@ shows as `EXITED code=N`.
 89 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
-python3 tools/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
+python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
 ```
 
 | Group     | Count | Covers                                                                        |
@@ -65,7 +65,7 @@ flips it to XPASS; delete the marker and move the issue to Resolved.
 
 ## Adding a scenario
 
-In `tools/tui_suite.py`: `@scenario("name", known=None)` (name up to 28 chars) on `def _(c: Ctx)`.
+In `tests/tui/tui_suite.py`: `@scenario("name", known=None)` (name up to 28 chars) on `def _(c: Ctx)`.
 `Ctx` gives `c.cli(...)`, `c.db(sql)`, `c.tasks()`, `c.add(text)`, `c.seed_blocks(...)`,
 `c.seed_emails(n)`, `c.tui()` / `c.cal()` (returns a `Term`), `c.see(text, gone=, timeout=)`,
 `c.check(cond, msg)` and `c.eq(got, want, msg)`. `Term` has `press`, `type`, `text`, `has`,

@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 /// (e.g. relative dates like "tomorrow") doesn't go stale across long sessions.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 
+#[derive(Debug)]
 pub struct NLPParser {
     ollama_client: OllamaClient,
     ollama_available: bool,
@@ -49,12 +50,19 @@ impl NLPParser {
             ollama_client,
             ollama_available,
             // 1000 is a non-zero literal, so this is never `None`.
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN))),
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN),
+            )),
         }
     }
 
     // A linear layered pipeline (Layer 0 through 3, see comments below) - splitting
     // it into helpers would scatter that sequence without reducing its complexity.
+    /// Parses `input` into a task or event using the cache, the regex rules and, when needed, the local LLM.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] for unusable input. The current layers always fall back to a plain task, so no path returns it yet.
     #[allow(clippy::too_many_lines)]
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
         let start = Instant::now();
