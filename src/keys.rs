@@ -75,7 +75,7 @@ async fn handle_calendar_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         CalendarInputMode::BlockForm => handle_block_form_key(app, code).await,
         CalendarInputMode::TaskPicker => handle_task_picker_key(app, code).await,
         CalendarInputMode::TaskInput => handle_task_input_key(app, code).await,
-        CalendarInputMode::DeadlineInput => handle_deadline_input_key(app, code).await,
+        CalendarInputMode::DeadlineInput => handle_deadline_input_key(app, code),
     }
     KeyOutcome::Continue
 }
@@ -246,18 +246,14 @@ async fn handle_task_input_key(app: &mut App, code: KeyCode) {
     }
 }
 
-async fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
+fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             app.input_buffer.clear();
             app.deadline_edit_task_id = None;
             app.calendar_input_mode = CalendarInputMode::Navigate;
         }
-        KeyCode::Enter => {
-            if let Err(e) = app.submit_deadline_edit().await {
-                set_error(app, e);
-            }
-        }
+        KeyCode::Enter => app.submit_deadline_edit(),
         KeyCode::Char(c) => {
             app.input_buffer.push(c);
         }

@@ -321,14 +321,13 @@ pub fn extract_task_fields(item: ParsedItem) -> ExtractedTaskFields {
                 nlp_task.duration_minutes,
             )
         }
-        ParsedItem::Event(event) => (
-            event.title,
-            Some(event.start_time),
-            1,
-            event.tags,
-            None,
-            None,
-        ),
+        ParsedItem::Event(event) => {
+            let duration = event
+                .end_time
+                .map(|end| i32::try_from((end - event.start_time).num_minutes()).unwrap_or(i32::MAX))
+                .filter(|&mins| mins > 0);
+            (event.title, Some(event.start_time), 1, event.tags, None, duration)
+        }
     }
 }
 
@@ -461,6 +460,9 @@ pub struct App {
     pub held_task: Option<i64>,
     /// Task whose deadline is being edited via `CalendarInputMode::DeadlineInput`.
     pub deadline_edit_task_id: Option<i64>,
+    deadline_tx: tokio::sync::mpsc::UnboundedSender<DeadlineParse>,
+    /// Results of background deadline parses; drained by `run_app` so the UI never blocks on NLP.
+    pub deadline_rx: tokio::sync::mpsc::UnboundedReceiver<DeadlineParse>,
     pub emails: Vec<crate::email::EmailMessage>,
     pub selected_email: usize,
     /// Set when the email detail popup is open (`v` on a selected email in
@@ -548,9 +550,17 @@ pub fn parse_time_string(time_str: &str) -> Option<NaiveTime> {
     }
 }
 
+/// Outcome of a background deadline parse (see `App::submit_deadline_edit`).
+pub struct DeadlineParse {
+    task_id: i64,
+    text: String,
+    deadline: Option<DateTime<Utc>>,
+}
+
 impl App {
     pub async fn new(pool: SqlitePool) -> Self {
         let nlp_parser = Arc::new(NLPParser::new().await);
+        let (deadline_tx, deadline_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             db_pool: pool,
@@ -573,6 +583,8 @@ impl App {
             status_message: None,
             held_task: None,
             deadline_edit_task_id: None,
+            deadline_tx,
+            deadline_rx,
             emails: Vec::new(),
             selected_email: 0,
             email_detail_open: false,
@@ -911,6 +923,10 @@ impl App {
         let Some(email) = self.emails.get(self.selected_email) else {
             return Ok(());
         };
+        if email.task_id.is_some() {
+            self.status_message = Some(("Email already converted to a task".to_string(), std::time::Instant::now()));
+            return Ok(());
+        }
         let email_id = email.id;
         let subject = email.subject.clone();
 
@@ -943,9 +959,9 @@ impl App {
         let app = Self::new(db_pool).await;
 
         if app.nlp_parser.is_ollama_available() {
-            println!("✓ NLP parsing ready");
+            tracing::info!("NLP parsing ready");
         } else {
-            println!("⚠ Ollama unavailable - limited parsing");
+            tracing::warn!("Ollama unavailable; limited parsing");
         }
 
         Ok(app)
@@ -968,6 +984,9 @@ impl App {
     }
 
     pub async fn add_task(&mut self, description: &str) -> Result<i64, sqlx::Error> {
+        if description.trim().is_empty() {
+            return Err(sqlx::Error::Protocol("task description is empty".to_string()));
+        }
         let parse_result = self
             .nlp_parser
             .parse(description)
@@ -1334,14 +1353,14 @@ impl App {
         }
     }
 
-    /// Parse the pending deadline-edit input (e.g. "friday", "tomorrow") and
-    /// apply it to the target task, then re-run allocation so the calendar
-    /// reflects the new deadline immediately. Reuses the existing "by <word>"
-    /// deadline grammar rather than adding a second date parser.
-    pub async fn submit_deadline_edit(&mut self) -> Result<(), sqlx::Error> {
+    /// Start parsing the pending deadline-edit input (e.g. "friday", "tomorrow") in the background
+    /// and close the popup at once: the parser may wait on Ollama for up to 15s per call, which
+    /// would otherwise freeze the whole TUI. Reuses the existing "by <word>" deadline grammar. The
+    /// result arrives on `deadline_rx` and is applied by `apply_deadline_parse`.
+    pub fn submit_deadline_edit(&mut self) {
         let Some(task_id) = self.deadline_edit_task_id.take() else {
             self.calendar_input_mode = CalendarInputMode::Navigate;
-            return Ok(());
+            return;
         };
 
         let text = self.input_buffer.trim().to_string();
@@ -1349,30 +1368,39 @@ impl App {
         self.calendar_input_mode = CalendarInputMode::Navigate;
 
         if text.is_empty() {
-            return Ok(());
+            return;
         }
 
-        let extract_deadline = |item: ParsedItem| match item {
-            ParsedItem::Task(t) => t.deadline,
-            ParsedItem::Event(_) => None,
-        };
+        self.status_message = Some(("Parsing deadline...".to_string(), std::time::Instant::now()));
 
-        let mut deadline = self
-            .nlp_parser
-            .parse(&format!("by {text}"))
-            .await
-            .ok()
-            .and_then(|r| extract_deadline(r.item));
+        let parser = Arc::clone(&self.nlp_parser);
+        let tx = self.deadline_tx.clone();
+        tokio::spawn(async move {
+            let extract_deadline = |item: ParsedItem| match item {
+                ParsedItem::Task(t) => t.deadline,
+                ParsedItem::Event(_) => None,
+            };
 
-        if deadline.is_none() {
-            deadline = self
-                .nlp_parser
-                .parse(&text)
+            let mut deadline = parser
+                .parse(&format!("by {text}"))
                 .await
                 .ok()
                 .and_then(|r| extract_deadline(r.item));
-        }
+            if deadline.is_none() {
+                deadline = parser
+                    .parse(&text)
+                    .await
+                    .ok()
+                    .and_then(|r| extract_deadline(r.item));
+            }
+            let _ = tx.send(DeadlineParse { task_id, text, deadline });
+        });
+    }
 
+    /// Store a finished background parse, then re-run allocation so the calendar reflects the new
+    /// deadline immediately.
+    pub async fn apply_deadline_parse(&mut self, parsed: DeadlineParse) -> Result<(), sqlx::Error> {
+        let DeadlineParse { task_id, text, deadline } = parsed;
         let Some(deadline) = deadline else {
             self.status_message = Some((
                 format!("Couldn't parse deadline '{text}' - try 'tomorrow' or a weekday"),
@@ -1408,6 +1436,13 @@ impl App {
         if Self::validate_time_format(&self.block_form.end_time).is_err() {
             self.status_message = Some((
                 "Invalid end time format".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+        if Self::time_to_minutes(&self.block_form.end_time) <= Self::time_to_minutes(&self.block_form.start_time) {
+            self.status_message = Some((
+                "End time must be after start time".to_string(),
                 std::time::Instant::now(),
             ));
             return Ok(());
@@ -1698,6 +1733,16 @@ impl App {
         Ok(())
     }
 
+    /// Validate both times and that the range ends after it starts
+    fn validate_time_range(start: &str, end: &str) -> Result<(), Box<dyn std::error::Error>> {
+        Self::validate_time_format(start)?;
+        Self::validate_time_format(end)?;
+        if Self::time_to_minutes(end) <= Self::time_to_minutes(start) {
+            return Err(format!("End time {end} must be after start time {start}").into());
+        }
+        Ok(())
+    }
+
     /// Parse "HH:MM" to minutes since midnight
     fn time_to_minutes(time: &str) -> Option<u32> {
         let parts: Vec<&str> = time.split(':').collect();
@@ -1816,9 +1861,7 @@ impl App {
             // Parse day name(s) - supports compound days like "monday_wednesday"
             let days = Self::parse_days(&block.day)?;
 
-            // Validate time format
-            Self::validate_time_format(&block.start)?;
-            Self::validate_time_format(&block.end)?;
+            Self::validate_time_range(&block.start, &block.end)?;
 
             // Create a block for each day
             for day_of_week in days {
@@ -1932,6 +1975,20 @@ impl App {
                 "  {} - {} [{}] {}",
                 block.start_time, block.end_time, block.block_type, block.title
             );
+        }
+
+        let allocations: Vec<(String, String, i32, String)> = sqlx::query_as(
+            "SELECT a.block_date, a.block_start_time, a.allocated_minutes, t.description
+             FROM task_block_allocations a JOIN tasks t ON a.task_id = t.id
+             WHERE t.completed = 0 ORDER BY a.block_date, a.block_start_time, t.id",
+        )
+        .fetch_all(&self.db_pool)
+        .await?;
+        if !allocations.is_empty() {
+            println!("\nAllocated tasks:");
+            for (date, start, minutes, description) in allocations {
+                println!("  {date} {start} ({minutes}m) {description}");
+            }
         }
 
         Ok(())
@@ -2603,7 +2660,9 @@ mod tests {
         app.deadline_edit_task_id = Some(task_id);
         app.input_buffer = "tomorrow".to_string();
 
-        app.submit_deadline_edit().await.expect("submit deadline edit");
+        app.submit_deadline_edit();
+        let parsed = app.deadline_rx.recv().await.expect("background parse result");
+        app.apply_deadline_parse(parsed).await.expect("apply deadline parse");
 
         let task = app.get_task_by_id(task_id).await.expect("query task").expect("task exists");
         let deadline = task.deadline.expect("deadline parsed and saved");

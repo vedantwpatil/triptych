@@ -25,8 +25,9 @@ extraction, conflict-reporting UX when blocks are exhausted.
 
 Full detail and phase breakdown in [`docs/roadmap-email.md`](./roadmap-email.md).
 
-- **Slice 1 (in progress)**: single IMAP account via app-password, polling fetch, SQLite
-  storage, read-only TUI list view, email→task conversion via the existing NLP pipeline.
+- **Slice 1 (done)**: IMAP app-password fetch on a 60s poll, SQLite storage (UIDVALIDITY-aware
+  `SyncCursor`, 180-day retention purge), TUI list view + `v` body popup, email→task
+  conversion via the existing NLP pipeline. See `src/email/`.
 - **Slice 2 (planned)**: true IMAP IDLE (push instead of poll).
 - **Slice 3 (planned)**: OAuth2 for Gmail and other providers (needs external OAuth client
   setup — a user action, not something buildable unilaterally).

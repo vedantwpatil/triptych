@@ -96,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!("✗ Daemon is not running");
             println!("  Start with: triptych daemon");
+            std::process::exit(1);
         }
         return Ok(());
     }
@@ -153,6 +154,10 @@ async fn handle_cli_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Add { description } => {
+            if description.trim().is_empty() {
+                eprintln!("✗ Task description cannot be empty");
+                std::process::exit(1);
+            }
             // Try daemon first for instant response
             if daemon::is_daemon_running().await {
                 match daemon::send_to_daemon(DaemonRequest::AddTask {
@@ -528,6 +533,12 @@ where
                         app.status_message = Some((format!("Input error: {e}"), std::time::Instant::now()));
                     }
                     None => break, // Stream ended
+                }
+            }
+
+            Some(parsed) = app.deadline_rx.recv() => {
+                if let Err(e) = app.apply_deadline_parse(parsed).await {
+                    app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
                 }
             }
 

@@ -13,8 +13,39 @@ cargo clippy
 
 Run all three before considering a change done. Known Issues resolved in place, never deleted.
 
+End-to-end check (drives the real binary in sandboxes, ~1 min; see [`TUI_DRIVER.md`](./TUI_DRIVER.md)):
+
+```
+python3 tools/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Issue; XPASS = fixed, drop its marker
+```
+
 ## Changelog
 
+- 2026-09-19 (later): Fixed KI-1..KI-13 using the driver: each scenario reproduced its bug before the
+  fix and passes after (suite: 82 scenarios, 0 XFAIL). Details and file references are under
+  Resolved. Largest changes: `src/nlp/rules.rs` time/date parsing (KI-2, 8 new unit tests), the
+  async deadline parse (KI-13), and removal of the fuzzy cache (KI-1). No known bugs remain open.
+- 2026-09-19: Feature audit plus a headless TUI driver. Audited every shipped feature by running the
+  real binary (CLI, daemon, TUI) in sandboxes and found 13 bugs, all filed under Known Issues
+  (KI-1..KI-13) and none fixed yet. Built `tools/tuidrive.py` (detached pty session an agent can
+  `send` keys to and read the screen from, plus `db`/`cli` against the same sandbox) and
+  `tools/tui_suite.py` (81 scenarios: 57 pass, 24 are expected failures that reproduce the open
+  issues). Docs: [`TUI_DRIVER.md`](./TUI_DRIVER.md), [`../tools/CLAUDE.md`](../tools/CLAUDE.md),
+  and the `triptych-tui` skill. No Rust code changed. Two findings worth remembering: the NLP regex
+  fast path returns 0.95 confidence on partial parses, so Ollama never gets a chance to fix them
+  (KI-2); and a stale `triptych daemon` from an earlier test run was found holding the real
+  `$TMPDIR/triptych.sock` (KI-3 lets that happen silently).
+- 2026-09-18: Doc-drift + repo cleanup pass. `docs/roadmap-email.md`: dropped shipped items still
+  listed as deferred/limitations (UIDVALIDITY tracking, "`.env` not auto-loaded" - `main.rs` calls
+  `dotenvy::dotenv()`), replaced the removed `max_uid` with the real `store.rs` helper list
+  (`SyncCursor` get/set, `delete_older_than`), added `run_email_migration` and the `v` body popup,
+  and rewrote the `triptych.db` note (file deleted, was 0 bytes) into the CWD-relative `todo.db`
+  gotcha. `docs/roadmap.md`: Email Slice 1 In progress -> done. Cleanup: `cargo clean` (12.2G),
+  removed `.DS_Store`s, empty root `triptych.db`, stale `logs/` file, and stray `todo.db*` sets
+  from `src/` and `src/sync/` (launched from wrong CWD; root `todo.db` untouched). Mistake worth
+  noting: both stray sets shared basenames and were moved into one backup dir, so `src/sync/`'s
+  overwrote `src/`'s 56K `todo.db` - that one is unrecoverable (untracked, not in Trash). Use
+  distinct destination names or `mv -n` when batching same-named files.
 - 2026-09-18: Clippy warn-level remediation, following up the deny-level fix in `624e9ae`
   (`nursery`/`pedantic` enabled at `warn` in `Cargo.toml`). Started at 67 tractable findings
   across 15 files after `cargo clippy --fix` mechanically resolved ~340; fixed each by hand.
@@ -288,9 +319,51 @@ since epoch 0 never occurs on real IMAP servers.
 
 ### Open
 
-- None currently.
+None. Every 2026-09-19 audit finding (KI-1..KI-13) is fixed and covered by a passing suite scenario.
 
 ### Resolved
+
+Found in the 2026-09-19 audit; fixed the same day, each verified with its `tools/tui_suite.py` scenario
+(named at the end of each entry).
+
+- **KI-1** Fuzzy NLP cache returned the wrong item ("Call dad tomorrow" saved as "Call mom" once
+  similarity passed 0.85). Removed the Jaro-Winkler layer and the `strsim` dependency; only exact
+  matches hit the cache. `daemon_distinct_tasks`, `todo_fuzzy_cache`.
+- **KI-2** NLP date/time/duration gaps. The regex parser treated each phrase as a full timestamp, so
+  "tomorrow at 3pm" lost the time and "3pm-5pm" lost its length. `src/nlp/rules.rs` now has separate
+  `Date`, `TimeOfDay` and `TimeRange` segments that `assemble` merges. Added `on`/`for` prefixes,
+  `12/25`-style dates (a bare `1/2` is read as a fraction unless prefixed with `on`), and am/pm
+  inheritance for ranges (`2-4pm`). Bare numbers ("pages 5-7", "look at 5 things") stay in the
+  title. `extract_task_fields` (`src/app.rs`) now stores an Event's end - start as its duration.
+  The ten `nlp_*` scenarios.
+- **KI-3** A second `triptych daemon` silently took over the socket. `start_daemon` now exits if a
+  health check on the existing socket succeeds; a stale socket is still replaced.
+  `daemon_second_instance`.
+- **KI-4** `triptych add ""` inserted an empty task. Empty input now exits 1 in the CLI, and
+  `App::add_task` and the daemon's `add_task_to_db` reject it too. `cli_add_empty`.
+- **KI-5** A block ending before it started was accepted. `validate_time_range` (`src/app.rs`) now
+  guards `create_schedule_block` and `schedule import`. `sched_end_before_start`, `cal_block_backwards`.
+- **KI-6** Block-form errors were invisible. The form popup (`src/ui.rs`) now has a fifth row that
+  shows `status_message` in red. `cal_block_error_visible`.
+- **KI-7** CLI output noise. Migration and startup banners (`src/migrations.rs`, `App::build`) now go
+  through `tracing`, so stdout and stderr carry only command output. `cli_quiet_output`.
+- **KI-8** `triptych stop` with no daemon printed two errors. `stop_daemon` now returns one error
+  when no daemon answers, and `status` exits 1 in that case too. `daemon_stop_no_daemon`.
+- **KI-9** `schedule show` omitted the week's task allocations. `print_schedule_summary` now ends
+  with an "Allocated tasks:" section. `sched_show_allocations`.
+- **KI-10** Email detail popup scroll was unclamped. `render_email_detail_popup` (`src/ui.rs`) clamps
+  the offset using `Paragraph::line_count`, which needs ratatui's `unstable-rendered-line-info`
+  feature (enabled in `Cargo.toml`). Its count includes block borders. `email_detail_scroll`,
+  `email_detail_long_scroll`.
+- **KI-11** NLP `eprintln!`s wrote into the TUI alt-screen. `src/nlp/parser.rs` now logs through
+  `tracing`. `email_stray_output`.
+- **KI-12** Pressing Enter twice on a converted email created a duplicate task.
+  `convert_selected_email_to_task` now returns early when the email already has a `task_id`.
+  `email_convert_twice`.
+- **KI-13** The TUI froze for up to 15s while NLP waited on Ollama during a deadline edit.
+  `submit_deadline_edit` is now synchronous: it closes the popup, shows "Parsing deadline...", and
+  spawns the parse, which reports back over `App::deadline_rx`. `run_app` (`src/main.rs`) selects on
+  that channel and calls `apply_deadline_parse`. `cal_deadline_no_freeze`.
 
 - DST-transition panic in `nlp/rules.rs` (6 `.and_local_timezone().unwrap()` sites). Fixed
   2026-09-17.
@@ -353,3 +426,6 @@ since epoch 0 never occurs on real IMAP servers.
 ## Open Questions
 
 - None blocking right now.
+- Not covered by the suite: real IMAP sync (email scenarios seed rows directly), and `H`/`L` edge
+  behaviour in the calendar. Also unconfirmed: whether editing the deadline of an already-scheduled
+  task should drop its existing allocation (observed, not judged a bug).

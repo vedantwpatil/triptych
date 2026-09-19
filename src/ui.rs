@@ -95,7 +95,7 @@ fn render_email_view(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_email_detail_popup(f: &mut Frame, app: &App) {
+fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
     let Some(email) = app.emails.get(app.selected_email) else {
         return;
     };
@@ -134,10 +134,16 @@ fn render_email_detail_popup(f: &mut Frame, app: &App) {
                 .title(format!("{} (Esc/v: close, j/k: scroll)", email.subject))
                 .style(Style::default().bg(Color::Black)),
         )
-        .wrap(Wrap { trim: false })
-        .scroll((app.email_detail_scroll, 0));
+        .wrap(Wrap { trim: false });
 
-    f.render_widget(popup, area);
+    // Wrapping depends on the popup width, so the scroll limit is only known here. Clamping the
+    // stored value (not just the drawn one) keeps `k` responsive right after over-scrolling.
+    let max_scroll = popup.line_count(area.width).saturating_sub(usize::from(area.height));
+    app.email_detail_scroll = app
+        .email_detail_scroll
+        .min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+
+    f.render_widget(popup.scroll((app.email_detail_scroll, 0)), area);
 }
 
 // One screen's worth of rendering - splitting it into helpers would scatter
@@ -662,6 +668,7 @@ fn render_block_form_popup(f: &mut Frame, app: &App) {
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(inner);
 
@@ -707,6 +714,16 @@ fn render_block_form_popup(f: &mut Frame, app: &App) {
     };
     let ti_text = format!("Title: {}", form.title);
     f.render_widget(Paragraph::new(ti_text).style(ti_style), field_chunks[3]);
+
+    // Rejection reasons (bad time, overlap) would otherwise be hidden behind this popup.
+    if let Some((msg, instant)) = &app.status_message
+        && instant.elapsed() < std::time::Duration::from_secs(3)
+    {
+        f.render_widget(
+            Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Red)),
+            field_chunks[4],
+        );
+    }
 }
 
 fn render_task_picker(f: &mut Frame, app: &App) {

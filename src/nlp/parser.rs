@@ -4,7 +4,6 @@ use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
-use strsim::jaro_winkler;
 use tokio::sync::Mutex;
 
 /// Cache entries older than this are treated as misses, so parsing behavior
@@ -43,7 +42,7 @@ impl NLPParser {
         let ollama_available = ollama_client.health_check().await;
 
         if !ollama_available {
-            eprintln!("Warning: Ollama service not available. Falling back to regex-only parsing.");
+            tracing::warn!("Ollama service not available; falling back to regex-only parsing");
         }
 
         Self {
@@ -68,54 +67,11 @@ impl NLPParser {
 
         if let Some(cached) = cache_hit {
             let elapsed = elapsed_ms(start);
-            eprintln!("» Exact cache hit (originally {:?})!", cached.strategy);
+            tracing::debug!("exact cache hit (originally {:?})", cached.strategy);
             return Ok(ParseResult {
                 item: cached.item,
                 strategy: ParseStrategy::Cached,
                 confidence: cached.confidence,
-                parse_time_ms: elapsed,
-            });
-        }
-
-        // Layer 0.5: Check similar inputs via fuzzy matching (optimized)
-        let similarity_threshold = 0.85;
-        let fuzzy_match = {
-            let cache = self.cache.lock().await;
-
-            // Early exit optimization: don't check if input is very short
-            if input.len() < 3 {
-                None
-            } else {
-                cache.iter().find_map(|(cached_input, cached_parse)| {
-                    if cached_parse.is_expired() {
-                        return None;
-                    }
-                    let similarity = jaro_winkler(input, cached_input);
-                    if similarity > similarity_threshold {
-                        Some((cached_input.clone(), cached_parse.clone(), similarity))
-                    } else {
-                        None
-                    }
-                })
-            }
-        };
-
-        if let Some((matched_input, cached_parse, similarity)) = fuzzy_match {
-            let elapsed = elapsed_ms(start);
-            eprintln!(
-                "≈ Similar pattern found ({:.0}% match): \"{}\"",
-                similarity * 100.0,
-                matched_input
-            );
-
-            // `jaro_winkler` returns f64; no lossless f64->f32 conversion exists,
-            // and a similarity score in [0, 1] loses nothing that matters at f32.
-            #[allow(clippy::cast_possible_truncation)]
-            let adjusted_confidence = cached_parse.confidence * similarity as f32;
-            return Ok(ParseResult {
-                item: cached_parse.item,
-                strategy: ParseStrategy::Cached,
-                confidence: adjusted_confidence,
                 parse_time_ms: elapsed,
             });
         }
@@ -185,7 +141,7 @@ impl NLPParser {
                     return Ok(result);
                 }
                 Err(e) => {
-                    eprintln!("Ollama parsing failed: {e}. Falling back.");
+                    tracing::warn!("Ollama parsing failed: {e}; falling back");
                 }
             }
         }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
-    eprintln!("[Migration] Checking calendar schema...");
+    tracing::debug!("[Migration] Checking calendar schema...");
 
     // Check and add tasks columns safely
     if !column_exists(pool, "tasks", "scheduled_event_id").await? {
@@ -11,14 +11,14 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
         )
         .execute(pool)
         .await?;
-        eprintln!("  ✓ Added scheduled_event_id to tasks");
+        tracing::info!("  ✓ Added scheduled_event_id to tasks");
     }
 
     if !column_exists(pool, "tasks", "task_category").await? {
         sqlx::query("ALTER TABLE tasks ADD COLUMN task_category TEXT DEFAULT 'general'")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added task_category to tasks");
+        tracing::info!("  ✓ Added task_category to tasks");
     }
 
     // Check and add events columns
@@ -26,14 +26,14 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
         sqlx::query("ALTER TABLE events ADD COLUMN event_type TEXT DEFAULT 'event'")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added event_type to events");
+        tracing::info!("  ✓ Added event_type to events");
     }
 
     if !column_exists(pool, "events", "recurrence_rule").await? {
         sqlx::query("ALTER TABLE events ADD COLUMN recurrence_rule TEXT")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added recurrence_rule to events");
+        tracing::info!("  ✓ Added recurrence_rule to events");
     }
 
     // Smart scheduling: hard deadline separate from scheduled_at, plus task duration
@@ -41,14 +41,14 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
         sqlx::query("ALTER TABLE tasks ADD COLUMN deadline TEXT")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added deadline to tasks");
+        tracing::info!("  ✓ Added deadline to tasks");
     }
 
     if !column_exists(pool, "tasks", "duration_minutes").await? {
         sqlx::query("ALTER TABLE tasks ADD COLUMN duration_minutes INTEGER DEFAULT 90")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added duration_minutes to tasks");
+        tracing::info!("  ✓ Added duration_minutes to tasks");
     }
 
     // Create schedule_blocks table
@@ -69,7 +69,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    eprintln!("  ✓ Schedule blocks table ready");
+    tracing::debug!("  ✓ Schedule blocks table ready");
 
     // Create indexes
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_schedule_blocks_day ON schedule_blocks(day_of_week, start_time)")
@@ -95,7 +95,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    eprintln!("  ✓ Task block allocations table ready");
+    tracing::debug!("  ✓ Task block allocations table ready");
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_allocations_task ON task_block_allocations(task_id)",
@@ -108,7 +108,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    eprintln!("[Migration] Calendar schema ready ✓");
+    tracing::debug!("[Migration] Calendar schema ready ✓");
     Ok(())
 }
 
@@ -116,7 +116,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
 // helpers would scatter that sequence without reducing its actual complexity.
 #[allow(clippy::too_many_lines)]
 pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
-    eprintln!("[Migration] Checking email schema...");
+    tracing::debug!("[Migration] Checking email schema...");
 
     sqlx::query(
         r"
@@ -139,7 +139,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    eprintln!("  ✓ Email messages table ready");
+    tracing::debug!("  ✓ Email messages table ready");
 
     // Pre-multi-account tables were created with `message_id TEXT NOT NULL UNIQUE`
     // (global uniqueness) and no `account` column. That constraint is wrong once
@@ -148,7 +148,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     // silently drop the second account's copy. SQLite can't drop a column-level
     // UNIQUE via ALTER TABLE, so rebuild the table when `account` is missing.
     if !column_exists(pool, "email_messages", "account").await? {
-        eprintln!("  Rebuilding email_messages to scope uniqueness by account...");
+        tracing::info!("  Rebuilding email_messages to scope uniqueness by account...");
         sqlx::query("ALTER TABLE email_messages RENAME TO email_messages_old")
             .execute(pool)
             .await?;
@@ -191,7 +191,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         sqlx::query("DROP TABLE email_messages_old")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ email_messages rebuilt with account column");
+        tracing::info!("  ✓ email_messages rebuilt with account column");
     }
 
     sqlx::query(
@@ -208,7 +208,7 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         sqlx::query("ALTER TABLE email_messages ADD COLUMN body_text TEXT")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added body_text column to email_messages");
+        tracing::info!("  ✓ Added body_text column to email_messages");
     }
 
     // Tracks each (account, folder)'s last-known IMAP UIDVALIDITY so sync can
@@ -227,16 +227,16 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-    eprintln!("  ✓ Email sync state table ready");
+    tracing::debug!("  ✓ Email sync state table ready");
 
     if !column_exists(pool, "email_sync_state", "last_uid").await? {
         sqlx::query("ALTER TABLE email_sync_state ADD COLUMN last_uid INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await?;
-        eprintln!("  ✓ Added last_uid column to email_sync_state");
+        tracing::info!("  ✓ Added last_uid column to email_sync_state");
     }
 
-    eprintln!("[Migration] Email schema ready ✓");
+    tracing::debug!("[Migration] Email schema ready ✓");
     Ok(())
 }
 

@@ -1,8 +1,7 @@
 # Email Client — Slice 1 (IMAP fetch → store → view → convert-to-task)
 
-See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues (including a stale-docs item about this
-slice's `src/email/CLAUDE.md`/`src/sync/CLAUDE.md`) and [`roadmap.md`](./roadmap.md) for the
-overall feature roadmap.
+See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues and the changelog, and
+[`roadmap.md`](./roadmap.md) for the overall feature roadmap.
 
 ## Context
 
@@ -21,8 +20,9 @@ later sessions don't reinvent this scoping conversation. Multi-account landed la
 
 ## Conventions this slice follows
 
-- **Schema evolution**: guarded ALTER/CREATE in `src/migrations.rs`'s `run_calendar_migration`
-  (checked via `column_exists`), called once from `main.rs` after `App::build()`. The
+- **Schema evolution**: guarded ALTER/CREATE in `src/migrations.rs`'s `run_calendar_migration`/
+  `run_email_migration` (checked via `column_exists`), both called from `main.rs` after
+  `App::build()`. The
   `migrations/` dir has a single initial-schema `.sql` file untouched since — new schema goes
   into `migrations.rs`, not a new sqlx migration file.
 - **Background work**: `src/sync/` — one file per service (`cache.rs`, `calendar.rs`,
@@ -39,8 +39,9 @@ later sessions don't reinvent this scoping conversation. Multi-account landed la
   is `runtime-async-std`), paired with `tokio-rustls` (project already pulls in rustls via
   sqlx's `runtime-tokio-rustls`) + a root-cert crate, since async-imap ships no TLS itself.
   MIME parsing via `mail-parser`.
-- Active DB file is `sqlite:todo.db` (`DB_URL` const in `app.rs`) — `triptych.db` at repo root
-  is unused (0 bytes), leave it alone.
+- Active DB file is `sqlite:todo.db` (`DB_URL` const in `app.rs`, overridable via `DATABASE_URL`
+  through `db_url()`). The relative path resolves against CWD, so run from the repo root - a
+  stray `todo.db` gets created wherever the binary is launched otherwise.
 
 ## What's in this slice
 
@@ -52,11 +53,13 @@ later sessions don't reinvent this scoping conversation. Multi-account landed la
    note below.
 3. **`src/email/` module**: `config.rs` (`EmailConfig::all_from_env`), `message.rs`
    (`EmailMessage` + `parse_raw`), `client.rs` (`MailSource` trait + `ImapMailSource`),
-   `store.rs` (insert/query/mark-read/link-task/`max_uid` helpers).
+   `store.rs` (batched insert, list/body queries, mark-read, link-task, `SyncCursor`
+   get/set, `delete_older_than` for the 180-day retention purge - `EMAIL_RETENTION_DAYS` in
+   `app.rs`).
 4. **Daemon wiring**: `src/sync/mail.rs::mail_sync_worker` polls (not true IDLE) every 60s,
    spawned from `SyncDaemon::start` when `mail_sync_enabled`.
 5. **TUI**: `ViewMode::Email`, list view, `'m'` to toggle from the todo list, `Enter` to convert
-   the selected email into a task, `r` to mark read.
+   the selected email into a task, `r` to mark read, `v` to open a scrollable body popup.
 6. **CLI**: `triptych email sync` / `triptych email list` for testing without the daemon/TUI.
 
 ## Multi-account (Slice 4, done)
@@ -83,7 +86,6 @@ message's account — no per-account switcher/filter.
 - SMTP send/reply — `SMTP_*` env vars stay unused this slice.
 - Archive/snooze/delete triage actions.
 - Smart NLP extraction from email body (task title = subject only, for now).
-- UIDVALIDITY tracking — a folder UID reset could in theory skip mail; not handled.
 - Per-account UI (switcher/filter) — the merged inbox view added in Slice 4 shows every
   account's mail together, tagged by account, with no way to filter to just one yet.
 - **Unified inbox with AI-driven triage.** Not started, no design work done. Idea: rank/
@@ -111,7 +113,5 @@ message's account — no per-account switcher/filter.
   (`INITIAL_SYNC_LIMIT` in `src/email/client.rs`), not the entire mailbox history —
   fetching full RFC822 bodies for an entire real inbox is slow and memory-heavy.
   Older mail is never backfilled; only new mail from that point on is synced.
-- `.env` is not auto-loaded (no `dotenvy` wired in) — `TRIPTYCH_EMAIL_ENABLED` and
-  `IMAP_*` must be present in the actual process environment (`source .env` before
-  running the daemon or CLI), matching this project's existing convention of reading
-  env vars directly rather than parsing a file.
+- `.env` is loaded once at startup by `dotenvy::dotenv()` (`main.rs`), never overriding a var
+  already in the process environment - a real shell export always wins over `.env`.

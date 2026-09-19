@@ -35,7 +35,10 @@ pub enum DaemonResponse {
 pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
     let socket = socket_path();
 
-    // Remove old socket if exists
+    // A live daemon answers the health check; anything else at this path is a stale socket.
+    if is_daemon_running().await {
+        anyhow::bail!("Daemon already running at {}", socket.display());
+    }
     let _ = std::fs::remove_file(&socket);
 
     let listener = UnixListener::bind(&socket)
@@ -190,6 +193,7 @@ async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParse
 /// `App::add_task`, but doesn't reallocate (no App/pool of blocks here) - run
 /// `triptych schedule reallocate` (or reopen the TUI) to pick up new deadlines.
 async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str) -> Result<i64> {
+    anyhow::ensure!(!description.trim().is_empty(), "task description is empty");
     let parse_result = nlp.parse(description).await?;
 
     let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
@@ -268,14 +272,12 @@ pub async fn is_daemon_running() -> bool {
 
 /// Stop the running daemon
 pub async fn stop_daemon() -> Result<()> {
-    match send_to_daemon(DaemonRequest::Shutdown).await {
-        Ok(_) => {
-            eprintln!("✓ Daemon stopped");
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("✗ Daemon not running or failed to stop: {e}");
-            Err(e)
-        }
+    if !is_daemon_running().await {
+        anyhow::bail!("Daemon not running");
     }
+    send_to_daemon(DaemonRequest::Shutdown)
+        .await
+        .context("Failed to stop daemon")?;
+    eprintln!("✓ Daemon stopped");
+    Ok(())
 }

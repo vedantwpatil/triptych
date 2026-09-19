@@ -71,4 +71,4 @@ app.log
 logs/
 *.claude
 schedule.toml
-
+__pycache__/

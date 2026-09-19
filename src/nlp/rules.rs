@@ -1,6 +1,6 @@
 use crate::app::resolve_local_datetime;
 use crate::nlp::types::{Event, ParsedItem, Priority, Task};
-use chrono::{DateTime, Datelike, Duration, Local, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Utc};
 use chrono_english::{Dialect, parse_date_string};
 use nom::{
     IResult,
@@ -38,19 +38,20 @@ enum Segment {
     Deadline(DateTime<Utc>),
     /// An explicit task duration ("2h", "90m", "3 hours")
     ExplicitDuration(i32),
+    /// A date with no time of day ("tomorrow", "next friday", "sep 25", "12/25")
+    Date(DateTime<Utc>),
+    /// A time of day with no date ("at 3pm", "6pm", "15:30")
+    TimeOfDay(NaiveTime),
+    /// A time-of-day range ("3pm-5pm")
+    TimeRange(NaiveTime, NaiveTime),
 }
 
 #[derive(Debug, Clone)]
 enum TemporalContext {
-    /// A resolved point in time (tomorrow, next friday, 5pm)
+    /// A resolved point in time (eod, in 2 hours)
     Point(DateTime<Utc>),
-    /// A resolved duration (for 2 hours)
+    /// A resolved duration (for 3 days)
     Duration(Duration),
-    /// A time range (3pm-5pm) - implies both point and duration logic
-    Range {
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    },
 }
 
 // ============================================================================
@@ -98,6 +99,9 @@ impl RuleParser {
         let mut duration: Option<Duration> = None;
         let mut deadline: Option<DateTime<Utc>> = None;
         let mut explicit_duration_minutes: Option<i32> = None;
+        let mut date: Option<DateTime<Utc>> = None;
+        let mut time_of_day: Option<NaiveTime> = None;
+        let mut time_range: Option<(NaiveTime, NaiveTime)> = None;
 
         for segment in segments {
             match segment {
@@ -106,6 +110,9 @@ impl RuleParser {
                 Segment::Priority(p) => priority = p,
                 Segment::Deadline(dt) => deadline = Some(dt),
                 Segment::ExplicitDuration(mins) => explicit_duration_minutes = Some(mins),
+                Segment::Date(dt) => date = Some(dt),
+                Segment::TimeOfDay(t) => time_of_day = Some(t),
+                Segment::TimeRange(from, to) => time_range = Some((from, to)),
                 Segment::Temporal(temp) => match temp {
                     TemporalContext::Point(dt) => {
                         // If we already have a start time, maybe this is end time?
@@ -119,11 +126,24 @@ impl RuleParser {
                         }
                     }
                     TemporalContext::Duration(d) => duration = Some(d),
-                    TemporalContext::Range { start, end } => {
-                        start_time = Some(start);
-                        end_time = Some(end);
-                    }
                 },
+            }
+        }
+
+        // Merge a date and a time of day into one moment; a time with no date means today.
+        if start_time.is_none() {
+            let day = date.map_or_else(
+                || Local::now().date_naive(),
+                |dt| dt.with_timezone(&Local).date_naive(),
+            );
+            let at = |t: NaiveTime| resolve_local_datetime(day.and_time(t));
+            if let Some((from, to)) = time_range {
+                start_time = Some(at(from));
+                end_time = Some(at(to));
+            } else if let Some(t) = time_of_day {
+                start_time = Some(at(t));
+            } else {
+                start_time = date;
             }
         }
 
@@ -248,8 +268,9 @@ fn weekday_from_name(name: &str) -> Option<chrono::Weekday> {
     })
 }
 
-/// Matches bare durations with no "for"/"in" prefix: "2h", "90m", "3 hours"
+/// Matches bare durations with an optional "for" prefix: "2h", "90m", "3 hours", "for 30m"
 fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
+    let (input, _) = opt(pair(tag_no_case("for"), space1))(input)?;
     let (input, amount) = map_res(digit1, |s: &str| s.parse::<i64>())(input)?;
     let (input, _) = multispace0(input)?;
     let (input, unit) = alt((
@@ -276,13 +297,15 @@ fn parse_bare_duration_segment(input: &str) -> IResult<&str, Segment> {
     Ok((input, Segment::ExplicitDuration(i32::try_from(minutes).unwrap_or(i32::MAX))))
 }
 
+/// A recoverable parse failure: `alt`/`many0` backtrack past it (unlike `nom::Err::Failure`).
+fn reject<T>(input: &str) -> IResult<&str, T> {
+    Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))
+}
+
 /// Succeeds only if the next character isn't alphanumeric (or input is exhausted)
 fn word_boundary(input: &str) -> IResult<&str, ()> {
     match input.chars().next() {
-        Some(c) if c.is_alphanumeric() => Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Verify,
-        ))),
+        Some(c) if c.is_alphanumeric() => reject(input),
         _ => Ok((input, ())),
     }
 }
@@ -330,28 +353,21 @@ fn parse_text_segment(input: &str) -> IResult<&str, Segment> {
 // ============================================================================
 
 fn parse_temporal_segment(input: &str) -> IResult<&str, Segment> {
-    // We try various time strategies.
-    // Note: We need to pass `now` down for resolution, or use a closure strategy.
-    // For simplicity here, we resolve using Local::now() inside the parser map.
-
+    // Resolved against Local::now() at parse time.
     let now = Local::now();
 
     alt((
-        // 1. Complex Phrases ("day after tomorrow", "3pm-5pm")
+        // 1. Complex phrases ("day after tomorrow", "3pm-5pm")
         map(parse_day_after_tomorrow(now), Segment::Temporal),
-        map(parse_time_range(now), Segment::Temporal),
-        // 2. Business Terms ("eod", "cob")
+        parse_time_range,
+        // 2. Business terms ("eod", "cob")
         map(parse_business_time(now), Segment::Temporal),
-        // 3. Durations ("in 2 hours", "for 30 mins")
+        // 3. Durations ("in 2 hours", "for 3 days")
         map(parse_relative_duration(now), Segment::Temporal),
-        // 4. Chrono-English Delegation (Dates, Weekdays, "tomorrow")
-        // We must identify *valid* chrono strings first so we don't feed random title words
-        map_res(parse_chrono_candidate, move |s| {
-            // We use map_res to return a Result. If chrono fails, nom backtracks!
-            parse_date_string(s, now, Dialect::Us).map_or(Err("chrono parse failed"), |dt| {
-                Ok(Segment::Temporal(TemporalContext::Point(dt.with_timezone(&Utc))))
-            })
-        }),
+        // 4. Dates ("tomorrow", "on sep 25", "12/25") and times of day ("at 3pm", "15:30"),
+        // kept apart so `assemble` can merge "tomorrow at 3pm" into one moment.
+        parse_date_segment(now),
+        parse_time_of_day_segment,
     ))(input)
 }
 
@@ -376,37 +392,32 @@ fn parse_day_after_tomorrow(
     }
 }
 
-fn parse_time_range(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, TemporalContext> {
-    move |input| {
-        let (input, (start_h, start_m, start_ampm)) = parse_loose_time(input)?;
-        let (input, _) = tuple((multispace0, alt((tag("-"), tag("–"))), multispace0))(input)?;
-        let (input, (end_h, end_m, end_ampm)) = parse_loose_time(input)?;
+/// "3pm-5pm", "2-4pm" (the start inherits the end's am/pm), "15:00-17:00". Bare "5-7" is not a
+/// range, so page or room numbers stay in the title.
+fn parse_time_range(input: &str) -> IResult<&str, Segment> {
+    let (rest, start) = parse_loose_time(input)?;
+    let (rest, _) = tuple((multispace0, alt((tag("-"), tag("–"))), multispace0))(rest)?;
+    let (rest, end) = parse_loose_time(rest)?;
+    let (rest, ()) = word_boundary(rest)?;
 
-        // Context Inference: "2-4pm" implies "2pm-4pm"
-        // If start has no AM/PM, but end does, inherit it?
-        // Logic: If start < end (12h), inherit. If start > end (e.g. 11-1pm), start is AM, end is PM.
-        // Simplified heuristic: If start has no suffix, use end's suffix.
-        let effective_start_ampm = start_ampm.or(end_ampm);
+    if start.pm.is_none() && end.pm.is_none() && !(start.colon && end.colon) {
+        return reject(input);
+    }
+    match (start.to_time(end.pm), end.to_time(None)) {
+        (Some(from), Some(to)) => Ok((rest, Segment::TimeRange(from, to))),
+        _ => reject(input),
+    }
+}
 
-        let s_hour = resolve_24h(start_h, effective_start_ampm);
-        let e_hour = resolve_24h(end_h, end_ampm);
+/// "at 3pm", "6pm", "at 15:30". A bare number ("look at 5 things") is not a time.
+fn parse_time_of_day_segment(input: &str) -> IResult<&str, Segment> {
+    let (rest, _) = opt(pair(tag_no_case("at"), space1))(input)?;
+    let (rest, time) = parse_loose_time(rest)?;
+    let (rest, ()) = word_boundary(rest)?;
 
-        let start_dt = resolve_local_datetime(require(
-            now.date_naive().and_hms_opt(s_hour, start_m, 0),
-            input,
-        )?);
-        let end_dt = resolve_local_datetime(require(
-            now.date_naive().and_hms_opt(e_hour, end_m, 0),
-            input,
-        )?);
-
-        Ok((
-            input,
-            TemporalContext::Range {
-                start: start_dt,
-                end: end_dt,
-            },
-        ))
+    match time.to_time(None) {
+        Some(t) if time.pm.is_some() || time.colon => Ok((rest, Segment::TimeOfDay(t))),
+        _ => reject(input),
     }
 }
 
@@ -505,8 +516,58 @@ fn parse_relative_duration(
     }
 }
 
-/// Recognizes strings that look like dates to prevent greedy text parsing
-/// e.g. "tomorrow", "next monday", "jan 5"
+/// "tomorrow", "next friday", "sep 25", "12/25", each with an optional "on " in front.
+fn parse_date_segment(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, Segment> {
+    move |input| {
+        let (rest, on) = opt(pair(tag_no_case("on"), space1))(input)?;
+        let (rest, date) = alt((
+            map_res(parse_chrono_candidate, |s| {
+                parse_date_string(s, now, Dialect::Us)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|_| "chrono parse failed")
+            }),
+            parse_numeric_date(now, on.is_some()),
+        ))(rest)?;
+        let (rest, ()) = word_boundary(rest)?;
+        Ok((rest, Segment::Date(date)))
+    }
+}
+
+/// US-style "12/25" or "12/25/2026". A year-less date the calendar has already passed rolls to
+/// next year. "1/2" or "3/4" is far likelier a fraction than a date, so a bare month/day needs a
+/// leading "on" or a day above 12.
+fn parse_numeric_date(
+    now: DateTime<Local>,
+    has_on: bool,
+) -> impl FnMut(&str) -> IResult<&str, DateTime<Utc>> {
+    move |input| {
+        let number = |i| map_res(digit1, str::parse::<u32>)(i);
+        let (rest, month) = number(input)?;
+        let (rest, _) = char('/')(rest)?;
+        let (rest, day) = number(rest)?;
+        let (rest, year) = opt(preceded(char('/'), number))(rest)?;
+
+        if year.is_none() && !has_on && day <= 12 {
+            return reject(input);
+        }
+        let today = now.date_naive();
+        let full_year = year.map_or_else(
+            || today.year(),
+            |y| i32::try_from(if y < 100 { 2000 + y } else { y }).unwrap_or(0),
+        );
+        let midnight = NaiveDate::from_ymd_opt(full_year, month, day)
+            .map(|d| {
+                if year.is_none() && d < today { d.with_year(d.year() + 1).unwrap_or(d) } else { d }
+            })
+            .and_then(|d| d.and_hms_opt(0, 0, 0));
+        midnight.map_or_else(
+            || reject(input),
+            |m| Ok((rest, resolve_local_datetime(m))),
+        )
+    }
+}
+
+/// Recognizes date phrases to prevent greedy text parsing: "tomorrow", "next monday", "jan 5"
 fn parse_chrono_candidate(input: &str) -> IResult<&str, &str> {
     // Helper parsers to avoid the 21-tuple limit
     let parse_month_full = alt((
@@ -569,16 +630,31 @@ fn parse_chrono_candidate(input: &str) -> IResult<&str, &str> {
                 tag_no_case("th"),
             ))),
         ))),
-        // 4. Explicit time (preceded returns complex type, must squash)
-        recognize(preceded(
-            pair(tag_no_case("at"), space1),
-            parse_loose_time, // parse_loose_time returns a tuple, recognize fixes it
-        )),
     ))(input)
 }
 
 // Helpers
-fn parse_loose_time(input: &str) -> IResult<&str, (u32, u32, Option<bool>)> {
+
+/// A clock time as typed, before deciding whether it is really a time: "3", "3pm", "3:30", "15:30".
+struct LooseTime {
+    hour: u32,
+    minute: u32,
+    pm: Option<bool>,
+    colon: bool,
+}
+
+impl LooseTime {
+    /// 24h `NaiveTime`, or `None` if out of range. `inherited_pm` supplies a missing am/pm.
+    fn to_time(&self, inherited_pm: Option<bool>) -> Option<NaiveTime> {
+        let pm = self.pm.or(inherited_pm);
+        if pm.is_some() && !(1..=12).contains(&self.hour) {
+            return None;
+        }
+        NaiveTime::from_hms_opt(resolve_24h(self.hour, pm), self.minute, 0)
+    }
+}
+
+fn parse_loose_time(input: &str) -> IResult<&str, LooseTime> {
     let (input, hour) = map_res(digit1, |s: &str| s.parse::<u32>())(input)?;
     let (input, minute) = opt(preceded(
         char(':'),
@@ -587,8 +663,13 @@ fn parse_loose_time(input: &str) -> IResult<&str, (u32, u32, Option<bool>)> {
     let (input, _) = multispace0(input)?;
     let (input, am_pm) = opt(alt((tag_no_case("am"), tag_no_case("pm"))))(input)?;
 
-    let is_pm = am_pm.map(|s| s.to_lowercase() == "pm");
-    Ok((input, (hour, minute.unwrap_or(0), is_pm)))
+    let time = LooseTime {
+        hour,
+        minute: minute.unwrap_or(0),
+        pm: am_pm.map(|s| s.eq_ignore_ascii_case("pm")),
+        colon: minute.is_some(),
+    };
+    Ok((input, time))
 }
 
 const fn resolve_24h(hour: u32, is_pm: Option<bool>) -> u32 {
@@ -619,7 +700,7 @@ fn quantize_time(dt: DateTime<Utc>, grid_minutes: i64) -> DateTime<Utc> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use chrono::{NaiveDate, NaiveTime};
+    use chrono::Timelike;
 
     fn parse_task(input: &str) -> Task {
         match RuleParser::try_parse(input).expect("expected a parsed item") {
@@ -717,5 +798,104 @@ mod tests {
         };
         let local = dt.with_timezone(&Local);
         assert_eq!(local.date_naive(), NaiveDate::from_ymd_opt(2026, 12, 31).unwrap());
+    }
+
+    fn parse_event(input: &str) -> Event {
+        match RuleParser::try_parse(input).expect("expected a parsed item") {
+            ParsedItem::Event(event) => event,
+            ParsedItem::Task(task) => panic!("expected Event, got Task: {task:?}"),
+        }
+    }
+
+    fn local_hm(dt: DateTime<Utc>) -> (NaiveDate, u32, u32) {
+        let local = dt.with_timezone(&Local);
+        (local.date_naive(), local.hour(), local.minute())
+    }
+
+    fn tomorrow() -> NaiveDate {
+        (Local::now() + Duration::days(1)).date_naive()
+    }
+
+    #[test]
+    fn date_and_time_of_day_merge_into_one_moment() {
+        let task = parse_task("submit report tomorrow at 3pm");
+        assert_eq!(local_hm(task.due_date.unwrap()), (tomorrow(), 15, 0));
+        assert_eq!(task.title, "submit report");
+    }
+
+    #[test]
+    fn time_with_no_date_means_today() {
+        let today = Local::now().date_naive();
+        for (input, hm) in [("call mom at 3pm", (15, 0)), ("standup 6pm", (18, 0)), ("gym 15:30", (15, 30))] {
+            let task = parse_task(input);
+            assert_eq!(local_hm(task.due_date.unwrap()), (today, hm.0, hm.1), "{input}");
+        }
+    }
+
+    #[test]
+    fn month_day_and_weekday_combine_with_time() {
+        let task = parse_task("dentist Sep 25 at 2pm");
+        let (date, h, m) = local_hm(task.due_date.unwrap());
+        assert_eq!((date.month(), date.day(), h, m), (9, 25, 14, 0));
+        assert_eq!(task.title, "dentist");
+
+        let task = parse_task("review next friday at 10am");
+        let (date, h, _) = local_hm(task.due_date.unwrap());
+        assert_eq!((date.weekday(), h), (chrono::Weekday::Fri, 10));
+    }
+
+    #[test]
+    fn time_range_becomes_an_event_with_its_duration() {
+        let event = parse_event("team sync 3pm-5pm");
+        let (_, h, _) = local_hm(event.start_time);
+        assert_eq!(h, 15);
+        assert_eq!((event.end_time.unwrap() - event.start_time).num_minutes(), 120);
+        assert_eq!(event.title, "team sync");
+
+        let event = parse_event("lab tomorrow 2-4pm");
+        assert_eq!(local_hm(event.start_time), (tomorrow(), 14, 0));
+        assert_eq!(local_hm(event.end_time.unwrap()), (tomorrow(), 16, 0));
+    }
+
+    #[test]
+    fn plain_numbers_are_not_times_or_ranges() {
+        for input in ["read pages 5-7", "look at 5 things", "buy 1/2 cup sugar", "room 24"] {
+            let item = RuleParser::try_parse(input);
+            assert!(
+                item.is_none_or(|i| matches!(&i, ParsedItem::Task(t) if t.due_date.is_none())),
+                "{input} parsed as a time"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_clock_values_fall_back_to_text() {
+        for input in ["meet 25:99", "call 13pm", "call 0am"] {
+            let item = RuleParser::try_parse(input);
+            assert!(
+                item.is_none_or(|i| matches!(&i, ParsedItem::Task(t) if t.due_date.is_none())),
+                "{input} parsed as a time"
+            );
+        }
+    }
+
+    #[test]
+    fn for_prefix_is_part_of_an_explicit_duration() {
+        let task = parse_task("stretch for 30m");
+        assert_eq!(task.duration_minutes, Some(30));
+        assert_eq!(task.title, "stretch");
+    }
+
+    #[test]
+    fn numeric_date_needs_year_on_or_day_above_twelve() {
+        let now = NaiveDate::from_ymd_opt(2026, 9, 19).unwrap().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(Local).unwrap();
+        let date = |input| parse_numeric_date(now, false)(input).map(|(_, dt)| dt.with_timezone(&Local).date_naive());
+
+        assert_eq!(date("12/25").unwrap(), NaiveDate::from_ymd_opt(2026, 12, 25).unwrap());
+        assert_eq!(date("9/13").unwrap(), NaiveDate::from_ymd_opt(2027, 9, 13).unwrap());
+        assert_eq!(date("3/4/2028").unwrap(), NaiveDate::from_ymd_opt(2028, 3, 4).unwrap());
+        assert!(date("1/2").is_err());
+        assert!(date("13/45").is_err());
+        assert!(parse_numeric_date(now, true)("1/2").is_ok());
     }
 }
