@@ -3,20 +3,14 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// Pre-warm Ollama model to eliminate cold start latency
+/// Load the Ollama model at startup so the first real parse isn't paying the model load
 pub async fn prewarm_ollama(
     nlp: Arc<NLPParser>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
-    let warmup_task = tokio::spawn(async move {
-        let _ = nlp.parse("Test warmup query").await;
-    });
-
     tokio::select! {
-        _ = warmup_task => {}
-        _ = shutdown_rx.recv() => {
-            return Ok(());
-        }
+        () = nlp.prewarm() => {}
+        _ = shutdown_rx.recv() => {}
     }
 
     Ok(())

@@ -50,13 +50,17 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
     eprintln!("[Daemon] Started at {}", socket.display());
     eprintln!("[Daemon] Pre-warming Ollama and loading cache...");
 
-    // Pre-warm Ollama
-    let warmup_start = std::time::Instant::now();
-    let _ = nlp.parse("warmup query").await;
-    eprintln!(
-        "[Daemon] Pre-warmed in {:.2}s",
-        warmup_start.elapsed().as_secs_f64()
-    );
+    // Load the model in the background so the daemon answers at once; a parse that arrives
+    // mid-load waits for it (see `OllamaClient::parse`).
+    let warm_nlp = nlp.clone();
+    tokio::spawn(async move {
+        let warmup_start = std::time::Instant::now();
+        warm_nlp.prewarm().await;
+        eprintln!(
+            "[Daemon] Pre-warmed in {:.2}s",
+            warmup_start.elapsed().as_secs_f64()
+        );
+    });
 
     // Preload cache from database
     let cache_start = std::time::Instant::now();

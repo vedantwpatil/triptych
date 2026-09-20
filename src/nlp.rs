@@ -1,4 +1,4 @@
-pub(crate) mod ollama_client;
+pub mod ollama_client;
 mod parser;
 pub mod rules;
 pub mod types;

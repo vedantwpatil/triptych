@@ -1,8 +1,10 @@
-use crate::nlp::ollama_client::OllamaClient;
+use crate::nlp::ollama_client::{OllamaClient, OllamaError};
 use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -15,6 +17,11 @@ pub struct NLPParser {
     ollama_client: OllamaClient,
     ollama_available: bool,
     cache: Mutex<LruCache<String, CachedParse>>,
+    /// Whether a parse may wait for the model to load. On by default; the TUI turns it off so a
+    /// keypress never blocks on a load.
+    wait_for_load: AtomicBool,
+    /// Set while a model load started by this parser is running, so loads are not started twice.
+    warming: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -53,18 +60,36 @@ impl NLPParser {
             cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(1000).unwrap_or(NonZeroUsize::MIN),
             )),
+            wait_for_load: AtomicBool::new(true),
+            warming: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    // A linear layered pipeline (Layer 0 through 3, see comments below) - splitting
-    // it into helpers would scatter that sequence without reducing its complexity.
+    /// Chooses what a parse does when the model is not loaded: wait for the load (`true`, the default,
+    /// fine for the CLI and the daemon) or skip the LLM, start a background load and use the regex
+    /// result (`false`, for the TUI, whose event loop awaits `parse`).
+    pub fn set_wait_for_load(&self, wait: bool) {
+        self.wait_for_load.store(wait, Ordering::Relaxed);
+    }
+
     /// Parses `input` into a task or event using the cache, the regex rules and, when needed, the local LLM.
+    ///
+    /// Logs the winning layer and its latency at `info` (never the input), so how often parses reach
+    /// the LLM can be counted from the log: `grep 'nlp parse' $TMPDIR/triptych.log`.
     ///
     /// # Errors
     ///
     /// Returns [`ParseError`] for unusable input. The current layers always fall back to a plain task, so no path returns it yet.
-    #[allow(clippy::too_many_lines)]
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
+        let result = self.parse_layers(input).await?;
+        tracing::info!(strategy = ?result.strategy, ms = result.parse_time_ms, "nlp parse");
+        Ok(result)
+    }
+
+    // A linear layered pipeline (Layer 0 through 3, see comments below) - splitting
+    // it into helpers would scatter that sequence without reducing its complexity.
+    #[allow(clippy::too_many_lines)]
+    async fn parse_layers(&self, input: &str) -> Result<ParseResult, ParseError> {
         let start = Instant::now();
 
         // Layer 0: Check exact cache match first (hold lock briefly)
@@ -121,7 +146,11 @@ impl NLPParser {
         // Layer 2: Try Ollama for complex parsing (including deadline phrases the
         // regex fast path couldn't resolve)
         if self.ollama_available {
-            match self.ollama_client.parse(input).await {
+            match self
+                .ollama_client
+                .parse(input, self.wait_for_load.load(Ordering::Relaxed))
+                .await
+            {
                 Ok(item) => {
                     let elapsed = elapsed_ms(start);
 
@@ -147,6 +176,10 @@ impl NLPParser {
                     }
 
                     return Ok(result);
+                }
+                Err(OllamaError::ModelNotLoaded) => {
+                    tracing::info!("Ollama model not loaded; loading it in the background");
+                    self.warm_in_background();
                 }
                 Err(e) => {
                     tracing::warn!("Ollama parsing failed: {e}; falling back");
@@ -202,6 +235,33 @@ impl NLPParser {
         }
 
         Ok(result)
+    }
+
+    /// Loads the LLM into memory so the first real parse skips the model load. A no-op when Ollama
+    /// is unavailable or a load is already running. Not a `parse` call: the regex layer resolves any
+    /// plain string and never reaches Ollama.
+    pub async fn prewarm(&self) {
+        if !self.ollama_available || self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Err(e) = self.ollama_client.warm().await {
+            tracing::warn!("Ollama prewarm failed: {e}");
+        }
+        self.warming.store(false, Ordering::Release);
+    }
+
+    fn warm_in_background(&self) {
+        if self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let client = self.ollama_client.clone();
+        let warming = Arc::clone(&self.warming);
+        tokio::spawn(async move {
+            if let Err(e) = client.warm().await {
+                tracing::warn!("Ollama background load failed: {e}");
+            }
+            warming.store(false, Ordering::Release);
+        });
     }
 
     pub const fn is_ollama_available(&self) -> bool {
