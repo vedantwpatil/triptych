@@ -196,33 +196,32 @@ impl App {
         self.email_detail_scroll = 0;
     }
 
-    /// Creates a task from the selected email's subject and links the two.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a database query fails.
-    pub async fn convert_selected_email_to_task(&mut self) -> Result<(), sqlx::Error> {
+    /// Starts creating a task from the selected email's subject (parsed in the background, see
+    /// `App::submit_task`); `finish_email_conversion` then links the two.
+    pub fn convert_selected_email_to_task(&mut self) {
         let Some(email) = self.emails.get(self.selected_email) else {
-            return Ok(());
+            return;
         };
         if email.task_id.is_some() {
             self.status_message = Some((
                 "Email already converted to a task".to_string(),
                 std::time::Instant::now(),
             ));
-            return Ok(());
+            return;
         }
-        let email_id = email.id;
-        let subject = email.subject.clone();
+        let (email_id, subject) = (email.id, email.subject.clone());
+        self.submit_task(subject, Some(email_id));
+    }
 
-        self.add_task(&subject).await?;
-        let task_id = self.tasks.get(self.selected).map(|t| t.id);
-
-        if let Some(task_id) = task_id {
-            crate::email::store::link_task(&self.db_pool, email_id, task_id)
-                .await
-                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        }
+    /// Links the task made from an email, marks the email read and reloads the list.
+    pub(super) async fn finish_email_conversion(
+        &mut self,
+        email_id: i64,
+        task_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        crate::email::store::link_task(&self.db_pool, email_id, task_id)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
         crate::email::store::mark_read(&self.db_pool, email_id)
             .await

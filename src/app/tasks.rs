@@ -1,12 +1,22 @@
 //! Todo CRUD, task classification and extraction of fields from parsed NLP items.
 
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 use super::{
     App,
     model::{EnhancedTaskInfo, TASK_COLUMNS, Task},
 };
 use crate::nlp::{ParsedItem, Priority};
+
+/// Outcome of a background task parse (see `App::submit_task`).
+#[derive(Debug)]
+pub struct TaskParse {
+    description: String,
+    /// Set when the task comes from converting this email (`App::convert_selected_email_to_task`).
+    email_id: Option<i64>,
+    item: Result<ParsedItem, String>,
+}
 
 #[must_use]
 pub fn classify_task(description: &str) -> &'static str {
@@ -133,9 +143,73 @@ impl App {
             .parse(description)
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {e}")))?;
+        self.insert_parsed_task(description, parse_result.item)
+            .await
+    }
 
+    /// Parses `description` in the background, so the TUI never waits on the parser: a parse that
+    /// reaches the LLM takes about a second, up to 15s if Ollama hangs. The result arrives on
+    /// `task_rx` and `apply_task_parse` inserts it.
+    pub fn submit_task(&mut self, description: String, email_id: Option<i64>) {
+        self.status_message = Some(("Adding task...".to_string(), std::time::Instant::now()));
+        let parser = Arc::clone(&self.nlp_parser);
+        let tx = self.task_tx.clone();
+        tokio::spawn(async move {
+            let item = parser
+                .parse(&description)
+                .await
+                .map(|r| r.item)
+                .map_err(|e| format!("NLP parsing failed: {e}"));
+            let _ = tx.send(TaskParse {
+                description,
+                email_id,
+                item,
+            });
+        });
+    }
+
+    /// Inserts a finished background parse. For an email conversion, an email that was linked in the
+    /// meantime (a second Enter before the first parse landed) is skipped, not duplicated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parse failed or a database write fails.
+    pub async fn apply_task_parse(&mut self, parsed: TaskParse) -> Result<(), sqlx::Error> {
+        let TaskParse {
+            description,
+            email_id,
+            item,
+        } = parsed;
+        let item = item.map_err(sqlx::Error::Protocol)?;
+
+        if let Some(email_id) = email_id
+            && self
+                .emails
+                .iter()
+                .any(|e| e.id == email_id && e.task_id.is_some())
+        {
+            self.status_message = Some((
+                "Email already converted to a task".to_string(),
+                std::time::Instant::now(),
+            ));
+            return Ok(());
+        }
+
+        let task_id = self.insert_parsed_task(&description, item).await?;
+        self.status_message = None;
+        match email_id {
+            Some(email_id) => self.finish_email_conversion(email_id, task_id).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn insert_parsed_task(
+        &mut self,
+        description: &str,
+        item: ParsedItem,
+    ) -> Result<i64, sqlx::Error> {
         let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
-            extract_task_fields(parse_result.item);
+            extract_task_fields(item);
 
         let new_order: i64 = if self.tasks.is_empty() {
             0

@@ -24,6 +24,7 @@ use ui::ui;
 pub async fn run(mut app: App) -> Result<(), crate::BoxError> {
     // Start the sync workers BEFORE entering the alternate screen so warmup messages print cleanly
     let sync_config = SyncConfig::from_env();
+    app.nlp_parser_ref().set_wait_for_load(false);
     let daemon = SyncDaemon::start(app.db_pool.clone(), app.nlp_parser_ref(), &sync_config);
 
     app.load_tasks().await?;
@@ -95,6 +96,12 @@ where
 
             Some(parsed) = app.deadline_rx.recv() => {
                 if let Err(e) = app.apply_deadline_parse(parsed).await {
+                    app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
+                }
+            }
+
+            Some(parsed) = app.task_rx.recv() => {
+                if let Err(e) = app.apply_task_parse(parsed).await {
                     app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
                 }
             }

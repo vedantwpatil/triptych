@@ -629,3 +629,46 @@ async fn delete_selected_tasks_without_a_selection_deletes_only_the_cursor_row()
 
     assert_eq!(descriptions(&app), ["a", "c"]);
 }
+
+#[tokio::test]
+async fn submit_task_inserts_only_when_the_parse_lands() {
+    let (mut app, pool) = app_with_tasks(&[]).await;
+    app.submit_task("buy milk".to_string(), None);
+    assert!(app.tasks.is_empty(), "submit_task must not insert inline");
+
+    let parsed = app.task_rx.recv().await.expect("background parse result");
+    app.apply_task_parse(parsed).await.expect("apply parse");
+    assert_eq!(descriptions(&app), ["buy milk"]);
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+    assert_eq!(stored, 1);
+}
+
+#[tokio::test]
+async fn converting_an_email_twice_before_the_parse_lands_makes_one_task() {
+    let pool = test_pool().await;
+    let email_id = sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc) VALUES (1, 'm1', 'a@b.c', 'reply to advisor', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert email")
+    .last_insert_rowid();
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.convert_selected_email_to_task();
+    app.convert_selected_email_to_task();
+    for _ in 0..2 {
+        let parsed = app.task_rx.recv().await.expect("background parse result");
+        app.apply_task_parse(parsed).await.expect("apply parse");
+    }
+
+    assert_eq!(descriptions(&app), ["reply to advisor"]);
+    assert_eq!(
+        email_task_id(&pool, email_id).await,
+        Some(app.tasks[0].id)
+    );
+}

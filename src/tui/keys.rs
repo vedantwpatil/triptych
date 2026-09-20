@@ -26,7 +26,7 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
             ViewMode::Email => handle_email_key(app, key.code).await,
         },
         InputMode::Editing => {
-            handle_editing_key(app, key.code).await;
+            handle_editing_key(app, key.code);
             KeyOutcome::Continue
         }
     }
@@ -300,9 +300,7 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             }
         }
         KeyCode::Enter => {
-            if let Err(e) = app.convert_selected_email_to_task().await {
-                set_error(app, e);
-            }
+            app.convert_selected_email_to_task();
         }
         KeyCode::Char('r') => {
             if let Err(e) = app.mark_selected_email_read().await {
@@ -331,14 +329,12 @@ const fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     KeyOutcome::Continue
 }
 
-async fn handle_editing_key(app: &mut App, code: KeyCode) {
+fn handle_editing_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => {
             let description = app.input_buffer.trim().to_string();
-            if !description.is_empty()
-                && let Err(e) = app.add_task(&description).await
-            {
-                set_error(app, e);
+            if !description.is_empty() {
+                app.submit_task(description, None);
             }
             app.input_mode = InputMode::Normal;
         }

@@ -71,6 +71,9 @@ pub struct App {
     deadline_tx: tokio::sync::mpsc::UnboundedSender<DeadlineParse>,
     /// Results of background deadline parses; drained by `run_app` so the UI never blocks on NLP.
     pub deadline_rx: tokio::sync::mpsc::UnboundedReceiver<DeadlineParse>,
+    task_tx: tokio::sync::mpsc::UnboundedSender<TaskParse>,
+    /// Results of background task parses; drained by `run_app`, like `deadline_rx`.
+    pub task_rx: tokio::sync::mpsc::UnboundedReceiver<TaskParse>,
     pub emails: Vec<crate::email::EmailMessage>,
     pub selected_email: usize,
     /// Set when the email detail popup is open (`v` on a selected email in
@@ -89,6 +92,7 @@ impl App {
     pub async fn new(pool: SqlitePool) -> Self {
         let nlp_parser = Arc::new(NLPParser::new().await);
         let (deadline_tx, deadline_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             db_pool: pool,
@@ -114,6 +118,8 @@ impl App {
             deadline_edit_task_id: None,
             deadline_tx,
             deadline_rx,
+            task_tx,
+            task_rx,
             emails: Vec::new(),
             selected_email: 0,
             email_detail_open: false,

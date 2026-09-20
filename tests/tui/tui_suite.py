@@ -10,14 +10,18 @@ turns into XPASS once the bug is fixed, at which point the marker should be remo
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
+import functools
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -125,6 +129,54 @@ class Ctx:
         if self.t:
             self.t.kill()
         self.sb.cleanup()
+
+
+OLLAMA_MODEL, OLLAMA_API = "qwen2.5:7b", "http://localhost:11434/api"
+
+
+def _ollama_up() -> bool:
+    try:
+        urllib.request.urlopen(f"{OLLAMA_API}/tags", timeout=3).close()
+        return True
+    except OSError:
+        return False
+
+
+def _ollama(path: str, body: dict | None = None) -> dict:
+    req = urllib.request.Request(f"{OLLAMA_API}/{path}", data=body and json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def _model_loaded() -> bool:
+    return any(m["name"] == OLLAMA_MODEL for m in _ollama("ps")["models"])
+
+
+def _wait_loaded(timeout: float) -> bool:
+    end = time.time() + timeout
+    while time.time() < end and not _model_loaded():
+        time.sleep(0.5)
+    return _model_loaded()
+
+
+def _unload() -> bool:
+    """Unloads the model; retries because every TUI/daemon start in a parallel scenario reloads it."""
+    for _ in range(6):
+        _ollama("generate", {"model": OLLAMA_MODEL, "keep_alive": 0})
+        time.sleep(0.5)
+        if not _model_loaded():
+            return True
+    return False
+
+
+def _serialized(fn):
+    """Scenarios that unload the shared model, or need it loaded, take turns (the suite runs with -j)."""
+    @functools.wraps(fn)
+    def wrapper(c):
+        with open(Path(tempfile.gettempdir()) / "triptych-suite-ollama.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return fn(c)
+    return wrapper
 
 
 def block_toml(*blocks: tuple[str, str, str, str, str]) -> str:
@@ -276,6 +328,18 @@ def _(c: Ctx):
     c.cli("add", "Call dad tomorrow")
     d = c.descs()
     c.check(len(d) == 2 and any("dad" in x.lower() for x in d), f"daemon saved wrong descriptions: {d}")
+
+
+@scenario("daemon_prewarm_loads_model")
+@_serialized
+def _(c: Ctx):
+    if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
+        return
+    c.check(_unload(), "model still loaded after unload")
+    c.sb.start_daemon()
+    c.check(_wait_loaded(90), "daemon startup did not load the model (KI-19)")
+    out = (c.sb.dir / "daemon.out").read_text()
+    c.check("Pre-warmed" in out, f"no 'Pre-warmed' line in daemon output: {out[-200:]!r}")
 
 
 # ---------------------------------------------------------------- NLP (one-shot CLI, so no persistent fuzzy cache)
@@ -497,6 +561,38 @@ def _(c: Ctx):
     t = c.tui()
     c.check(t.has("q: quit") and t.has("c: calendar") and t.has("a: add"), "key hints missing")
     c.check(not t.has("[ ]"), "task rows on empty DB")
+
+
+@scenario("todo_add_cold_model")
+@_serialized
+def _(c: Ctx):
+    if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
+        return
+    c.tui()
+    c.check(_wait_loaded(90), "TUI startup did not load the model")
+    c.check(_unload(), "model still loaded after unload")
+    c.add("Finish the proposal before the end of next month")
+    end = time.time() + 2.0
+    while time.time() < end and not c.tasks():
+        time.sleep(0.1)
+    c.check(c.tasks(), "add blocked for over 2s while the model was unloaded")
+    c.check(_wait_loaded(60), "a cold add did not start a background load")
+
+
+@scenario("todo_add_llm_nonblocking")
+@_serialized
+def _(c: Ctx):
+    if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
+        return
+    t = c.tui()
+    c.check(_wait_loaded(90), "TUI startup did not load the model")
+    c.add("Finish the proposal before the end of next month")
+    c.check(not t.has("New Task"), "popup still open while the LLM parses (KI-21)")
+    end = time.time() + 20
+    while time.time() < end and not c.tasks():
+        time.sleep(0.2)
+    c.check(c.tasks(), "background parse never inserted the task")
+    c.check(c.tasks()[0]["deadline"], "LLM deadline was lost")
 
 
 @scenario("todo_add_edit_cancel")
