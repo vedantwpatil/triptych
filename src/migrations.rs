@@ -221,6 +221,13 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         tracing::info!("  ✓ Added body_text column to email_messages");
     }
 
+    if !column_exists(pool, "email_messages", "summary").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN summary TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added summary column to email_messages");
+    }
+
     // `email_messages.task_id` was created without `ON DELETE`, so deleting a task an email was
     // converted into failed with a FOREIGN KEY error. SQLite can't alter an FK in place; this
     // trigger gives it `ON DELETE SET NULL`. It must be created after the table rebuild above,

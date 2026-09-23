@@ -264,6 +264,16 @@ impl NLPParser {
         });
     }
 
+    /// Summarizes an email with the local LLM. Unlike `parse` it does not consult `ollama_available`,
+    /// which is fixed at startup: a summary is requested on demand and should work if Ollama started later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out or fails, or the model returns nothing.
+    pub async fn summarize(&self, email: &str) -> Result<String, OllamaError> {
+        self.ollama_client.summarize(email).await
+    }
+
     pub const fn is_ollama_available(&self) -> bool {
         self.ollama_available
     }

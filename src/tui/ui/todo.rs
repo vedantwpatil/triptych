@@ -37,6 +37,7 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
         .split(f.area());
 
+    app.list_rows = usize::from(chunks[0].height.saturating_sub(2));
     let visual = app.visual_range();
     let items: Vec<ListItem> = app
         .tasks
@@ -127,9 +128,9 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
     }
 
     let title = if app.visual_anchor.is_some() {
-        "-- VISUAL -- (j/k: extend, d/x: delete, v/Esc: cancel)"
+        "-- VISUAL -- (j/k/5j/gg/G: extend, d/x: delete, v/Esc: cancel)"
     } else {
-        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, k/j: move, ENTER: toggle)"
+        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, j/k: move, /: search, ENTER: toggle)"
     };
     let tasks_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -160,6 +161,7 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
                 y: chunks[1].y + 1,
             });
         }
+        InputMode::Search => super::render_search_box(f, &app.input_buffer, chunks[1]),
         InputMode::Normal => {
             if let Some((msg, instant)) = &app.status_message
                 && instant.elapsed() < std::time::Duration::from_secs(3)

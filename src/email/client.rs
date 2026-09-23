@@ -180,9 +180,15 @@ impl ImapMailSource {
 
         let mut result = Vec::new();
 
-        if !uids.is_empty() {
-            let mut sorted: Vec<u32> = uids.into_iter().collect();
-            sorted.sort_unstable();
+        let mut sorted: Vec<u32> = uids.into_iter().collect();
+        sorted.sort_unstable();
+        // RFC 3501: `UID n:*` always includes the highest UID, even when that is below `n`, so a
+        // mailbox with nothing new still answers with its last message. Drop what we already have.
+        if let Some(seen) = since_uid {
+            sorted.retain(|&uid| uid > seen);
+        }
+
+        if !sorted.is_empty() {
             // `since_uid == Some(0)` means "no messages seen yet" (a fresh cursor row, or an
             // epoch change that lands on last_uid=0) — just as much a first sync as `None`.
             // Only checking `is_none()` here let a stale/edge-case last_uid=0 cursor bypass the

@@ -5,8 +5,11 @@
 //! main.rs keeps process bootstrapping (terminal setup, daemon wiring)
 //! separate from "what does this key do in this mode".
 
-use crate::app::{App, BlockFormField, BlockFormState, CalendarInputMode, InputMode, ViewMode};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::app::{
+    App, BlockFormField, BlockFormState, CalendarInputMode, Feed, InputMode, Motion, MotionKey,
+    ViewMode, list_target,
+};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Whether the event loop should keep running or exit after this key.
 pub enum KeyOutcome {
@@ -18,25 +21,105 @@ fn set_error(app: &mut App, e: impl std::fmt::Display) {
     app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
 }
 
+/// Lines the email popup can scroll through; `G` lands at the end and the render clamps to the real one.
+const DETAIL_SCROLL_RANGE: usize = 1 << 16;
+
 pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && key.code == KeyCode::Char('c') {
+        return KeyOutcome::Quit;
+    }
     match app.input_mode {
-        InputMode::Normal => match app.view_mode {
-            ViewMode::TodoList => handle_todo_key(app, key.code).await,
-            ViewMode::Calendar => handle_calendar_key(app, key.code).await,
-            ViewMode::Email => handle_email_key(app, key.code).await,
-        },
-        InputMode::Editing => {
+        InputMode::Normal => {
+            if handle_motion(app, key) {
+                return KeyOutcome::Continue;
+            }
+            // A Ctrl chord that is not a motion does nothing, rather than acting as its bare letter.
+            if ctrl {
+                return KeyOutcome::Continue;
+            }
+            match app.view_mode {
+                ViewMode::TodoList => handle_todo_key(app, key.code).await,
+                ViewMode::Calendar => handle_calendar_key(app, key.code).await,
+                ViewMode::Email => handle_email_key(app, key.code).await,
+            }
+        }
+        InputMode::Editing if !ctrl => {
             handle_editing_key(app, key.code);
             KeyOutcome::Continue
+        }
+        InputMode::Search if !ctrl => {
+            handle_search_key(app, key.code);
+            KeyOutcome::Continue
+        }
+        InputMode::Editing | InputMode::Search => KeyOutcome::Continue,
+    }
+}
+
+const fn motion_key(key: KeyEvent) -> MotionKey {
+    match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => MotionKey::Ctrl(c),
+        KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::ALT) => MotionKey::Other,
+        KeyCode::Char(c) => MotionKey::Char(c),
+        KeyCode::Up => MotionKey::Up,
+        KeyCode::Down => MotionKey::Down,
+        KeyCode::Left => MotionKey::Left,
+        KeyCode::Right => MotionKey::Right,
+        KeyCode::Esc => MotionKey::Esc,
+        _ => MotionKey::Other,
+    }
+}
+
+/// Views whose cursor moves with vim motions: both lists, the email popup and the calendar grid (but
+/// not while one of its forms is open).
+fn motions_active(app: &App) -> bool {
+    app.view_mode != ViewMode::Calendar || app.calendar_input_mode == CalendarInputMode::Navigate
+}
+
+/// Runs the key through the count/`g` parser and applies a finished motion to the current view.
+/// Returns true when the key was used up (a motion, or part or cancellation of a prefix).
+fn handle_motion(app: &mut App, key: KeyEvent) -> bool {
+    if !motions_active(app) {
+        app.key_prefix.clear();
+        return false;
+    }
+    match app.key_prefix.feed(motion_key(key)) {
+        Feed::Other => false,
+        Feed::Consumed => true,
+        Feed::Motion { motion, count } => {
+            apply_motion(app, motion, count);
+            true
+        }
+    }
+}
+
+fn apply_motion(app: &mut App, motion: Motion, count: Option<usize>) {
+    let rows = app.list_rows;
+    match app.view_mode {
+        ViewMode::TodoList => {
+            if let Some(row) = list_target(app.selected, app.tasks.len(), rows, motion, count) {
+                app.selected = row;
+            }
+        }
+        ViewMode::Calendar => app.calendar_apply_motion(motion, count),
+        ViewMode::Email if app.email_detail_open => {
+            let from = usize::from(app.email_detail_scroll);
+            if let Some(line) = list_target(from, DETAIL_SCROLL_RANGE, rows, motion, count) {
+                app.email_detail_scroll = u16::try_from(line).unwrap_or(u16::MAX);
+            }
+        }
+        ViewMode::Email => {
+            if let Some(row) = list_target(app.selected_email, app.emails.len(), rows, motion, count) {
+                app.selected_email = row;
+            }
         }
     }
 }
 
 async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
-    // Any key that is not a motion, a delete or a `v` toggle ends visual selection; Esc only ends it.
-    if app.visual_anchor.is_some()
-        && !matches!(code, KeyCode::Char('j' | 'k' | 'v' | 'V' | 'd' | 'D' | 'x'))
-    {
+    // Motions never reach here (see `handle_motion`), so any other key but a delete or a `v` toggle
+    // ends visual selection; Esc only ends it.
+    if app.visual_anchor.is_some() && !matches!(code, KeyCode::Char('v' | 'V' | 'd' | 'D' | 'x')) {
         app.visual_anchor = None;
         if code == KeyCode::Esc {
             return KeyOutcome::Continue;
@@ -68,12 +151,9 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
-        KeyCode::Char('k') => {
-            app.selected = app.selected.saturating_sub(1);
-        }
-        KeyCode::Char('j') if !app.tasks.is_empty() && app.selected < app.tasks.len() - 1 => {
-            app.selected += 1;
-        }
+        KeyCode::Char('/') => app.start_search(),
+        KeyCode::Char('n') => app.search_step(true),
+        KeyCode::Char('N') => app.search_step(false),
         _ => {}
     }
     KeyOutcome::Continue
@@ -102,10 +182,6 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
                 app.toggle_to_todo().await;
             }
         }
-        KeyCode::Char('j') | KeyCode::Down => app.calendar_move_down(),
-        KeyCode::Char('k') | KeyCode::Up => app.calendar_move_up(),
-        KeyCode::Char('h') | KeyCode::Left => app.calendar_move_left(),
-        KeyCode::Char('l') | KeyCode::Right => app.calendar_move_right(),
         KeyCode::Char('H') => app.prev_week().await,
         KeyCode::Char('L') => app.next_week().await,
         KeyCode::Char('n') => {
@@ -286,14 +362,9 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         }
         KeyCode::Tab => app.cycle_view_next().await,
         KeyCode::BackTab => app.cycle_view_prev().await,
-        KeyCode::Char('j') | KeyCode::Down
-            if !app.emails.is_empty() && app.selected_email < app.emails.len() - 1 =>
-        {
-            app.selected_email += 1;
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.selected_email = app.selected_email.saturating_sub(1);
-        }
+        KeyCode::Char('/') => app.start_search(),
+        KeyCode::Char('n') => app.search_step(true),
+        KeyCode::Char('N') => app.search_step(false),
         KeyCode::Char('v') => {
             if let Err(e) = app.open_selected_email().await {
                 set_error(app, e);
@@ -301,6 +372,12 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         }
         KeyCode::Enter => {
             app.convert_selected_email_to_task();
+        }
+        KeyCode::Char('s') => app.start_email_sync(true),
+        KeyCode::Char('o') => {
+            if let Err(e) = app.toggle_email_sort().await {
+                app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
+            }
         }
         KeyCode::Char('r') => {
             if let Err(e) = app.mark_selected_email_read().await {
@@ -312,19 +389,12 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     KeyOutcome::Continue
 }
 
-/// Keys while the email detail popup (`v`) is open: scroll the body or close
-/// it. Doesn't fall through to the list keys below it, same as how
+/// Keys while the email detail popup (`v`) is open: close it (scrolling is a motion, see
+/// `handle_motion`). Doesn't fall through to the list keys below it, same as how
 /// `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
 const fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
-    match code {
-        KeyCode::Esc | KeyCode::Char('v') => app.close_email_detail(),
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.email_detail_scroll = app.email_detail_scroll.saturating_add(1);
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.email_detail_scroll = app.email_detail_scroll.saturating_sub(1);
-        }
-        _ => {}
+    if matches!(code, KeyCode::Esc | KeyCode::Char('v')) {
+        app.close_email_detail();
     }
     KeyOutcome::Continue
 }
@@ -346,6 +416,20 @@ fn handle_editing_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+}
+
+fn handle_search_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Enter => app.commit_search(),
+        KeyCode::Esc => app.cancel_search(),
+        KeyCode::Char(c) => app.input_buffer.push(c),
+        // Backspace on an empty prompt leaves it, as in vim.
+        KeyCode::Backspace if app.input_buffer.is_empty() => app.cancel_search(),
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
         }
         _ => {}
     }

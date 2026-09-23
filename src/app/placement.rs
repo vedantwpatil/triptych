@@ -6,7 +6,10 @@ use super::{
     App,
     model::{CalendarInputMode, ScheduleBlock, TASK_COLUMNS, Task},
     tasks::classify_task,
-    time::{day_end, day_of_week_i32, day_start, parse_time_string, resolve_local_datetime},
+    time::{
+        day_end, day_of_week_i32, day_start, parse_time_string, resolve_local_datetime,
+        span_covers_hour,
+    },
 };
 
 impl App {
@@ -165,15 +168,24 @@ impl App {
             .fetch_all(&self.db_pool)
             .await?;
 
-        let occupied_slots: Vec<(NaiveDate, u32)> = scheduled_tasks
+        let occupied_spans: Vec<(NaiveDate, NaiveTime, i32)> = scheduled_tasks
             .iter()
             .filter_map(|t| {
                 t.scheduled_at.map(|dt| {
                     let local = dt.with_timezone(&chrono::Local);
-                    (local.date_naive(), local.time().hour())
+                    (
+                        local.date_naive(),
+                        local.time(),
+                        t.duration_minutes.unwrap_or(0),
+                    )
                 })
             })
             .collect();
+        let occupied = |day: NaiveDate, hour: u32| {
+            occupied_spans
+                .iter()
+                .any(|&(d, start, minutes)| d == day && span_covers_hour(start, minutes, hour))
+        };
 
         // Strategy 1: Find a matching block type with a free hour
         for day in &days {
@@ -200,7 +212,7 @@ impl App {
                         continue;
                     }
                     // Check if slot is free
-                    if !occupied_slots.contains(&(*day, hour)) {
+                    if !occupied(*day, hour) {
                         // `hour` is always in-range for a time-of-day, so this is never `None`.
                         let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap_or(NaiveTime::MIN);
                         return Ok(Some(resolve_local_datetime(day.and_time(time))));
@@ -244,7 +256,7 @@ impl App {
                 }
 
                 // Check if slot is free
-                if !occupied_slots.contains(&(*day, hour)) {
+                if !occupied(*day, hour) {
                     return Ok(Some(resolve_local_datetime(day.and_time(time))));
                 }
             }

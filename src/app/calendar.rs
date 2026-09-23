@@ -6,12 +6,16 @@ use std::sync::Arc;
 use super::{
     App,
     model::{CalendarInputMode, ScheduleBlock, TASK_COLUMNS, Task},
+    motion::{Motion, grid_target},
     time::{
-        allocation_covers_hour, day_end, day_of_week_i32, day_start, parse_time_string,
-        resolve_local_datetime,
+        day_end, day_of_week_i32, day_start, parse_time_string, resolve_local_datetime,
+        span_covers_hour,
     },
 };
 use crate::nlp::ParsedItem;
+
+/// Hour rows in the calendar grid (07:00 through 22:00).
+const CALENDAR_ROWS: usize = 16;
 
 /// A task occupying a calendar cell, resolved from the current week's cached data.
 #[derive(Debug)]
@@ -20,6 +24,19 @@ pub struct CellTask {
     /// True if this is a deadline-driven allocation rather than a manually
     /// scheduled task (see `reallocate_all_tasks`).
     pub is_allocation: bool,
+}
+
+/// One timed entry on the calendar grid.
+///
+/// `(date, local start, task id, description, minutes, priority)`. Manually scheduled tasks and
+/// deadline allocations share this shape, so one hour-overlap rule (`span_covers_hour`) places
+/// both.
+pub type CellEntry = (NaiveDate, NaiveTime, i64, String, i32, i32);
+
+/// Whether `entry` touches the hour cell `hour` on `day`.
+#[must_use]
+pub fn entry_in_cell(entry: &CellEntry, day: NaiveDate, hour: u32) -> bool {
+    entry.0 == day && span_covers_hour(entry.1, entry.4, hour)
 }
 
 /// Every task (manual + allocation) occupying a given day/hour, manual tasks
@@ -31,30 +48,24 @@ pub struct CellTask {
 /// `App::cycle_stack_next`/`cycle_stack_prev`).
 #[must_use]
 pub fn cell_tasks(
-    scheduled_tasks: &[(NaiveDate, NaiveTime, i64, String, i32)],
-    task_allocations: &[(NaiveDate, NaiveTime, i64, String, i32, i32)],
+    scheduled_tasks: &[CellEntry],
+    task_allocations: &[CellEntry],
     day: NaiveDate,
     hour: u32,
 ) -> Vec<CellTask> {
-    scheduled_tasks
-        .iter()
-        .filter(|(d, t, ..)| *d == day && t.hour() == hour)
-        .map(|(_, _, id, ..)| CellTask {
-            id: *id,
-            is_allocation: false,
-        })
-        .chain(
-            task_allocations
-                .iter()
-                .filter(|(d, start, _, _, minutes, _)| {
-                    *d == day && allocation_covers_hour(*start, *minutes, hour)
-                })
-                .map(|(_, _, id, ..)| CellTask {
-                    id: *id,
-                    is_allocation: true,
-                }),
-        )
-        .collect()
+    let hits = |entries: &[CellEntry], is_allocation: bool| {
+        entries
+            .iter()
+            .filter(|e| entry_in_cell(e, day, hour))
+            .map(move |e| CellTask {
+                id: e.2,
+                is_allocation,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut tasks = hits(scheduled_tasks, false);
+    tasks.extend(hits(task_allocations, true));
+    tasks
 }
 
 /// Outcome of a background deadline parse (see `App::submit_deadline_edit`).
@@ -93,7 +104,7 @@ impl App {
     async fn get_week_allocations_internal(
         &self,
         days: &[NaiveDate],
-    ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32, i32)>, sqlx::Error> {
+    ) -> Result<Vec<CellEntry>, sqlx::Error> {
         let start = days[0].to_string();
         let end = days[days.len() - 1].to_string();
 
@@ -147,7 +158,7 @@ impl App {
     async fn get_scheduled_tasks_internal(
         &self,
         days: &[NaiveDate],
-    ) -> Result<Vec<(NaiveDate, NaiveTime, i64, String, i32)>, sqlx::Error> {
+    ) -> Result<Vec<CellEntry>, sqlx::Error> {
         let start = resolve_local_datetime(day_start(days[0]));
         let end = resolve_local_datetime(day_end(days[days.len() - 1]));
 
@@ -170,6 +181,7 @@ impl App {
                         local.time(),
                         t.id,
                         t.description.clone(),
+                        t.duration_minutes.unwrap_or(0),
                         t.priority,
                     )
                 })
@@ -191,28 +203,16 @@ impl App {
         self.refresh_calendar_data().await;
     }
 
-    // Calendar navigation methods
-    pub const fn calendar_move_up(&mut self) {
-        self.selected_time_slot = self.selected_time_slot.saturating_sub(1);
-        self.stack_index = 0;
-    }
-
-    pub const fn calendar_move_down(&mut self) {
-        if self.selected_time_slot < 15 {
-            self.selected_time_slot += 1;
-        }
-        self.stack_index = 0;
-    }
-
-    pub const fn calendar_move_left(&mut self) {
-        self.selected_day = self.selected_day.saturating_sub(1);
-        self.stack_index = 0;
-    }
-
-    pub const fn calendar_move_right(&mut self) {
-        if self.selected_day < 6 {
-            self.selected_day += 1;
-        }
+    /// Applies a vim motion to the cell cursor (`5j`, `gg`, `0`, `$`, `Ctrl-d`), clamped to the grid.
+    pub fn calendar_apply_motion(&mut self, motion: Motion, count: Option<usize>) {
+        let (row, day) = grid_target(
+            (self.selected_time_slot, self.selected_day),
+            (CALENDAR_ROWS, 7),
+            motion,
+            count,
+        );
+        self.selected_time_slot = row;
+        self.selected_day = day;
         self.stack_index = 0;
     }
 

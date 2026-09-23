@@ -3,7 +3,7 @@
 use super::daemon::{self, DaemonRequest, DaemonResponse};
 use crate::app::App;
 use crate::cli::{Commands, EmailCommands, ScheduleCommands};
-use crate::email::{EmailConfig, ImapMailSource, MailSource, message, store};
+use crate::email::{EmailConfig, store, sync::sync_account};
 use crate::urgency;
 
 // One match arm per CLI subcommand - splitting it up would scatter each
@@ -246,75 +246,15 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
 
                 let mut any_failed = false;
                 for config in &configs {
-                    let cursor =
-                        store::get_sync_cursor(&app.db_pool, &config.account, &config.imap_folder)
-                            .await
-                            .map_err(|e| e.to_string())?;
-
-                    let source = ImapMailSource::new(config.clone());
-                    match source.fetch_new(cursor).await {
-                        Ok((uid_validity, raw_messages)) => {
-                            let epoch_changed = match (cursor, uid_validity) {
-                                // `c.uid_validity` was itself stored from a `u32`
-                                // (see `email/client.rs`), so this round-trip always fits.
-                                (Some(c), Some(current)) => {
-                                    u32::try_from(c.uid_validity).unwrap_or(0) != current
-                                }
-                                _ => false,
-                            };
-                            if epoch_changed {
+                    match sync_account(&app.db_pool, config).await {
+                        Ok(report) => {
+                            if report.epoch_changed {
                                 eprintln!(
                                     "  [{}] UIDVALIDITY changed; resyncing recent mail instead of resuming",
                                     config.account
                                 );
                             }
-
-                            let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
-
-                            let new_emails: Vec<_> = raw_messages
-                                .into_iter()
-                                .filter_map(|(uid, raw, header_only)| {
-                                    message::parse_raw(
-                                        &config.account,
-                                        uid,
-                                        &config.imap_folder,
-                                        &raw,
-                                        header_only,
-                                    )
-                                    .ok()
-                                })
-                                .collect();
-
-                            let count = new_emails.len();
-                            store::insert_new(&app.db_pool, &new_emails)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            // See sync/mail.rs's sync_mail: skip persisting a synthetic
-                            // `last_uid = 0` when the epoch changed but nothing came back,
-                            // so the next sync retries the properly-capped catch-up.
-                            if let Some(validity) = uid_validity
-                                && !(epoch_changed && fetched_max_uid.is_none())
-                            {
-                                let prior_uid = if epoch_changed {
-                                    0
-                                } else {
-                                    cursor.map_or(0, |c| c.last_uid)
-                                };
-                                let last_uid = fetched_max_uid
-                                    .map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
-                                store::set_sync_cursor(
-                                    &app.db_pool,
-                                    &config.account,
-                                    &config.imap_folder,
-                                    store::SyncCursor {
-                                        uid_validity: i64::from(validity),
-                                        last_uid,
-                                    },
-                                )
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            }
-                            println!("✓ [{}] Synced {} new email(s)", config.account, count);
+                            println!("✓ [{}] Synced {} new email(s)", config.account, report.new);
                         }
                         Err(e) => {
                             eprintln!("✗ [{}] Sync failed: {}", config.account, e);

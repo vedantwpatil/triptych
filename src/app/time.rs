@@ -1,6 +1,6 @@
 //! Local/UTC date and time helpers shared by the calendar and allocator.
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 
 /// Resolve a naive local wall-clock datetime to UTC without panicking on a DST transition.
 ///
@@ -41,19 +41,19 @@ pub(super) fn day_of_week_i32(day: NaiveDate) -> i32 {
     i32::try_from(day.weekday().num_days_from_monday()).unwrap_or(0)
 }
 
-/// Whether an allocation starting at `start` and lasting `minutes` covers the on-the-hour instant
-/// `hour:00`.
+/// Whether a span starting at `start` and lasting `minutes` overlaps the hour cell
+/// `[hour:00, hour+1:00)`.
 ///
-/// A multi-hour allocation (e.g. 90 minutes starting at 9:00) must show in every hour cell it
-/// spans, not just the one matching its exact start time. Shared with `tui/ui.rs`'s
-/// `cell_task_displays` so both apply this one rule rather than re-deriving it.
+/// A multi-hour task or allocation (180 minutes from 7:00, or 60 from 12:30) shows in every hour
+/// cell it touches, not just its start hour. A span of 0 minutes or less still occupies its
+/// start hour. Counted in minutes from midnight, so a span running past midnight never wraps back
+/// onto the morning. Shared by `cell_tasks`, `tui/ui/grid.rs`'s `cell_task_displays` and the
+/// auto-scheduler's free-slot check, so all three agree.
 #[must_use]
-pub fn allocation_covers_hour(start: NaiveTime, minutes: i32, hour: u32) -> bool {
-    let Some(slot) = NaiveTime::from_hms_opt(hour, 0, 0) else {
-        return false;
-    };
-    let end = start + Duration::minutes(i64::from(minutes));
-    start <= slot && slot < end
+pub fn span_covers_hour(start: NaiveTime, minutes: i32, hour: u32) -> bool {
+    let start = i64::from(start.num_seconds_from_midnight() / 60);
+    let slot = i64::from(hour) * 60;
+    start < slot + 60 && slot < start + i64::from(minutes.max(1))
 }
 
 #[must_use]

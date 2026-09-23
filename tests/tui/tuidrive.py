@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless pty driver for the Triptych TUI. Usage and design: docs/TUI_DRIVER.md.
 
-Library layer (used by tests/tui/tui_suite.py): Sandbox, Term, parse_keys.
+Library layer (used by tests/tui/tui_suite.py): Sandbox, Term, parse_keys (plus tests/tui/fakeimap.py for IMAP).
 CLI layer: `start` spawns a detached server that owns a pty + terminal emulator, so separate
 shell invocations (`send`, `screen`, `wait`, `db`, `cli`, `stop`) can drive one live TUI session.
 Every session runs against a throwaway sandbox dir; it never touches the real todo.db or socket.
@@ -27,6 +27,10 @@ import tempfile
 import termios
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fakeimap  # noqa: E402
+import fakeollama  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 VENV = ROOT / "target" / "tuidrive-venv"
@@ -94,6 +98,8 @@ class Sandbox:
         self.dir = HOME / name
         self.db_path = self.dir / "todo.db"
         self.sock_path = self.dir / "t.sock"
+        self.imap_dir = self.dir / "imap"
+        self.ollama_dir = self.dir / "ollama"
         self.bg: list[subprocess.Popen] = []
 
     @classmethod
@@ -112,7 +118,7 @@ class Sandbox:
         return (self.dir / "ctl.sock").exists() and request(self.name, {"op": "status"}, quiet=True) is not None
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_")) and k != "TRIPTYCH_OLLAMA_URL"}
         env.update(
             DATABASE_URL=f"sqlite:{self.db_path}",
             TRIPTYCH_SOCKET_PATH=str(self.sock_path),
@@ -120,11 +126,41 @@ class Sandbox:
             TRIPTYCH_EMAIL_ENABLED="false",
             TERM="xterm-256color",
         )
+        if (self.imap_dir / "port").exists():  # only ever the local fake server, never an inherited real account
+            env.update(fakeimap.env_for(self.imap_dir))
+        if (self.ollama_dir / "port").exists():  # only ever the local fake; otherwise the real default URL
+            env.update(fakeollama.env_for(self.ollama_dir))
         for k, v in (extra or {}).items():
             if k in PROTECTED_ENV:
                 raise SystemExit(f"refusing to override {k}: sandbox isolation")
             env[k] = v
         return env
+
+    def imap(self) -> fakeimap.Mailbox:
+        """Start a local TLS IMAP server for this sandbox; `env()` then enables email sync against it."""
+        proc = fakeimap.start(self.imap_dir)
+        self.bg.append(proc)
+        (self.dir / "bg-imap.pid").write_text(str(proc.pid))
+        return fakeimap.Mailbox(self.imap_dir)
+
+    def ollama(self, down: bool = False) -> fakeollama.Ollama:
+        """Point the binary's Ollama URL at a local fake (tests/tui/fakeollama.py), or with `down` at a
+        port nothing listens on. Call before starting the TUI or a CLI command."""
+        self.ollama_dir.mkdir(parents=True, exist_ok=True)
+        if down:
+            (self.ollama_dir / "port").write_text(str(fakeollama.free_port()))
+        else:
+            proc = fakeollama.start(self.ollama_dir)
+            self.bg.append(proc)
+            (self.dir / "bg-ollama.pid").write_text(str(proc.pid))
+        return fakeollama.Ollama(self.ollama_dir)
+
+    def imap_log(self) -> str:
+        """Every IMAP command the binary sent (passwords masked)."""
+        try:
+            return (self.imap_dir / "commands.log").read_text()
+        except OSError:
+            return ""
 
     def cli(self, *args: str, env: dict[str, str] | None = None, timeout: float = 60) -> CliResult:
         p = subprocess.run([str(BIN), *args], cwd=self.dir, env=self.env(env), capture_output=True, text=True, timeout=timeout)
@@ -500,6 +536,12 @@ def cmd_start(a: argparse.Namespace) -> int:
     extra = dict(kv.split("=", 1) for kv in a.env)
     sb.env(extra)  # validates protected keys
     sb.migrate()
+    if a.imap is not None:
+        sb.imap().add(count=a.imap)
+        print(f"imap: fake TLS server on 127.0.0.1:{(sb.imap_dir / 'port').read_text()} with {a.imap} message(s)")
+    if a.ollama:
+        sb.ollama()
+        print(f"ollama: fake server on 127.0.0.1:{(sb.ollama_dir / 'port').read_text()}")
     for pre in a.pre:
         r = sb.cli(*shlex.split(pre), env=extra)
         print(f"pre: {pre!r} rc={r.rc} {r.clean_out.strip()}")
@@ -531,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--seed", help="SQL file applied to the fresh DB before the TUI launches")
     st.add_argument("--pre", action="append", default=[], help="triptych CLI args to run first, e.g. --pre 'add \"x !!\"'")
     st.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for the TUI (not DB/socket paths)")
+    st.add_argument("--ollama", action="store_true", help="start a fake Ollama (email summaries answer 'Fake summary of: <subject>')")
+    st.add_argument("--imap", type=int, metavar="N", help="start a local fake IMAP server holding N messages; email sync uses it")
     st.add_argument("--build", action="store_true", help="cargo build first")
     st.add_argument("--compact", action="store_true")
 
@@ -558,6 +602,21 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--bg", action="store_true", help="run detached (for `daemon`)")
     c.add_argument("--raw", action="store_true", help="keep migration/NLP banner noise")
     c.add_argument("args", nargs=argparse.REMAINDER)
+    im = sub.add_parser("imap", help="control the session's fake IMAP server (start the session with --imap N)")
+    ims = im.add_subparsers(dest="imap_cmd", required=True)
+    ia = ims.add_parser("add", help="append messages")
+    ia.add_argument("subject", nargs="?", default="")
+    ia.add_argument("-n", type=int, default=1, help="how many")
+    ia.add_argument("--big", action="store_true", help="pad past 1 MiB so the client fetches headers only")
+    ir = ims.add_parser("reset", help="new UIDVALIDITY; messages renumbered from 1")
+    ir.add_argument("uidvalidity", type=int)
+    ims.add_parser("log", help="IMAP commands the binary sent")
+    ims.add_parser("info", help="port, UIDVALIDITY, message count")
+    ol = sub.add_parser("ollama", help="control the session's fake Ollama (start the session with --ollama)")
+    ols = ol.add_subparsers(dest="ollama_cmd", required=True)
+    om = ols.add_parser("mode", help="ok, or error to make generate fail")
+    om.add_argument("mode", choices=["ok", "error"])
+    ols.add_parser("log", help="requests the binary sent")
     rs = sub.add_parser("resize")
     rs.add_argument("rows", type=int)
     rs.add_argument("cols", type=int)
@@ -607,6 +666,31 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no session {name!r} (tuidrive -s {name} start)")
     if a.cmd == "path":
         print(sb.dir)
+        return 0
+    if a.cmd == "imap":
+        if not (sb.imap_dir / "port").exists():
+            raise SystemExit(f"session {name!r} has no fake IMAP server (start it with --imap N)")
+        mb = fakeimap.Mailbox(sb.imap_dir)
+        if a.imap_cmd == "add":
+            print("added uid(s):", *mb.add(a.subject, a.n, big=a.big))
+        elif a.imap_cmd == "reset":
+            mb.reset_uids(a.uidvalidity)
+            print(f"uidvalidity={a.uidvalidity}")
+        elif a.imap_cmd == "log":
+            print(sb.imap_log().rstrip())
+        else:
+            box = mb.load()
+            print(f"port={(sb.imap_dir / 'port').read_text()} uidvalidity={box['uidvalidity']} messages={len(box['messages'])}")
+        return 0
+    if a.cmd == "ollama":
+        if not (sb.ollama_dir / "port").exists():
+            raise SystemExit(f"session {name!r} has no fake Ollama (start it with --ollama)")
+        fo = fakeollama.Ollama(sb.ollama_dir)
+        if a.ollama_cmd == "mode":
+            fo.set_mode(a.mode)
+            print(f"mode={a.mode}")
+        else:
+            print("\n".join(f"{r['kind']:8} {r['path']}" for r in fo.requests()))
         return 0
     if a.cmd == "db":
         for row in sb.db(a.sql):

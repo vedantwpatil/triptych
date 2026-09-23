@@ -111,6 +111,20 @@ class Ctx:
             row.update(over)
             self.db(f"insert into email_messages({','.join(row)}) values ({','.join('?' * len(row))})", tuple(row.values()))
 
+    def imap(self):
+        """Local TLS IMAP server for this sandbox (tests/tui/fakeimap.py); the binary then syncs against it."""
+        return self.sb.imap()
+
+    def wait_db(self, sql: str, want: list, timeout: float = 15) -> bool:
+        """Poll `sql` until it returns `want` (background sync writes land asynchronously)."""
+        end = time.time() + timeout
+        while time.time() < end and self.db(sql) != want:
+            (self.t.pump if self.t else time.sleep)(0.3)
+        return self.eq(self.db(sql), want, sql)
+
+    def sync(self, **env) -> td.CliResult:
+        return self.cli("email", "sync", env=env or None)
+
     def cal(self) -> td.Term:
         self.t.press("c")
         self.see("Weekly Calendar")
@@ -1143,6 +1157,31 @@ def _(c: Ctx):
     c.check(a != b and a == d, f"stack cycle did not alternate: {a!r} {b!r} {d!r}")
 
 
+@scenario("cal_long_task_spans")
+def _(c: Ctx):
+    monday = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    monday -= timedelta(days=monday.weekday())
+    c.cli("add", "long lab")
+    c.cli("add", "half past")
+    at = lambda h, m=0: (monday + timedelta(hours=h, minutes=m)).astimezone(timezone.utc).isoformat()
+    c.db("update tasks set scheduled_at=?, duration_minutes=180 where description='long lab'", (at(7),))
+    c.db("update tasks set scheduled_at=?, duration_minutes=60 where description='half past'", (at(12, 30),))
+    c.tui()
+    t = c.cal()
+    text = lambda: (t.cursor() or {}).get("text", "")
+    t.press("j", "j")
+    c.check("long lab" in text(), f"3h task not drawn in its third hour (Mon 09am): {text()!r}")
+    t.press("j")
+    c.check("long lab" not in text(), f"3h task drawn past its end (Mon 10am): {text()!r}")
+    t.press("j", "j")
+    c.check("half past" in text(), f"12:30 task not drawn in its start hour (Mon 12pm): {text()!r}")
+    t.press("j")
+    c.check("half past" in text(), f"12:30-13:30 task not drawn at Mon 01pm: {text()!r}")
+    t.press("k", "k", "k", "k", "u")
+    c.see("Task unscheduled", msg="u on the 3h task's second hour did not unschedule it")
+    c.check(c.tasks()[0]["scheduled_at"] is None, "long lab still scheduled after u on 08am")
+
+
 @scenario("cal_deadline_alloc_render")
 def _(c: Ctx):
     c.cli("schedule", "import", str(c.write("s.toml", WEEK)))
@@ -1221,6 +1260,7 @@ def _(c: Ctx):
 
 @scenario("email_detail_long_scroll")
 def _(c: Ctx):
+    c.sb.ollama()  # a body this long is summarized; keep that off the real Ollama
     c.seed_emails(1, body_text="\n".join(f"row {i}" for i in range(80)))
     t = c.tui()
     t.press("m", "v")
@@ -1256,8 +1296,10 @@ def _(c: Ctx):
 def _(c: Ctx):
     c.seed_emails(2, subject="Pay invoice tomorrow")
     t = c.tui()
-    t.press("m", "ENTER", "j", "ENTER")
+    t.press("m", "ENTER")
     c.see("Email converted to task")
+    t.press("g", "g", "ENTER")  # a converted email sinks in priority order, so the other one is now on top
+    c.wait_db("select count(*) from tasks", [(2,)])
     c.check("cache hit" not in t.text() and "»" not in t.text(), "NLP eprintln! text leaked onto the TUI screen")
 
 
@@ -1279,6 +1321,614 @@ def _(c: Ctx):
     c.check("Subject 0" in out and "Subject 1" in out and "(work)" in out and "ID:" in out, out)
     r = c.cli("email", "sync")
     c.check(r.rc != 0 and "not configured" in r.err, f"sync without config: rc={r.rc} {r.clean_err!r}")
+
+
+# ---------------------------------------------------------------- email IMAP sync (fake TLS server)
+
+@scenario("imap_sync_basic")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Quarterly report", sender="Bob Boss <bob@corp.example>")
+    mb.add(count=2)
+    r = c.sync()
+    c.check(r.rc == 0 and "Synced 3 new email(s)" in r.out, f"sync: rc={r.rc} {r.clean_out!r} {r.clean_err!r}")
+    rows = c.db("select uid, account, folder, from_addr, from_name, subject, is_read from email_messages order by uid")
+    c.eq([x[0] for x in rows], [1, 2, 3], "stored uids")
+    c.eq(rows[0][1:], ("default", "INBOX", "bob@corp.example", "Bob Boss", "Quarterly report", 0), "parsed fields of uid 1")
+    c.eq(c.db("select uid_validity, last_uid from email_sync_state"), [(1, 3)], "sync cursor")
+    log = c.sb.imap_log()
+    c.check("UID SEARCH ALL" in log and "(RFC822.SIZE)" in log and "LOGOUT" in log, f"protocol steps missing:\n{log}")
+    c.check("secret" not in log, "password leaked into the command log")
+    out = c.cli("email", "list").out
+    c.check("Quarterly report" in out and "Bob Boss" in out, f"email list lacks the synced mail: {out!r}")
+
+
+@scenario("imap_first_sync_cap")
+def _(c: Ctx):
+    c.imap().add(count=30)
+    r = c.sync()
+    c.check("Synced 25 new email(s)" in r.out, f"first sync should cap at 25: {r.clean_out!r}")
+    c.eq(c.db("select min(uid), max(uid), count(*) from email_messages"), [(6, 30, 25)], "newest 25 kept")
+    c.eq(c.db("select last_uid from email_sync_state"), [(30,)], "cursor at the newest uid")
+
+
+@scenario("imap_incremental")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add(count=3)
+    c.sync()
+    mb.add(count=2)
+    r = c.sync()
+    c.check("Synced 2 new email(s)" in r.out, f"incremental sync: {r.clean_out!r}")
+    c.check("UID SEARCH UID 4:*" in c.sb.imap_log(), "second sync did not resume from the cursor")
+    c.eq(c.db("select uid from email_messages order by uid"), [(i,) for i in range(1, 6)], "uids after two syncs")
+    c.eq(c.db("select last_uid from email_sync_state"), [(5,)], "cursor after incremental sync")
+
+
+@scenario("imap_idle_sync")
+def _(c: Ctx):
+    c.imap().add(count=3)
+    c.sync()
+    r = c.sync()
+    c.check("Synced 0 new email(s)" in r.out, f"nothing new, but reported {r.clean_out!r}")
+    c.eq(c.db("select count(*) from email_messages"), [(3,)], "rows after an idle sync")
+
+
+@scenario("imap_uidvalidity_reset")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add(count=3)
+    c.sync()
+    mb.reset_uids(7)
+    mb.add("After rebuild", count=2)
+    r = c.sync()
+    c.check("UIDVALIDITY changed" in r.err, f"no epoch-change notice: {r.clean_err!r}")
+    c.check(r.rc == 0 and "Synced" in r.out, f"sync after epoch change: rc={r.rc} {r.clean_out!r}")
+    c.eq(c.db("select uid_validity, last_uid from email_sync_state"), [(7, 5)], "cursor re-based on the new epoch")
+    c.check(c.db("select count(*) from email_messages where subject like 'After rebuild%'") == [(2,)], "post-rebuild mail missing")
+
+
+@scenario("imap_large_header_only")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Small note")
+    mb.add("Huge attachment", big=True)
+    r = c.sync()
+    c.check("Synced 2 new email(s)" in r.out, f"sync: {r.clean_out!r}")
+    log = c.sb.imap_log()
+    c.check("UID FETCH 2 RFC822.HEADER" in log and "UID FETCH 1 RFC822\n" in log, f"small/large fetch split wrong:\n{log}")
+    big = c.db("select snippet, body_text from email_messages where subject = 'Huge attachment'")
+    c.check(big and "too large" in (big[0][0] or "") and big[0][1] is None, f"oversized row: {big}")
+    c.check(c.db("select body_text from email_messages where subject = 'Small note'")[0][0], "small mail lost its body")
+
+
+@scenario("imap_bad_login")
+def _(c: Ctx):
+    c.imap().add(count=2)
+    r = c.sync(IMAP_PASSWORD="wrong")
+    c.check(r.rc == 1 and "Sync failed" in r.err and "login" in r.err.lower(), f"bad password: rc={r.rc} {r.clean_err!r}")
+    c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows after a failed login")
+    c.eq(c.db("select count(*) from email_sync_state"), [(0,)], "cursor written after a failed login")
+
+
+@scenario("imap_untrusted_cert")
+def _(c: Ctx):
+    c.imap().add(count=1)
+    bogus = c.write("other-ca.pem", (c.sb.imap_dir / "ca.pem").read_text().replace("A", "B", 40))
+    r = c.sync(SSL_CERT_FILE=str(bogus))
+    c.check(r.rc == 1 and "Sync failed" in r.err, f"untrusted CA must fail the sync: rc={r.rc} {r.clean_err!r}")
+    c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows stored over an unverified connection")
+
+
+@scenario("imap_no_server")
+def _(c: Ctx):
+    c.imap()
+    c.sb.stop_bg()  # port stays in the env, nothing listens on it any more
+    r = c.sync()
+    c.check(r.rc == 1 and "Sync failed" in r.err and "connect" in r.err.lower(), f"refused connection: rc={r.rc} {r.clean_err!r}")
+
+
+@scenario("imap_multi_account")
+def _(c: Ctx):
+    c.imap().add(count=2)
+    port = c.sb.imap_dir.joinpath("port").read_text()
+    env = {"IMAP_ACCOUNTS": "work,home"}
+    for label in ("WORK", "HOME"):
+        env.update({f"IMAP_SERVER_{label}": "localhost", f"IMAP_PORT_{label}": port, f"IMAP_USERNAME_{label}": "tester",
+                    f"IMAP_PASSWORD_{label}": "secret"})
+    r = c.sync(**env)
+    c.check(r.rc == 0 and "[work] Synced 2" in r.out and "[home] Synced 2" in r.out, f"multi-account sync: {r.clean_out!r} {r.clean_err!r}")
+    c.eq(c.db("select account, count(*) from email_messages group by account order by account"), [("home", 2), ("work", 2)], "rows per account")
+
+
+@scenario("imap_tui_poll_on_start")
+def _(c: Ctx):
+    c.imap().add("Polled at startup", count=2)
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(2,)])
+    t.press("m")
+    c.see("Polled at startup 1", 5, msg="synced mail not listed in the Email view")
+
+
+@scenario("imap_tui_view_sync")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Already there")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    mb.add("Arrived later")
+    t.press("m")  # entering the view spawns a sync
+    c.wait_db("select count(*) from email_messages", [(2,)])
+    c.see("Arrived later", 5, msg="synced mail missing from the Email view after the sync finished")
+    t.press("j", "ENTER")
+    c.see("Email converted to task")
+    c.check(any("arrived" in d.lower() for d in c.descs()), f"convert-to-task on synced mail: {c.descs()}")
+
+
+@scenario("imap_tui_live_refresh")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Already there")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Already there")
+    mb.add("Arrived later")
+    t.press("ESC", "m")  # re-entry spawns the sync; the list is drawn before it finishes
+    c.wait_db("select count(*) from email_messages", [(2,)])
+    c.see("Arrived later", 5, msg="new mail stays hidden until the view is re-entered")
+    t.press("j")  # cursor on the older message must survive a refresh that inserts newer mail above it
+    mb.add("Newest of all", age_minutes=-30)
+    t.press("ESC", "m")
+    c.see("Newest of all", 8)
+    c.check("> " in t.text().split("Arrived later")[0].splitlines()[-1], "cursor jumped off its message on refresh")
+
+
+@scenario("imap_tui_bad_login")
+def _(c: Ctx):
+    c.imap().add(count=1)
+    c.sb.env({"IMAP_PASSWORD": "wrong"})
+    t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"IMAP_PASSWORD": "wrong"}), 42, 130)
+    c.t = t
+    t.spawn()
+    c.check(t.wait_for("To-Do", 10), "TUI did not start with a rejected IMAP login")
+    t.press("m")
+    c.see("Email (")
+    t.pump(2.0)
+    c.check(t.alive(), "TUI died on a rejected IMAP login")
+    c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows stored despite bad login")
+    log = c.sb.imap_log()
+    c.check("LOGIN" in log and "SELECT" not in log, f"server should see LOGIN only:\n{log}")
+
+
+@scenario("email_s_sync")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("First mail")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("s: sync", msg="title does not advertise the s key")
+    t.pump(2.0)  # let the sync started by entering the view finish
+    mb.add("Second mail")
+    t.press("s")
+    c.see("Synced 1 new email(s)", 15, msg="s did not report the new mail")
+    c.see("Second mail", 5, msg="new mail missing from the list after s")
+    c.eq(c.db("select count(*) from email_messages"), [(2,)], "rows after s")
+    t.pump(3.2)  # let the status line expire
+    t.press("s")
+    c.see("All emails gathered", 15, msg="s with nothing new gave no all-gathered message")
+
+
+@scenario("email_s_not_configured")
+def _(c: Ctx):
+    t = c.tui()
+    t.press("m")
+    c.see("Email (")
+    t.press("s")
+    c.see("Email not configured", 3, msg="s without accounts gave no hint")
+    c.check(t.alive(), "TUI died on s without accounts")
+
+
+@scenario("email_s_bad_login")
+def _(c: Ctx):
+    c.imap().add(count=1)
+    t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"IMAP_PASSWORD": "wrong"}), 42, 130)
+    c.t = t
+    t.spawn()
+    c.check(t.wait_for("To-Do", 10), "TUI did not start with a rejected IMAP login")
+    t.press("m")
+    c.see("Email (")
+    t.pump(2.0)
+    t.press("s")
+    c.see("Sync failed", 15, msg="s hid a rejected login")
+    c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows stored despite bad login")
+
+
+def _seed_priority(c: Ctx) -> None:
+    """Newest first by date: lunch, urgent, assignment. By priority: urgent, assignment, lunch."""
+    now = datetime.now(timezone.utc)
+    for i, subject in enumerate(("Lunch plans", "URGENT server down", "Assignment 4 out")):
+        date = (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        c.seed_emails(1, uid=i + 1, message_id=f"<p{i}@x>", subject=subject, date_utc=date, snippet="")
+
+
+def _order(t: td.Term, *subjects: str) -> list[str]:
+    """`subjects` sorted by the screen row they appear on."""
+    text = t.text()
+    return sorted(subjects, key=lambda s: text.index(s) if s in text else 10**9)
+
+
+@scenario("email_priority_order")
+def _(c: Ctx):
+    _seed_priority(c)
+    t = c.tui()
+    t.press("m")
+    c.see("sorted by priority", msg="title does not name the sort")
+    names = ("Lunch plans", "URGENT server down", "Assignment 4 out")
+    c.eq(_order(t, *names), ["URGENT server down", "Assignment 4 out", "Lunch plans"], "priority order")
+    c.check("▲ URGENT" in t.text() and "△ Assignment" in t.text(), "badges missing")
+    c.check("▲ Lunch" not in t.text() and "△ Lunch" not in t.text(), "plain mail got a badge")
+    t.press("o")
+    c.see("sorted by date")
+    c.see("Sorted by date", 2, msg="no status after o")
+    c.eq(_order(t, *names), ["Lunch plans", "URGENT server down", "Assignment 4 out"], "date order")
+    t.press("o")
+    c.see("sorted by priority")
+
+
+@scenario("email_priority_stable")
+def _(c: Ctx):
+    _seed_priority(c)
+    t = c.tui()
+    t.press("m", "v")  # opens the top (urgent) message, marking it read
+    c.see("Esc/v: close")
+    t.press("ESC")
+    c.eq(c.db("select is_read from email_messages where subject like 'URGENT%'"), [(1,)], "not marked read")
+    names = ("Lunch plans", "URGENT server down", "Assignment 4 out")
+    c.eq(_order(t, *names), ["URGENT server down", "Assignment 4 out", "Lunch plans"], "reading reordered the list")
+    c.check("> " in t.text().split("URGENT server down")[0].splitlines()[-1], "cursor left the opened message")
+
+
+LONG_BODY = "The planning meeting covers the roadmap, staffing and budget for next quarter. " * 6
+
+
+@scenario("email_summary_shown")
+def _(c: Ctx):
+    ol = c.sb.ollama()
+    c.seed_emails(1, subject="Quarterly planning notes", body_text=LONG_BODY)
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Summary: Fake summary of: Quarterly planning notes", 8, msg="summary missing from the popup")
+    c.eq(c.db("select summary from email_messages"), [("Fake summary of: Quarterly planning notes",)], "summary not cached in the DB")
+    t.press("ESC", "v")
+    c.see("Summary: Fake summary of:", 2, msg="cached summary missing on reopen")
+    t.pump(0.5)
+    c.eq(len(ol.summary_requests()), 1, "model asked more than once for one email")
+
+
+@scenario("email_summary_cached_in_db")
+def _(c: Ctx):
+    ol = c.sb.ollama()
+    c.seed_emails(1, subject="Already summarized", body_text=LONG_BODY, summary="Stored earlier.")
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Summary: Stored earlier.", 3, msg="stored summary not shown")
+    t.pump(0.5)
+    c.eq(len(ol.summary_requests()), 0, "model asked despite a stored summary")
+
+
+@scenario("email_summary_short_body")
+def _(c: Ctx):
+    ol = c.sb.ollama()
+    c.seed_emails(1)
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Esc/v: close")
+    t.pump(0.6)
+    c.check(not t.has("Summary"), "short mail got a summary line")
+    c.eq(len(ol.summary_requests()), 0, "model asked for a short mail")
+
+
+@scenario("email_summary_ollama_down")
+def _(c: Ctx):
+    c.sb.ollama(down=True)
+    c.seed_emails(1, subject="Long one", body_text=LONG_BODY)
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Summary unavailable: Ollama is not running", 8, msg="no reason shown when Ollama is down")
+    c.check(t.alive() and t.has("The planning meeting"), "popup or body broke when the summary failed")
+    c.eq(c.db("select summary from email_messages"), [(None,)], "failure was cached as a summary")
+
+
+@scenario("email_summary_retry")
+def _(c: Ctx):
+    ol = c.sb.ollama()
+    ol.set_mode("error")
+    c.seed_emails(1, subject="Retry me", body_text=LONG_BODY)
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Summary unavailable: request failed", 8, msg="server error not reported")
+    ol.set_mode("ok")
+    t.press("ESC", "v")
+    c.see("Summary: Fake summary of: Retry me", 8, msg="reopening did not retry the failed summary")
+
+
+# ---------------------------------------------------------------- vim motions
+
+def _seed_tasks(c: Ctx, *descs: str) -> None:
+    """Inserted directly (no NLP), so descriptions stay exactly as given."""
+    for i, d in enumerate(descs):
+        c.db("insert into tasks(description, completed, item_order, priority) values (?, 0, ?, 1)", (d, i))
+
+
+def _numbered(c: Ctx, n: int) -> None:
+    _seed_tasks(c, *(f"task{i:02d}" for i in range(1, n + 1)))
+
+
+def _cur_line(t: td.Term) -> str:
+    """The todo row under the cursor (the one with the `> ` marker)."""
+    return next((l for l in t.lines() if re.search(r">\s\[", l)), "")
+
+
+def _cur(t: td.Term) -> str:
+    """Name (`taskNN`) of the todo row under the cursor."""
+    return m.group(0) if (m := re.search(r"task\d+", _cur_line(t))) else _cur_line(t).strip()
+
+
+def _cur_email(t: td.Term) -> str:
+    """Subject (`Subject N`) of the email row under the cursor."""
+    line = next((l for l in t.lines() if re.search(r">\s.*Subject \d", l)), "")
+    return m.group(0) if (m := re.search(r"Subject \d+", line)) else line.strip()
+
+
+@scenario("vim_todo_count")
+def _(c: Ctx):
+    _numbered(c, 12)
+    t = c.tui()
+    c.eq(_cur(t), "task01", "start")
+    for keys, want in ((["5", "j"], "task06"), (["2", "k"], "task04"), (["5", "0", "j"], "task12"), (["3", "k"], "task09"), (["j"], "task10")):
+        t.press(*keys)
+        c.eq(_cur(t), want, f"after {keys}")
+
+
+@scenario("vim_todo_top_bottom")
+def _(c: Ctx):
+    _numbered(c, 12)
+    t = c.tui()
+    for keys, want in (
+        (["G"], "task12"), (["g", "g"], "task01"), (["4", "G"], "task04"), (["3", "g", "g"], "task03"),
+        (["9", "9", "G"], "task12"), (["G", "g", "g"], "task01"),
+    ):
+        t.press(*keys)
+        c.eq(_cur(t), want, f"after {keys}")
+
+
+@scenario("vim_todo_half_page")
+def _(c: Ctx):
+    _numbered(c, 40)
+    t = c.tui(rows=16)  # 9 visible rows: half page is 4
+    for keys, want in ((["C-d"], "task05"), (["C-d"], "task09"), (["C-u"], "task05"), (["C-u", "C-u", "C-u"], "task01"), (["G", "C-u"], "task36")):
+        t.press(*keys)
+        c.eq(_cur(t), want, f"after {keys}")
+
+
+@scenario("vim_todo_arrows")
+def _(c: Ctx):
+    _numbered(c, 8)
+    t = c.tui()
+    t.press("DOWN", "DOWN")
+    c.eq(_cur(t), "task03", "Down moves the todo cursor")
+    t.press("UP")
+    c.eq(_cur(t), "task02", "Up moves the todo cursor")
+    t.press("3", "DOWN")
+    c.eq(_cur(t), "task05", "a count applies to arrows")
+
+
+@scenario("vim_visual_count")
+def _(c: Ctx):
+    _numbered(c, 8)
+    t = c.tui()
+    t.press("v", "3", "j")
+    c.see("VISUAL", msg="a counted motion ended visual mode")
+    c.eq(_cur(t), "task04", "counted j in visual")
+    t.press("g", "g")
+    c.see("VISUAL", msg="gg ended visual mode")
+    c.eq(_cur(t), "task01", "gg in visual")
+    t.press("d")
+    c.eq(len(c.descs()), 7, "a one-row selection must delete one task")
+    c.check("task01" not in c.descs(), "d did not delete the cursor row")
+    t.press("v", "G", "d")
+    c.eq(c.descs(), [], "vG then d did not delete to the end")
+
+
+@scenario("vim_prefix_swallows_keys")
+def _(c: Ctx):
+    _numbered(c, 5)
+    t = c.tui()
+    t.press("3", "d")
+    c.eq(len(c.descs()), 5, "3d must not delete")
+    t.press("g", "x")
+    c.eq(len(c.descs()), 5, "gx must not delete")
+    t.press("4", "ESC", "j")
+    c.eq(_cur(t), "task02", "Esc did not cancel the count")
+    t.press("2", "x")
+    c.eq(len(c.descs()), 5, "the x right after a count is swallowed, not run")
+    t.press("x")
+    c.eq(len(c.descs()), 4, "x with no prefix must delete")
+
+
+@scenario("vim_ctrl_chords")
+def _(c: Ctx):
+    _numbered(c, 3)
+    t = c.tui()
+    t.press("C-x", "C-a", "C-q")
+    c.eq((_cur(t), len(c.descs())), ("task01", 3), "unbound Ctrl chords must do nothing (not q/a/x)")
+    t.press("a", "C-d", "C-u")
+    t.type("hi")
+    c.check(t.has("hi") and not t.has("dhi") and not t.has("uhi"), "Ctrl chord typed a letter into the add box")
+    t.press("ESC")
+    t.press("C-c")
+    c.check(t.wait_exit(5) is not None, "Ctrl-C did not quit")
+
+
+@scenario("vim_input_is_literal")
+def _(c: Ctx):
+    _numbered(c, 3)
+    t = c.tui()
+    t.press("a")
+    t.type("3gG 5j")
+    c.check(t.has("3gG 5j"), "typed motions were not literal inside the add box")
+    t.press("ENTER")
+    c.wait_db("select count(*) from tasks", [(4,)])
+    c.check(any("3gG" in d for d in c.descs()), f"typed text was mangled: {c.descs()}")
+
+
+@scenario("vim_search_jump")
+def _(c: Ctx):
+    _seed_tasks(c, "alpha plan", "beta milk", "gamma", "delta MILK run", "epsilon")
+    t = c.tui()
+    t.press("/")
+    c.see("Search (Enter", msg="/ did not open the prompt")
+    t.type("milk")
+    c.check(t.has("/milk"), "query not shown in the prompt")
+    t.press("ENTER")
+    c.see("Search (Enter", gone=True, msg="prompt still open after Enter")
+    c.check("beta milk" in _cur_line(t), "did not jump to the first match")
+    t.press("n")
+    c.check("delta MILK run" in _cur_line(t), "n did not reach the case-insensitive match")
+    t.press("n")
+    c.see("Search hit BOTTOM, continuing at TOP", 2, msg="wrap not reported")
+    c.check("beta milk" in _cur_line(t), "n did not wrap to the first match")
+    t.press("N")
+    c.see("Search hit TOP, continuing at BOTTOM", 2, msg="backward wrap not reported")
+    c.check("delta MILK run" in _cur_line(t), "N did not go back")
+
+
+@scenario("vim_search_misses")
+def _(c: Ctx):
+    _seed_tasks(c, "alpha", "beta", "gamma")
+    t = c.tui()
+    t.press("n")
+    c.see("No previous search", 2)
+    t.press("/")
+    t.type("zzz")
+    t.press("ENTER")
+    c.see("Pattern not found: zzz", 2)
+    c.check("alpha" in _cur_line(t), "a miss moved the cursor")
+    t.press("/")
+    t.type("bet")
+    t.press("ENTER")
+    c.check("beta" in _cur_line(t), "search after a miss did not work")
+    t.press("g", "g", "/", "ENTER")
+    c.check("beta" in _cur_line(t), "an empty search did not repeat the last query")
+
+
+@scenario("vim_search_cancel")
+def _(c: Ctx):
+    _seed_tasks(c, "alpha", "beta", "gamma")
+    t = c.tui()
+    t.press("/")
+    t.type("gam")
+    t.press("ESC")
+    c.see("Search (Enter", gone=True, msg="Esc left the prompt open")
+    c.check("alpha" in _cur_line(t), "cancelled search moved the cursor")
+    t.press("/", "x", "BS", "BS")
+    c.see("Search (Enter", gone=True, msg="Backspace on an empty prompt did not leave it")
+    t.press("/")
+    t.type("j3G")
+    c.check(t.has("/j3G"), "prompt did not take motion keys literally")
+    t.press("ESC", "d")
+    c.eq(len(c.descs()), 2, "keys after a cancelled search act normally again")
+
+
+@scenario("vim_cal_motions")
+def _(c: Ctx):
+    t = c.tui()
+    c.cal()
+    for keys, want in (
+        (["3", "j"], "Mon 10am"), (["g", "g"], "Mon 07am"), (["G"], "Mon 10pm"), (["$"], "Sun 10pm"), (["0"], "Mon 10pm"),
+        (["2", "l"], "Wed 10pm"), (["5", "g", "g"], "Wed 11am"), (["C-d"], "Wed 07pm"), (["C-u"], "Wed 11am"),
+        (["4", "h"], "Mon 11am"), (["4", "G"], "Mon 10am"),
+    ):
+        t.press(*keys)
+        c.eq(c.cursor(), want, f"after {keys}")
+
+
+@scenario("vim_cal_input_literal")
+def _(c: Ctx):
+    t = c.tui()
+    c.cal()
+    t.press("a")
+    t.type("3gG$0")
+    c.check(t.has("3gG$0"), "typed motions were not literal in the calendar task box")
+    t.press("ESC")
+    c.eq(c.cursor(), "Mon 07am", "typing in the box moved the cursor")
+    t.press("2", "ESC")
+    c.see("Weekly Calendar", 1, msg="Esc with a pending count left the calendar")
+    t.press("j")
+    c.eq(c.cursor(), "Mon 08am", "Esc did not clear the count")
+
+
+@scenario("vim_email_motions")
+def _(c: Ctx):
+    c.seed_emails(8)
+    t = c.tui()
+    t.press("m")
+    c.see("Email (")
+    c.eq(_cur_email(t), "Subject 0", "start")
+    for keys, want in ((["3", "j"], "Subject 3"), (["G"], "Subject 7"), (["g", "g"], "Subject 0"), (["4", "G"], "Subject 3"), (["DOWN"], "Subject 4"), (["2", "k"], "Subject 2")):
+        t.press(*keys)
+        c.eq(_cur_email(t), want, f"after {keys}")
+    t.press("3", "ESC")
+    c.see("Email (", 1, msg="Esc with a pending count left the view")
+    t.press("ESC")
+    c.see("To-Do", 3, msg="Esc with no prefix did not go back")
+
+
+@scenario("vim_email_search")
+def _(c: Ctx):
+    c.seed_emails(8)
+    t = c.tui()
+    t.press("m")
+    c.see("Email (")
+    t.press("/")
+    c.see("Search (Enter")
+    t.type("person 5")
+    t.press("ENTER")
+    c.eq(_cur_email(t), "Subject 5", "search matches the sender name")
+    t.press("/")
+    t.type("subject 2")
+    t.press("ENTER")
+    c.eq(_cur_email(t), "Subject 2", "search wraps")
+    t.press("n")
+    c.see("Search hit", 2)
+    c.eq(_cur_email(t), "Subject 2", "a lone match stays put")
+    t.press("/")
+    t.type("nomatch")
+    t.press("ENTER")
+    c.see("Pattern not found: nomatch", 2)
+
+
+@scenario("vim_email_popup_scroll")
+def _(c: Ctx):
+    c.sb.ollama()
+    c.seed_emails(1, body_text="\n".join(f"row {i}" for i in range(90)))
+    t = c.tui()
+    t.press("m", "v")
+    c.see("Esc/v: close")
+    t.press("G")
+    c.check(t.has("row 89"), "G did not scroll to the last line")
+    t.press("g", "g")
+    c.check(t.has("p0@ex.com") and t.has("row 0"), "gg did not return to the top")
+    t.press("C-d")
+    c.check(not t.has("row 0") and t.has("row 20"), "Ctrl-d did not scroll by half a page")
+    t.press("C-u")
+    c.check(t.has("row 0"), "Ctrl-u did not scroll back")
+    t.press("1", "0", "j")
+    c.check(not re.search(r"row 0\b", t.text()) and re.search(r"row 12\b", t.text()), "10j did not scroll ten lines")
+    t.press("ESC")
+    c.see("Esc/v: close", gone=True)
 
 
 # ---------------------------------------------------------------- runner

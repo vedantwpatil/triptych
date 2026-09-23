@@ -96,6 +96,8 @@ pub struct EnhancedTaskInfo {
 pub enum InputMode {
     Normal,
     Editing,
+    /// Typing a `/` query in the todo or email list.
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

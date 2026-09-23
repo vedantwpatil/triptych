@@ -8,7 +8,7 @@ A fast, keyboard-driven productivity TUI built in Rust. Manage tasks and schedul
 
 - Add tasks with natural language: `"Submit report tomorrow at 3pm #work !!"`
 - Priority levels, tags, and smart categorization (deepwork, admin, learning, etc.)
-- Vim-style navigation (j/k/Enter/x)
+- Vim-style navigation: counts (`5j`), `gg`/`G`, `Ctrl-d`/`Ctrl-u`, `/` search with `n`/`N`
 
 **Weekly Calendar**
 
@@ -52,13 +52,15 @@ cargo run
 
 | Key     | Action                        |
 | ------- | ----------------------------- |
-| `j/k`   | Navigate tasks                |
+| `j/k`   | Navigate tasks (`5j`, `gg`, `G`, `Ctrl-d/u`) |
+| `/`     | Search (`n`/`N` next/previous) |
 | `a`     | Add new task                  |
 | `Enter` | Toggle completion             |
 | `x`/`d` | Delete task (or selection)    |
 | `v`/`V` | Select rows (`j/k` extend, `Esc` cancels) |
 | `s`     | Auto-schedule task            |
 | `c`     | Switch to calendar view       |
+| `m`     | Switch to email view (`s` sync, `o` sort, `v` open) |
 | `H/L`   | Previous/next week (calendar) |
 | `q`     | Quit                          |
 

@@ -7,6 +7,8 @@ mod app;
 mod cli;
 mod email_config;
 mod email_message;
+mod email_priority;
+mod motion;
 mod nlp_llm;
 mod nlp_rules;
 mod ui;

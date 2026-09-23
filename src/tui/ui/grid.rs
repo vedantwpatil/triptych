@@ -1,6 +1,6 @@
 //! The calendar's per-cell model: what each hour cell shows, independent of the terminal.
 
-use crate::app::{ScheduleBlock, allocation_covers_hour, parse_time_string};
+use crate::app::{CellEntry, ScheduleBlock, entry_in_cell, parse_time_string};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use ratatui::style::{Color, Modifier, Style};
 
@@ -13,8 +13,8 @@ pub struct CalendarGrid<'a> {
     pub days: Vec<NaiveDate>,
     pub time_slots: Vec<TimeSlot>,
     pub schedule_blocks: &'a [(NaiveDate, ScheduleBlock)],
-    pub scheduled_tasks: &'a [(NaiveDate, NaiveTime, i64, String, i32)],
-    pub task_allocations: &'a [(NaiveDate, NaiveTime, i64, String, i32, i32)],
+    pub scheduled_tasks: &'a [CellEntry],
+    pub task_allocations: &'a [CellEntry],
 }
 
 #[derive(Debug)]
@@ -49,18 +49,15 @@ pub fn cell_task_displays<'a>(
     day: NaiveDate,
     slot_time: NaiveTime,
 ) -> Vec<(&'a str, i32, bool)> {
-    grid.scheduled_tasks
-        .iter()
-        .filter(|(d, t, ..)| *d == day && t.hour() == slot_time.hour())
-        .map(|(_, _, _, desc, priority)| (desc.as_str(), *priority, false))
-        .chain(
-            grid.task_allocations
-                .iter()
-                .filter(|(d, start, _, _, minutes, _)| {
-                    *d == day && allocation_covers_hour(*start, *minutes, slot_time.hour())
-                })
-                .map(|(_, _, _, desc, _, priority)| (desc.as_str(), *priority, true)),
-        )
+    let hour = slot_time.hour();
+    let hits = |entries: &'a [CellEntry], is_allocation: bool| {
+        entries
+            .iter()
+            .filter(move |e| entry_in_cell(e, day, hour))
+            .map(move |e| (e.3.as_str(), e.5, is_allocation))
+    };
+    hits(grid.scheduled_tasks, false)
+        .chain(hits(grid.task_allocations, true))
         .collect()
 }
 

@@ -21,6 +21,26 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-23 (email features, vim motions): items 2-5 of [`future-features.md`](./future-features.md).
+  Email: `s` spawns one sync and reports "N new" / "All emails gathered"; the three copies of the fetch
+  pipeline are now `email::sync::sync_account`; the list sorts by a display-time priority score
+  (`src/email/priority.rs`, `▲`/`△`, `o` toggles date order); opening a message asks Ollama for a summary,
+  cached in `email_messages.summary` (idempotent `ALTER` in `src/migrations.rs`, a failed summary is not
+  cached). `TRIPTYCH_OLLAMA_URL` overrides the Ollama host and `tests/tui/fakeollama.py` stubs it
+  ([`TUI_FAKES.md`](./TUI_FAKES.md)). Vim: counts, `gg`/`G`/`NG`, `0`/`$`, `Ctrl-d`/`Ctrl-u`, `/` search with
+  `n`/`N` in the todo and email lists, calendar and popup included (`src/app/motion.rs`, `search.rs`); other
+  Ctrl chords are now ignored so `Ctrl-d` never types `d`. Priority reordering sinks a converted email, which
+  broke `email_stray_output`; the scenario was changed, not the code. Tests: 133 in-process, suite 136
+  (16 `vim_*`, `imap_*` and `email_*` extended).
+- 2026-09-23 (feasibility): [`future-features.md`](./future-features.md) now holds a verdict, size and
+  approach for each of the 8 requests. Item 8 is not reproduced as worded; the likely cause is the Calendar
+  `s` picker saying "No unscheduled tasks available." for tasks already scheduled by todo `s` or calendar `a`.
+- 2026-09-23 (KI-22..24, IMAP harness): a manual task now shows in every hour it spans (KI-22); an idle
+  IMAP sync no longer refetches the last message (KI-23); the Email view reloads while open (KI-24).
+  New `tests/tui/fakeimap.py` (local TLS IMAP server) lets the suite run the real `email sync` and the TUI's
+  background sync: 14 `imap_*` scenarios. The 2s reload briefly blanked the open body popup (`get_recent`
+  rows carry no body); the existing `email_detail_long_scroll` caught it, so the tick skips the popup.
+  Tests: 93 in-process, suite 110.
 - 2026-09-19 (KI-21, background add): `submit_task`/`apply_task_parse` (see KI-21). The Ollama scenarios
   share one model and used to race under `-j`: `daemon_prewarm_loads_model` and `todo_add_cold_model`
   unload it, and every parallel TUI start reloads it, which likely caused the one unexplained suite FAIL
@@ -404,13 +424,31 @@ since epoch 0 never occurs on real IMAP servers.
 
 None.
 
-Every 2026-09-19 finding (KI-1..KI-21) is fixed and covered by a passing test.
+Every finding (KI-1..KI-24) is fixed and covered by a passing test.
 
 ### Resolved
 
-Found in the 2026-09-19 audit, the todo-list test and the LLM baseline; fixed the same day, each verified
-with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
+Found in the 2026-09-19 audit, the todo-list test and the LLM baseline (KI-1..21), then in the 2026-09-23
+calendar and IMAP runs (KI-22..24); fixed the same day, each verified with its `tests/tui/tui_suite.py`
+scenario (named at the end of each entry).
 
+- **KI-24** (2026-09-23) New mail never appeared while the Email view stayed open: `toggle_to_email`
+  spawns the sync and reloads the list at once, and nothing reloaded it when the sync (or the 60s poller)
+  finished, so it showed only after leaving and re-entering. `run_app` now has a 2s tick that calls
+  `refresh_emails` while the view is open and no body popup is up; `refresh_emails` keeps the cursor on
+  the same message by id when newer mail lands above it. `imap_tui_live_refresh`, `imap_tui_view_sync`,
+  `tests/it/app.rs` (cursor test).
+- **KI-23** (2026-09-23) An idle sync reported "Synced 1 new email(s)" and refetched the newest message
+  every time. RFC 3501: `UID n:*` always includes the highest UID even when it is below `n`, so a mailbox
+  with nothing new answered `UID 6:*` with UID 5. `fetch_new_inner` now drops UIDs at or below the
+  cursor. `imap_idle_sync`.
+- **KI-22** (2026-09-23) A manually scheduled task showed, and could be picked up, only in its start hour:
+  cells matched `scheduled_at.hour() == hour` and the cache carried no duration (allocations had one, but
+  their check missed a start off the hour, such as 12:30). One rule, `span_covers_hour`, now serves
+  `cell_tasks`, the grid render and the auto-scheduler's free-slot check, so a 180 min task from 07:00
+  fills 07-09 and a 12:30 hour spans 12 and 13. Not covered: `find_next_available_slot` still does not
+  check that the task being placed fits before the next occupied hour. `cal_long_task_spans`,
+  `tests/it/app.rs` (two tests).
 - **KI-21** An add whose text reached the LLM blocked the TUI event loop for the parse (~1-1.5s with a
   warm 7B, up to 15s if Ollama hung): `App::add_task` was awaited inline in `tui/keys.rs` and, for
   email conversion, in `app/mail.rs`. Now `App::submit_task` spawns the parse and closes the popup at
@@ -568,6 +606,6 @@ with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
 ## Open Questions
 
 - None blocking right now.
-- Not covered by the suite: real IMAP sync (email scenarios seed rows directly), and `H`/`L` edge
-  behaviour in the calendar. Also unconfirmed: whether editing the deadline of an already-scheduled
+- Not covered by the suite: `H`/`L` edge behaviour in the calendar, and IMAP against a real server
+  (`fakeimap.py` speaks only what `client.rs` sends: no IDLE, no OAuth, no partial-body fetch). Also unconfirmed: whether editing the deadline of an already-scheduled
   task should drop its existing allocation (observed, not judged a bug).

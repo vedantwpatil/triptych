@@ -1,7 +1,7 @@
 //! Core application state (`App`) and its business logic, split by concern into `app/*.rs`;
 //! see `src/app/CLAUDE.md`.
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::NaiveDate;
 use std::sync::Arc;
 
 use crate::nlp::NLPParser;
@@ -15,14 +15,18 @@ mod allocation;
 mod calendar;
 mod mail;
 mod model;
+mod motion;
 mod placement;
 mod schedule_io;
+mod search;
 mod tasks;
 mod time;
 
 pub use allocation::*;
 pub use calendar::*;
+pub use mail::{MailSync, Summary, SummaryDone};
 pub use model::*;
+pub use motion::*;
 pub use tasks::*;
 pub use time::*;
 
@@ -44,6 +48,12 @@ pub struct App {
     /// through `selected`. `None` when not selecting.
     pub visual_anchor: Option<usize>,
     pub input_mode: InputMode,
+    /// Count and `g` typed so far for a vim motion (`5j`, `gg`).
+    pub key_prefix: KeyPrefix,
+    /// Last `/` query, repeated by `n`/`N`.
+    pub search_query: String,
+    /// Rows the todo or email list showed at the last draw, for `Ctrl-d`/`Ctrl-u`.
+    pub list_rows: usize,
     pub view_mode: ViewMode,
     pub calendar_week_offset: Option<i64>,
     pub selected_day: usize,
@@ -59,10 +69,10 @@ pub struct App {
     pub input_buffer: String,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
-    /// (date, time, `task_id`, description, priority)
-    pub cached_scheduled_tasks: Vec<(NaiveDate, NaiveTime, i64, String, i32)>,
-    /// (date, time, `task_id`, description, `allocated_minutes`, priority)
-    pub cached_task_allocations: Vec<(NaiveDate, NaiveTime, i64, String, i32, i32)>,
+    /// Manually scheduled tasks this week; minutes is `duration_minutes` (see `CellEntry`).
+    pub cached_scheduled_tasks: Vec<CellEntry>,
+    /// Deadline allocations this week; minutes is `allocated_minutes`.
+    pub cached_task_allocations: Vec<CellEntry>,
     pub status_message: Option<(String, std::time::Instant)>,
     /// Task picked up from the calendar with `m`, awaiting a drop cell.
     pub held_task: Option<i64>,
@@ -74,7 +84,20 @@ pub struct App {
     task_tx: tokio::sync::mpsc::UnboundedSender<TaskParse>,
     /// Results of background task parses; drained by `run_app`, like `deadline_rx`.
     pub task_rx: tokio::sync::mpsc::UnboundedReceiver<TaskParse>,
+    mail_tx: tokio::sync::mpsc::UnboundedSender<MailSync>,
+    /// Results of background mail syncs; drained by `run_app`, like `task_rx`.
+    pub mail_rx: tokio::sync::mpsc::UnboundedReceiver<MailSync>,
+    /// A background sync is running; a second one is not started.
+    mail_syncing: bool,
+    /// `s` asked for the running sync's outcome to be reported.
+    mail_manual: bool,
+    summary_tx: tokio::sync::mpsc::UnboundedSender<SummaryDone>,
+    /// Results of background email summaries; drained by `run_app`.
+    pub summary_rx: tokio::sync::mpsc::UnboundedReceiver<SummaryDone>,
+    /// AI summary state per email id, for emails opened this session.
+    pub email_summaries: std::collections::HashMap<i64, Summary>,
     pub emails: Vec<crate::email::EmailMessage>,
+    pub email_sort: crate::email::EmailSort,
     pub selected_email: usize,
     /// Set when the email detail popup is open (`v` on a selected email in
     /// the Email view); scroll resets to 0 each time it's opened.
@@ -93,6 +116,8 @@ impl App {
         let nlp_parser = Arc::new(NLPParser::new().await);
         let (deadline_tx, deadline_rx) = tokio::sync::mpsc::unbounded_channel();
         let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mail_tx, mail_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (summary_tx, summary_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             db_pool: pool,
@@ -100,6 +125,9 @@ impl App {
             selected: 0,
             visual_anchor: None,
             input_mode: InputMode::Normal,
+            key_prefix: KeyPrefix::default(),
+            search_query: String::new(),
+            list_rows: 10,
             view_mode: ViewMode::TodoList,
             calendar_week_offset: None,
             selected_day: 0,
@@ -120,7 +148,15 @@ impl App {
             deadline_rx,
             task_tx,
             task_rx,
+            mail_tx,
+            mail_rx,
+            mail_syncing: false,
+            mail_manual: false,
+            summary_tx,
+            summary_rx,
+            email_summaries: std::collections::HashMap::new(),
             emails: Vec::new(),
+            email_sort: crate::email::EmailSort::default(),
             selected_email: 0,
             email_detail_open: false,
             email_detail_scroll: 0,
@@ -146,7 +182,7 @@ impl App {
     pub async fn toggle_to_email(&mut self) {
         self.view_mode = ViewMode::Email;
         self.email_detail_open = false;
-        self.sync_email_accounts();
+        self.start_email_sync(false);
         self.cleanup_old_emails().await;
         let _ = self.refresh_emails().await;
     }

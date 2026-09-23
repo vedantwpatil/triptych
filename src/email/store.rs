@@ -6,12 +6,13 @@ use super::message::{EmailMessage, NewEmail};
 
 /// Insert newly-fetched emails, skipping ones already stored (same `account` +
 /// `message_id` — the same Message-ID can legitimately show up in more than one
-/// account, e.g. mailing lists or CCs).
-pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
+/// account, e.g. mailing lists or CCs). Returns how many rows were actually new.
+pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
     let mut tx = pool.begin().await?;
+    let mut inserted = 0;
 
     for email in emails {
-        sqlx::query(
+        inserted += sqlx::query(
             r"
             INSERT OR IGNORE INTO email_messages
                 (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text)
@@ -29,11 +30,12 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<()> {
         .bind(&email.snippet)
         .bind(&email.body_text)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(inserted)
 }
 
 /// A sync resume point for one account+folder: the IMAP UIDVALIDITY epoch it was
@@ -132,6 +134,27 @@ pub async fn get_body(pool: &SqlitePool, email_id: i64) -> Result<Option<String>
         .await?;
 
     Ok(row.and_then(|row| row.try_get::<Option<String>, _>("body_text").ok().flatten()))
+}
+
+/// The cached AI summary for one email, if one was generated.
+pub async fn get_summary(pool: &SqlitePool, email_id: i64) -> Result<Option<String>> {
+    let summary = sqlx::query_scalar("SELECT summary FROM email_messages WHERE id = ?")
+        .bind(email_id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(summary.flatten())
+}
+
+/// Caches an AI summary so the model is asked once per email.
+pub async fn set_summary(pool: &SqlitePool, email_id: i64, summary: &str) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET summary = ? WHERE id = ?")
+        .bind(summary)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 /// Deletes emails older than `cutoff`. Caller (`App::cleanup_old_emails`) runs this

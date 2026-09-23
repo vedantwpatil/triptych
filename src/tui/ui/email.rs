@@ -1,7 +1,8 @@
 //! The email list view and its message popup.
 
 use super::centered_rect;
-use crate::app::App;
+use crate::app::{App, InputMode, Summary};
+use crate::email::priority;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -19,6 +20,7 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(3), Constraint::Length(3)].as_ref())
         .split(f.area());
 
+    app.list_rows = usize::from(chunks[0].height.saturating_sub(2));
     let items: Vec<ListItem> = app
         .emails
         .iter()
@@ -46,6 +48,12 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             };
+            if let Some(badge) = priority::level(priority::score(email)).badge() {
+                spans.push(Span::styled(
+                    format!("{badge} "),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            }
             spans.push(Span::styled(email.subject.clone(), subject_style));
 
             if email.task_id.is_some() {
@@ -63,9 +71,14 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
     }
 
     let email_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(
-            "Email (m/Esc: todo, Tab: next view, j/k: move, v: view, Enter: convert to task, r: mark read)",
-        ))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Email (m/Esc: todo, Tab: next view, j/k: move, /: search, v: view, s: sync, o: order, Enter: to task, r: read)")
+                .title_top(
+                    Line::from(format!("sorted by {} ", app.email_sort.label())).right_aligned(),
+                ),
+        )
         .highlight_style(
             Style::default()
                 .fg(Color::Blue)
@@ -75,7 +88,9 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(email_list, chunks[0], &mut app.email_list_state);
 
-    if let Some((msg, instant)) = &app.status_message
+    if matches!(app.input_mode, InputMode::Search) {
+        super::render_search_box(f, &app.input_buffer, chunks[1]);
+    } else if let Some((msg, instant)) = &app.status_message
         && instant.elapsed() < std::time::Duration::from_secs(3)
     {
         let status = Paragraph::new(msg.as_str())
@@ -96,6 +111,7 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
 
     let area = centered_rect(80, 80, f.area());
     f.render_widget(Clear, area);
+    app.list_rows = usize::from(area.height.saturating_sub(2));
 
     let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
     let date_text = email
@@ -113,8 +129,20 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             Span::styled("Date: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(date_text),
         ]),
-        Line::from(""),
     ];
+    let summary = match app.email_summaries.get(&email.id) {
+        Some(Summary::Ready(text)) => Some(("Summary: ", text.as_str(), Color::Cyan)),
+        Some(Summary::Pending) => Some(("Summary: ", "generating...", Color::DarkGray)),
+        Some(Summary::Failed(why)) => Some(("Summary unavailable: ", *why, Color::DarkGray)),
+        None => None,
+    };
+    if let Some((label, detail, colour)) = summary {
+        text.push(Line::from(vec![
+            Span::styled(label, Style::default().fg(colour).add_modifier(Modifier::BOLD)),
+            Span::styled(detail, Style::default().fg(colour)),
+        ]));
+    }
+    text.push(Line::from(""));
     let body = email.body_text.as_deref().unwrap_or("(no body content)");
     text.extend(body.lines().map(Line::from));
 
@@ -122,7 +150,7 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!("{} (Esc/v: close, j/k: scroll)", email.subject))
+                .title(format!("{} (Esc/v: close, j/k/gg/G: scroll)", email.subject))
                 .style(Style::default().bg(Color::Black)),
         )
         .wrap(Wrap { trim: false });

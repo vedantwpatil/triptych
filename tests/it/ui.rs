@@ -31,8 +31,8 @@ fn urgency_style_gets_brighter_red_and_stays_in_the_terminal_palette() {
 fn cell_task_displays_returns_every_task_sharing_an_hour() {
     let d = day(0);
     let scheduled_tasks = vec![
-        (d, time(9), 1, "manual one".to_string(), 1),
-        (d, time(9), 2, "manual two".to_string(), 1),
+        (d, time(9), 1, "manual one".to_string(), 60, 1),
+        (d, time(9), 2, "manual two".to_string(), 60, 1),
     ];
     let task_allocations = vec![(d, time(9), 3, "alloc one".to_string(), 30, 1)];
     let grid = CalendarGrid {
@@ -59,8 +59,8 @@ fn build_cell_view_marks_overflow_when_hour_is_shared() {
     let no_allocations = vec![];
 
     let two_tasks = vec![
-        (d, time(9), 1, "first".to_string(), 1),
-        (d, time(9), 2, "second".to_string(), 1),
+        (d, time(9), 1, "first".to_string(), 60, 1),
+        (d, time(9), 2, "second".to_string(), 60, 1),
     ];
     let grid_two = CalendarGrid {
         days: vec![d],
@@ -77,7 +77,7 @@ fn build_cell_view_marks_overflow_when_hour_is_shared() {
     assert_eq!(view_second.overflow.as_deref(), Some("2/2"));
     assert!(view_second.headline.contains("second"));
 
-    let one_task = vec![(d, time(9), 1, "only".to_string(), 1)];
+    let one_task = vec![(d, time(9), 1, "only".to_string(), 60, 1)];
     let grid_one = CalendarGrid {
         days: vec![d],
         time_slots: vec![],

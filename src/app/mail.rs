@@ -1,9 +1,11 @@
 //! Email view: retention purge, account sync, refresh, read/open and convert-to-task.
 
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 
-use super::App;
-use crate::email::{EmailConfig, ImapMailSource, MailSource, message, store as email_store};
+use super::{App, ViewMode};
+use crate::email::{EmailConfig, EmailSort, priority, store as email_store, sync::sync_account};
 
 /// Email retention window for [`App::cleanup_old_emails`]. ~6 months, expressed
 /// as days rather than calendar months to sidestep invalid-date edge cases
@@ -11,7 +13,42 @@ use crate::email::{EmailConfig, ImapMailSource, MailSource, message, store as em
 /// the day.
 const EMAIL_RETENTION_DAYS: i64 = 180;
 
+/// Outcome of a background mail sync, sent from the spawned task to `run_app` over `App::mail_rx`.
+#[derive(Debug, Default)]
+pub struct MailSync {
+    /// Messages stored across all accounts.
+    new: u64,
+    /// One `account: reason` entry per failed account.
+    errors: Vec<String>,
+}
+
+/// State of one email's AI summary in `App::email_summaries`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Summary {
+    Pending,
+    Ready(String),
+    /// Why it failed; the next open of the email tries again.
+    Failed(&'static str),
+}
+
+/// A finished background summary, sent over `App::summary_rx`.
+#[derive(Debug)]
+pub struct SummaryDone {
+    email_id: i64,
+    result: Result<String, &'static str>,
+}
+
+/// Emails with a shorter body than this are not worth summarizing.
+const SUMMARY_MIN_CHARS: usize = 200;
+/// Cap on the body text sent to the model, so one huge message cannot stall the prompt.
+const SUMMARY_INPUT_CHARS: usize = 4000;
+
 impl App {
+    /// Shows `msg` in the status line for a few seconds.
+    pub(super) fn notify(&mut self, msg: &str) {
+        self.status_message = Some((msg.to_string(), std::time::Instant::now()));
+    }
+
     /// Purges emails older than [`EMAIL_RETENTION_DAYS`] (~6 months), run every
     /// time the Email view is entered — the only retention path there is, so
     /// without it `email_messages` grows unbounded. Runs inline, not spawned:
@@ -25,110 +62,61 @@ impl App {
         }
     }
 
-    /// Kicks off a background pull of new mail from IMAP for every configured
-    /// account, so the Email view catches up sooner than the next 60s
-    /// `src/sync/mail.rs` poll instead of waiting on it. Fire-and-forget
-    /// (`tokio::spawn`, not awaited) rather than the blocking call this used
-    /// to be: run inline, a slow/unreachable IMAP server stalled the whole
-    /// TUI (no redraw, no key input) until every account's TCP+TLS round-trip
-    /// finished or failed. No-ops silently if email isn't configured;
-    /// per-account failures are logged to stderr, same as the background
-    /// poller, since there's no `&mut self` left to post a `status_message` to
-    /// once the task is spawned.
-    pub(super) fn sync_email_accounts(&self) {
+    /// Starts a background pull of new mail for every configured account: on entering the Email
+    /// view (`manual` false, silent) and on `s` (`manual` true, reports the outcome). Spawned, never
+    /// awaited: an unreachable IMAP server would otherwise freeze the TUI until every TCP+TLS
+    /// attempt failed. The result comes back over `mail_rx` and is applied by `apply_mail_sync`.
+    /// A manual request during a running sync waits for that sync and reports its result.
+    pub fn start_email_sync(&mut self, manual: bool) {
         let configs = EmailConfig::all_from_env();
         if configs.is_empty() {
+            if manual {
+                self.notify("Email not configured (set TRIPTYCH_EMAIL_ENABLED and IMAP_* in .env)");
+            }
             return;
         }
+        if manual {
+            self.mail_manual = true;
+            self.notify("Syncing...");
+        }
+        if self.mail_syncing {
+            return;
+        }
+        self.mail_syncing = true;
 
-        let db_pool = self.db_pool.clone();
+        let (db_pool, tx) = (self.db_pool.clone(), self.mail_tx.clone());
         tokio::spawn(async move {
+            let mut done = MailSync::default();
             for config in &configs {
-                let cursor = match email_store::get_sync_cursor(
-                    &db_pool,
-                    &config.account,
-                    &config.imap_folder,
-                )
-                .await
-                {
-                    Ok(cursor) => cursor,
+                match sync_account(&db_pool, config).await {
+                    Ok(report) => done.new += report.new,
                     Err(e) => {
                         tracing::warn!("[Email] sync failed for '{}': {}", config.account, e);
-                        continue;
+                        done.errors.push(format!("{}: {e}", config.account));
                     }
-                };
-                let source = ImapMailSource::new(config.clone());
-                match source.fetch_new(cursor).await {
-                    Ok((uid_validity, raw_messages)) => {
-                        let epoch_changed = match (cursor, uid_validity) {
-                            // `c.uid_validity` was itself stored from a `u32` (see
-                            // `client.rs`), so this round-trip always fits.
-                            (Some(c), Some(current)) => {
-                                u32::try_from(c.uid_validity).unwrap_or(0) != current
-                            }
-                            _ => false,
-                        };
-                        if epoch_changed {
-                            tracing::info!(
-                                "[Email] UIDVALIDITY changed for '{}'; resyncing recent mail instead of resuming",
-                                config.account
-                            );
-                        }
-
-                        let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
-
-                        let new_emails: Vec<_> = raw_messages
-                            .into_iter()
-                            .filter_map(|(uid, raw, header_only)| {
-                                message::parse_raw(
-                                    &config.account,
-                                    uid,
-                                    &config.imap_folder,
-                                    &raw,
-                                    header_only,
-                                )
-                                .ok()
-                            })
-                            .collect();
-                        if let Err(e) = email_store::insert_new(&db_pool, &new_emails).await {
-                            tracing::warn!("[Email] sync failed for '{}': {}", config.account, e);
-                        }
-                        // See sync/mail.rs's sync_mail: skip persisting a synthetic
-                        // `last_uid = 0` when the epoch changed but nothing came back, so
-                        // the next sync retries the properly-capped catch-up.
-                        if let Some(validity) = uid_validity
-                            && !(epoch_changed && fetched_max_uid.is_none())
-                        {
-                            let prior_uid = if epoch_changed {
-                                0
-                            } else {
-                                cursor.map_or(0, |c| c.last_uid)
-                            };
-                            let last_uid = fetched_max_uid
-                                .map_or(prior_uid, |uid| i64::from(uid).max(prior_uid));
-                            if let Err(e) = email_store::set_sync_cursor(
-                                &db_pool,
-                                &config.account,
-                                &config.imap_folder,
-                                email_store::SyncCursor {
-                                    uid_validity: i64::from(validity),
-                                    last_uid,
-                                },
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "[Email] sync failed for '{}': {}",
-                                    config.account,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => tracing::warn!("[Email] sync failed for '{}': {}", config.account, e),
                 }
             }
+            let _ = tx.send(done);
         });
+    }
+
+    /// Applies a finished background sync: reloads the list and, if `s` asked for it, says what happened.
+    pub async fn apply_mail_sync(&mut self, done: MailSync) {
+        self.mail_syncing = false;
+        let manual = std::mem::take(&mut self.mail_manual);
+        // A reload would blank the open popup's body (`get_recent` rows carry none).
+        if self.view_mode == ViewMode::Email && !self.email_detail_open {
+            let _ = self.refresh_emails().await;
+        }
+        if manual {
+            let msg = match (done.new, done.errors.as_slice()) {
+                (0, []) => "All emails gathered - nothing new".to_string(),
+                (n, []) => format!("Synced {n} new email(s)"),
+                (0, errors) => format!("Sync failed: {}", errors.join("; ")),
+                (n, errors) => format!("Synced {n} new; failed: {}", errors.join("; ")),
+            };
+            self.notify(&msg);
+        }
     }
 
     /// Reloads the newest stored emails into the Email view.
@@ -137,13 +125,34 @@ impl App {
     ///
     /// Returns an error if a database query fails.
     pub async fn refresh_emails(&mut self) -> Result<(), sqlx::Error> {
+        let selected_id = self.emails.get(self.selected_email).map(|e| e.id);
         self.emails = email_store::get_recent(&self.db_pool, 100)
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        if self.email_sort == EmailSort::Priority {
+            // Stable, so the newest-first order from `get_recent` breaks ties.
+            self.emails
+                .sort_by_key(|e| std::cmp::Reverse(priority::score(e)));
+        }
 
-        if self.selected_email >= self.emails.len() {
+        // Keep the cursor on the same message when newer mail is inserted above it.
+        if let Some(pos) = selected_id.and_then(|id| self.emails.iter().position(|e| e.id == id)) {
+            self.selected_email = pos;
+        } else if self.selected_email >= self.emails.len() {
             self.selected_email = self.emails.len().saturating_sub(1);
         }
+        Ok(())
+    }
+
+    /// Switches the Email list between priority and date order; the cursor stays on its message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn toggle_email_sort(&mut self) -> Result<(), sqlx::Error> {
+        self.email_sort = self.email_sort.toggled();
+        self.refresh_emails().await?;
+        self.notify(&format!("Sorted by {}", self.email_sort.label()));
         Ok(())
     }
 
@@ -188,7 +197,64 @@ impl App {
         if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
             email.body_text = body;
         }
+        self.request_email_summary(email_id).await;
         Ok(())
+    }
+
+    /// Shows the cached summary of `email_id`, or starts generating one in the background: the local
+    /// model can take many seconds, so the popup opens at once and `apply_summary` fills it in.
+    /// Short mail gets none. Needs the body, so call it after `open_selected_email` has loaded it.
+    async fn request_email_summary(&mut self, email_id: i64) {
+        if matches!(
+            self.email_summaries.get(&email_id),
+            Some(Summary::Pending | Summary::Ready(_))
+        ) {
+            return;
+        }
+        if let Ok(Some(cached)) = email_store::get_summary(&self.db_pool, email_id).await {
+            self.email_summaries.insert(email_id, Summary::Ready(cached));
+            return;
+        }
+        let Some(email) = self.emails.iter().find(|e| e.id == email_id) else {
+            return;
+        };
+        let Some(body) = email
+            .body_text
+            .as_deref()
+            .filter(|b| b.trim().chars().count() >= SUMMARY_MIN_CHARS)
+        else {
+            return;
+        };
+        let input = format!(
+            "From: {}\nSubject: {}\n\n{}",
+            email.from_name.as_deref().unwrap_or(&email.from_addr),
+            email.subject,
+            body.chars().take(SUMMARY_INPUT_CHARS).collect::<String>()
+        );
+
+        self.email_summaries.insert(email_id, Summary::Pending);
+        let (parser, tx) = (Arc::clone(&self.nlp_parser), self.summary_tx.clone());
+        tokio::spawn(async move {
+            let result = parser.summarize(&input).await.map_err(|e| {
+                tracing::warn!("[Email] summary failed: {e}");
+                e.short_reason()
+            });
+            let _ = tx.send(SummaryDone { email_id, result });
+        });
+    }
+
+    /// Stores a finished summary and shows it if that email's popup is open.
+    pub async fn apply_summary(&mut self, done: SummaryDone) {
+        let state = match done.result {
+            Ok(text) => {
+                if let Err(e) = email_store::set_summary(&self.db_pool, done.email_id, &text).await {
+                    tracing::warn!("[Email] could not cache a summary: {e}");
+                }
+                Summary::Ready(text)
+            }
+            Err(reason) => Summary::Failed(reason),
+        };
+        self.email_summaries.insert(done.email_id, state);
     }
 
     pub const fn close_email_detail(&mut self) {

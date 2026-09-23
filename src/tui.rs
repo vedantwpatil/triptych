@@ -3,7 +3,7 @@
 mod keys;
 pub mod ui;
 
-use crate::app::App;
+use crate::app::{App, ViewMode};
 use crate::sync::{SyncConfig, SyncDaemon};
 use crossterm::{
     event::{Event, EventStream},
@@ -73,6 +73,11 @@ where
     // Create async event stream (crossterm's async API)
     let mut reader = EventStream::new();
 
+    // Mail lands in the DB from background syncs (view entry, 60s poller); reload it while the
+    // Email view is open so new messages show up without leaving and re-entering. Skipped while
+    // the body popup is open: `get_recent` rows carry no `body_text`, so a reload would blank it.
+    let mut mail_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
@@ -104,6 +109,18 @@ where
                 if let Err(e) = app.apply_task_parse(parsed).await {
                     app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
                 }
+            }
+
+            Some(done) = app.mail_rx.recv() => {
+                app.apply_mail_sync(done).await;
+            }
+
+            Some(done) = app.summary_rx.recv() => {
+                app.apply_summary(done).await;
+            }
+
+            _ = mail_tick.tick(), if app.view_mode == ViewMode::Email && !app.email_detail_open => {
+                let _ = app.refresh_emails().await;
             }
 
             // Shutdown signal

@@ -244,7 +244,7 @@ impl App {
             // This task's own slice of the block, not the block's overall bounds -
             // sequential per allocation so multiple tasks sharing one block land on
             // different start times instead of every one stacking on the block's
-            // own start (see `allocation_covers_hour`/`cell_task_displays`, which
+            // own start (see `span_covers_hour`/`cell_task_displays`, which
             // read these back and expect a real per-task start/duration).
             let allocation_start = block.start_time + Duration::minutes(used);
             let allocation_end = allocation_start + Duration::minutes(take);

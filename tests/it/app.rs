@@ -190,7 +190,14 @@ fn cell_tasks_finds_manual_and_allocated_tasks() {
     let manual_time = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
     let alloc_time = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
 
-    let scheduled_tasks = vec![(day, manual_time, 1i64, "write report".to_string(), 2i32)];
+    let scheduled_tasks = vec![(
+        day,
+        manual_time,
+        1i64,
+        "write report".to_string(),
+        60i32,
+        2i32,
+    )];
     let task_allocations = vec![(day, alloc_time, 2i64, "study rust".to_string(), 90i32, 1i32)];
 
     let manual = cell_tasks(&scheduled_tasks, &task_allocations, day, 9)
@@ -248,6 +255,45 @@ fn cell_tasks_separates_two_allocations_in_the_same_block() {
     let at_10am = cell_tasks(&scheduled_tasks, &task_allocations, day, 10);
     assert_eq!(at_10am.len(), 1);
     assert_eq!(at_10am[0].id, 2);
+}
+
+/// KI-22: a span shows in every hour cell it overlaps, including a start that is not on the hour.
+#[test]
+fn span_covers_every_hour_it_overlaps() {
+    let t = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+    let hours = |start, minutes| {
+        (0..24)
+            .filter(|&h| span_covers_hour(start, minutes, h))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(hours(t(7, 0), 180), [7, 8, 9]);
+    assert_eq!(hours(t(12, 30), 60), [12, 13]);
+    assert_eq!(hours(t(9, 0), 60), [9]);
+    assert_eq!(hours(t(9, 45), 15), [9]);
+    assert_eq!(
+        hours(t(18, 0), 0),
+        [18],
+        "zero duration still marks its start hour"
+    );
+    assert_eq!(
+        hours(t(23, 0), 120),
+        [23],
+        "never wraps past midnight onto the morning"
+    );
+}
+
+/// KI-22: a manually scheduled 3h task is reachable (`u`/`m`/`e`) from each of its hours.
+#[test]
+fn cell_tasks_spans_a_manual_task_over_its_duration() {
+    let day = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+    let start = NaiveTime::from_hms_opt(7, 0, 0).unwrap();
+    let scheduled_tasks = vec![(day, start, 1i64, "lab report".to_string(), 180i32, 2i32)];
+    for hour in [7, 8, 9] {
+        let hit = cell_tasks(&scheduled_tasks, &[], day, hour);
+        assert_eq!(hit.len(), 1, "hour {hour}");
+        assert!(!hit[0].is_allocation);
+    }
+    assert!(cell_tasks(&scheduled_tasks, &[], day, 10).is_empty());
 }
 
 /// A single-connection in-memory DB, fully migrated the same way `App::build`
@@ -667,8 +713,255 @@ async fn converting_an_email_twice_before_the_parse_lands_makes_one_task() {
     }
 
     assert_eq!(descriptions(&app), ["reply to advisor"]);
+    assert_eq!(email_task_id(&pool, email_id).await, Some(app.tasks[0].id));
+}
+
+#[tokio::test]
+async fn refresh_emails_keeps_the_cursor_on_its_message_when_newer_mail_arrives() {
+    let pool = test_pool().await;
+    let insert = |uid: i64, date: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc) VALUES (?, ?, 'a@b.c', ?, ?)",
+            )
+            .bind(uid)
+            .bind(format!("m{uid}"))
+            .bind(format!("subject {uid}"))
+            .bind(date)
+            .execute(&pool)
+            .await
+            .expect("insert email");
+        }
+    };
+    insert(1, "2026-01-02T00:00:00Z").await;
+    insert(2, "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+    app.selected_email = 1;
+
+    insert(3, "2026-01-03T00:00:00Z").await;
+    app.refresh_emails().await.expect("reload emails");
+
+    assert_eq!(app.emails.len(), 3);
+    assert_eq!(app.emails[app.selected_email].subject, "subject 2");
+}
+
+async fn insert_email(pool: &SqlitePool, uid: i64, subject: &str, date: &str) {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc) VALUES (?, ?, 'a@b.c', ?, ?)",
+    )
+    .bind(uid)
+    .bind(format!("m{uid}"))
+    .bind(subject)
+    .bind(date)
+    .execute(pool)
+    .await
+    .expect("insert email");
+}
+
+fn subjects(app: &App) -> Vec<&str> {
+    app.emails.iter().map(|e| e.subject.as_str()).collect()
+}
+
+#[tokio::test]
+async fn emails_list_by_priority_then_date_and_the_toggle_restores_date_order() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "lunch", "2026-01-03T00:00:00Z").await;
+    insert_email(&pool, 2, "urgent: server", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 3, "assignment 2", "2026-01-02T00:00:00Z").await;
+    insert_email(&pool, 4, "coffee", "2026-01-04T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(subjects(&app), ["urgent: server", "assignment 2", "coffee", "lunch"]);
+
+    app.toggle_email_sort().await.expect("toggle");
+    assert_eq!(subjects(&app), ["coffee", "lunch", "assignment 2", "urgent: server"]);
+}
+
+#[tokio::test]
+async fn opening_an_email_does_not_reorder_the_priority_list() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "urgent: server", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "coffee", "2026-01-02T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.open_selected_email().await.expect("open");
+
+    assert_eq!(subjects(&app), ["urgent: server", "coffee"]);
+    assert!(app.emails[0].is_read);
+}
+
+#[tokio::test]
+async fn toggling_the_sort_keeps_the_cursor_on_its_message() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "urgent: server", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "coffee", "2026-01-02T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.emails[app.selected_email].subject, "urgent: server");
+
+    app.toggle_email_sort().await.expect("toggle");
+
+    assert_eq!(app.emails[app.selected_email].subject, "urgent: server");
+}
+
+#[tokio::test]
+async fn opening_an_email_shows_its_cached_summary_without_asking_the_model() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    sqlx::query("UPDATE email_messages SET summary = 'Stored earlier.', body_text = ?")
+        .bind("long body ".repeat(40))
+        .execute(&pool)
+        .await
+        .expect("cache summary");
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.open_selected_email().await.expect("open");
+
+    let id = app.emails[0].id;
     assert_eq!(
-        email_task_id(&pool, email_id).await,
-        Some(app.tasks[0].id)
+        app.email_summaries.get(&id),
+        Some(&Summary::Ready("Stored earlier.".to_string()))
     );
+}
+
+#[tokio::test]
+async fn short_emails_get_no_summary() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "hi", "2026-01-01T00:00:00Z").await;
+    sqlx::query("UPDATE email_messages SET body_text = 'see you at 5'")
+        .execute(&pool)
+        .await
+        .expect("set body");
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.open_selected_email().await.expect("open");
+
+    assert!(app.email_summaries.is_empty());
+}
+
+#[tokio::test]
+async fn search_jumps_to_the_next_match_case_insensitively_and_n_repeats_it() {
+    let (mut app, _pool) = app_with_tasks(&["alpha", "Beta one", "gamma", "beta two"]).await;
+
+    app.start_search();
+    app.input_buffer = "BETA".to_string();
+    app.commit_search();
+    assert_eq!(app.selected, 1);
+    assert!(matches!(app.input_mode, InputMode::Normal));
+
+    app.search_step(true);
+    assert_eq!(app.selected, 3);
+    app.search_step(false);
+    assert_eq!(app.selected, 1);
+}
+
+#[tokio::test]
+async fn search_wraps_and_says_so() {
+    let (mut app, _pool) = app_with_tasks(&["beta", "x", "y"]).await;
+    app.selected = 2;
+    app.search_query = "beta".to_string();
+
+    app.search_step(true);
+
+    assert_eq!(app.selected, 0);
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.as_str()),
+        Some("Search hit BOTTOM, continuing at TOP")
+    );
+}
+
+#[tokio::test]
+async fn search_reports_a_missing_pattern_and_keeps_the_cursor() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b"]).await;
+    app.selected = 1;
+    app.search_query = "zzz".to_string();
+
+    app.search_step(true);
+
+    assert_eq!(app.selected, 1);
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.as_str()),
+        Some("Pattern not found: zzz")
+    );
+}
+
+#[tokio::test]
+async fn an_empty_search_repeats_the_last_query_or_complains_when_there_is_none() {
+    let (mut app, _pool) = app_with_tasks(&["a1", "b", "a2"]).await;
+
+    app.start_search();
+    app.commit_search();
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.as_str()),
+        Some("No previous search")
+    );
+
+    app.search_query = "a".to_string();
+    app.start_search();
+    app.commit_search();
+    assert_eq!(app.search_query, "a");
+    assert_eq!(app.selected, 2);
+}
+
+#[tokio::test]
+async fn cancelling_a_search_leaves_the_cursor_and_the_last_query() {
+    let (mut app, _pool) = app_with_tasks(&["a", "b"]).await;
+    app.search_query = "b".to_string();
+
+    app.start_search();
+    app.input_buffer = "a".to_string();
+    app.cancel_search();
+
+    assert_eq!(app.selected, 0);
+    assert_eq!(app.search_query, "b");
+    assert!(app.input_buffer.is_empty());
+    assert!(matches!(app.input_mode, InputMode::Normal));
+}
+
+#[tokio::test]
+async fn email_search_matches_subject_or_sender() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "lunch", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "invoice march", "2026-01-02T00:00:00Z").await;
+    insert_email(&pool, 3, "hello", "2026-01-03T00:00:00Z").await;
+    sqlx::query("UPDATE email_messages SET from_name = 'Carol Lunch' WHERE uid = 3")
+        .execute(&pool)
+        .await
+        .expect("set sender");
+    let mut app = App::new(pool).await;
+    app.email_sort = triptych::email::EmailSort::Date;
+    app.refresh_emails().await.expect("load emails");
+    app.view_mode = ViewMode::Email;
+    app.search_query = "lunch".to_string();
+
+    app.search_step(true);
+    assert_eq!(subjects(&app)[app.selected_email], "lunch");
+    app.search_step(true);
+    assert_eq!(subjects(&app)[app.selected_email], "hello");
+}
+
+#[tokio::test]
+async fn calendar_motions_move_the_cursor_and_clamp_to_the_grid() {
+    let (mut app, _pool) = app_with_tasks(&[]).await;
+    app.selected_time_slot = 2;
+    app.selected_day = 3;
+    app.stack_index = 1;
+
+    app.calendar_apply_motion(Motion::Down, Some(5));
+    assert_eq!((app.selected_time_slot, app.selected_day, app.stack_index), (7, 3, 0));
+
+    app.calendar_apply_motion(Motion::Bottom, None);
+    assert_eq!(app.selected_time_slot, 15);
+    app.calendar_apply_motion(Motion::LineEnd, None);
+    assert_eq!(app.selected_day, 6);
+    app.calendar_apply_motion(Motion::LineStart, None);
+    assert_eq!(app.selected_day, 0);
+    app.calendar_apply_motion(Motion::Top, Some(4));
+    assert_eq!(app.selected_time_slot, 3);
 }
