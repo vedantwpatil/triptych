@@ -18,8 +18,8 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
             r"
             INSERT OR IGNORE INTO email_messages
                 (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text,
-                 to_addrs, cc_addrs, references_header)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 to_addrs, cc_addrs, references_header, meeting_title, meeting_start, meeting_end, meeting_location)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(email.uid)
@@ -35,6 +35,10 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
         .bind(&email.to_addrs)
         .bind(&email.cc_addrs)
         .bind(&email.references_header)
+        .bind(&email.meeting_title)
+        .bind(email.meeting_start)
+        .bind(email.meeting_end)
+        .bind(&email.meeting_location)
         .execute(&mut *tx)
         .await?;
 
@@ -141,7 +145,8 @@ pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessag
         r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
                snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
-               is_starred, snoozed_until, triage_focused,
+               is_starred, category, snoozed_until, triage_focused,
+               meeting_title, meeting_start, meeting_end, meeting_location,
                EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
         FROM email_messages
         ORDER BY date_utc DESC
@@ -218,6 +223,22 @@ pub async fn distinct_folders(pool: &SqlitePool) -> Result<Vec<String>> {
     Ok(rows.iter().map(|row| row.get::<String, _>("folder")).collect())
 }
 
+/// Every distinct sender-domain with at least one stored message, alphabetical — backs the
+/// email list's per-domain filter cycle (Slice 25). `from_addr` is always a bare address
+/// (`message.rs::parse_raw` already strips any display name), so splitting on the first `@`
+/// is enough; a row with no `@` at all (never seen in practice — the parser's own fallback is
+/// `"unknown@unknown"`) is excluded rather than grouped under an empty string.
+pub async fn distinct_domains(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT substr(from_addr, instr(from_addr, '@') + 1) AS domain
+         FROM email_messages WHERE instr(from_addr, '@') > 0 ORDER BY domain",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.iter().map(|row| row.get::<String, _>("domain")).collect())
+}
+
 /// The cached AI summary for one email, if one was generated.
 pub async fn get_summary(pool: &SqlitePool, email_id: i64) -> Result<Option<String>> {
     let summary = sqlx::query_scalar("SELECT summary FROM email_messages WHERE id = ?")
@@ -248,7 +269,8 @@ pub async fn pending_triage(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMe
         r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
                snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
-               is_starred, snoozed_until, triage_focused,
+               is_starred, category, snoozed_until, triage_focused,
+               meeting_title, meeting_start, meeting_end, meeting_location,
                EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
         FROM email_messages
         WHERE triage_focused IS NULL
@@ -310,6 +332,18 @@ pub async fn mark_unread(pool: &SqlitePool, email_id: i64) -> Result<()> {
 pub async fn set_starred(pool: &SqlitePool, email_id: i64, starred: bool) -> Result<()> {
     sqlx::query("UPDATE email_messages SET is_starred = ? WHERE id = ?")
         .bind(starred)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Sets or clears (`None`) the selected email's colored category tag (Slice 22) — backs
+/// `App::cycle_selected_category`.
+pub async fn set_category(pool: &SqlitePool, email_id: i64, category: Option<&str>) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET category = ? WHERE id = ?")
+        .bind(category)
         .bind(email_id)
         .execute(pool)
         .await?;
@@ -410,7 +444,8 @@ pub async fn pending_rule_check(pool: &SqlitePool, limit: i64) -> Result<Vec<Ema
         r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
                snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
-               is_starred, snoozed_until, triage_focused,
+               is_starred, category, snoozed_until, triage_focused,
+               meeting_title, meeting_start, meeting_end, meeting_location,
                EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
         FROM email_messages
         WHERE rule_applied = 0

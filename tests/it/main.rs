@@ -10,6 +10,7 @@ mod email_compose;
 mod email_config;
 mod email_message;
 mod email_priority;
+mod email_rules;
 mod email_smtp;
 mod email_thread;
 mod motion;

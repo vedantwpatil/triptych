@@ -38,14 +38,10 @@ tokio-rustls = "0.26.4"
 rustls-native-certs = "0.8.4"
 mail-parser = { version = "0.11.5", features = ["full_encoding"] }
 
-icalendar = { version = "0.17.4", optional = true }
+icalendar = { version = "0.17.4", features = ["chrono-tz"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
-
-[features]
-default = []
-calendar-sync = ["icalendar"]
 
 [lints.rust]
 unsafe_code = "forbid"

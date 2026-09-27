@@ -476,20 +476,216 @@ those same keywords as examples when explaining what "Other" means (see `docs/TU
 See `src/app/CLAUDE.md`'s `mail.rs` row, `src/nlp/CLAUDE.md`, and `src/tui/CLAUDE.md`'s
 key-binding table.
 
+## Slice 18: rules / auto-actions (done, 2026-09-27)
+
+`R` in the email list opens the rules popup (`App::open_rules_list`, loads every saved rule fresh
+from the new `email_rules` table); `j`/`k`/arrows move the selection, `n` opens a one-line spec
+prompt (`InputMode::EmailRuleInput`), `d` deletes the selected rule, `Esc` closes. A spec is
+`<field> <pattern...> <action>`, e.g. `subject newsletter star` or `from noreply read` — `field` is
+`subject` or `from`/`sender` (both map to the stored `from_addr`), `pattern` may contain spaces (the
+last whitespace-separated token is always `action`), `action` is `star` or `read`. Parsed by the
+pure `App::parse_rule_spec`/matched by the pure `App::match_rule` (case-insensitive substring, not a
+regex — keeps specs typeable in one line); an unparseable spec reports a status message and saves
+nothing.
+
+`App::run_email_rules` runs inline (awaited, not spawned) right after every sync
+(`apply_mail_sync`, `apply_folder_sync`), same trigger point as Slice 17's triage — but unlike
+triage there's no Ollama/IMAP round-trip, just local DB reads/writes, so there's no long-running I/O
+to keep off the render loop. It loads every saved rule and every email with `rule_applied = 0`
+(`email::store::pending_rule_check`, capped at `RULE_CHECK_LIMIT` = 100 per pass), applies every
+matching rule's action, then marks the email checked regardless of whether anything matched — a
+non-match is still a completed check, so a later pass never re-evaluates it (also means a rule
+added after the fact only applies to *new* mail, and a manual un-star survives future passes). Only
+`star`/`read` are supported: both are pure local writes; `archive`/`delete` need a live IMAP
+round-trip per match and are deferred past v1.
+
+New `tests/it/email_rules.rs` covers the pure `parse_rule_spec`/`match_rule` functions (field/action
+validation, multi-word patterns, case-insensitivity); new `tests/it/app.rs` cases cover the popup's
+save/reject path, an end-to-end sync-then-match-then-star round trip, and that `rule_applied`
+actually sticks (194 in-process tests, was 181). See `src/app/CLAUDE.md`'s `mail.rs` row,
+`src/email/CLAUDE.md`'s `store.rs` row, and `src/tui/CLAUDE.md`'s key-binding table.
+
+## Slice 19: meeting invites (done, 2026-09-27)
+
+`email::message::parse_raw` now extracts a meeting invite from a `text/calendar` `VEVENT` MIME
+part (private `extract_meeting_invite`/`date_perhaps_time_to_utc`): `mail-parser` classifies any
+`text/calendar` part as an attachment regardless of `Content-Disposition`, so it's found the same
+way `extract_attachments` finds a PDF. The ICS body is parsed with the `icalendar` crate
+(`Calendar::from_str`); `title`/`start`/`end`/`location` land on four new nullable
+`EmailMessage`/`NewEmail` fields (`meeting_title`, `meeting_start`, `meeting_end`,
+`meeting_location`), added via the usual idempotent `ALTER TABLE` pattern in `src/migrations.rs`
+(not a new `.sql` file — matches every other post-initial-schema column). A message with no
+calendar part, or one that fails to parse, just leaves all four `None` — never errors the sync.
+
+`App::accept_meeting_invite` (`M` in the email list or the detail popup) turns an invite into a
+scheduled task: unlike `convert_selected_email_to_task`, it never goes through `submit_task`'s NLP
+parse, since the exact time is already on hand from the ICS `DTSTART`/`DTEND` — a direct `INSERT`
+into `tasks`, the same shape as `placement::add_task_at_selected_cell`. It reuses
+`email_messages.task_id` as the same "already converted" marker `convert_selected_email_to_task`
+uses, so accepting twice is a no-op the second time, and a converted invite still gets `[task]` in
+the list like an NLP-converted email would. The list tags an unconverted invite `[invite]`
+(dropped once `task_id` is set, since `[task]` already covers that); the detail popup shows a
+"Meeting: `<title>` — `<time>`" line, a "Location: `<location>`" line when present, and a
+"Press M to accept as a task" hint until accepted.
+
+New `tests/it/email_message.rs` cases cover `parse_raw`'s invite extraction (fields populated, the
+`header_only` skip, and the no-calendar-part case); new `tests/it/app.rs` cases cover
+`accept_meeting_invite`'s create/no-invite/idempotent-second-call paths (200 in-process tests, was
+194). `tests/tui/fakeimap.py`'s `Mailbox.add(..., invite=True)` builds a fixed "Team Sync" VEVENT
+for the new `imap_tui_meeting_invite` scenario (159 TUI scenarios, was 158), which drives the tag,
+the popup lines, `M`, and the resulting `[task]` tag end-to-end. See `src/app/CLAUDE.md`'s
+`mail.rs` row, `src/email/CLAUDE.md`'s `message.rs` row and its `chrono-tz` gotcha, and
+`src/tui/CLAUDE.md`'s key-binding table.
+
+## Slice 20: signatures (done, 2026-09-27)
+
+`SmtpConfig` gained a `signature: Option<String>` field, read from `EMAIL_SIGNATURE[_<LABEL>]`
+(`config::normalize_signature`: literal `\n` two-character escapes become real newlines, since a
+`.env` value is one line; blank/whitespace-only counts as unset) — signature is a per-send-account
+setting like `from_addr`, not per-receive-account, so it lives on `SmtpConfig` rather than
+`EmailConfig`. `start_compose_new`/`start_reply`/`start_forward` (`src/app/mail.rs`) copy it onto
+the new `ComposeState.signature` field from the relevant `SmtpConfig`; `resume_selected_draft`
+looks it up fresh by the draft's account, same as the other three, since a draft's saved row never
+stores it.
+
+`signature` is read-only in the compose popup, appended below the editable `body` and above any
+quoted original/forward — the same relationship `quoted` already had to `body`, extended one step.
+Both the popup's live preview and the actual sent body now go through one new pure helper,
+`app::mail::compose_full_body(body, signature, quoted)` (replacing `send_compose`'s and
+`render_compose_popup`'s two independently-hand-rolled concatenations, which had already started to
+drift in blank-line handling), so the sent message always matches what was previewed.
+
+New `tests/it/email_config.rs` cases cover `normalize_signature`'s escape/blank handling and
+`SmtpConfig`'s `Debug` redaction; new `tests/it/email_compose.rs` cases cover `compose_full_body`'s
+ordering and separator handling (205 in-process tests, was 200). New `tests/tui/tui_suite.py`
+scenario `email_compose_signature` sets `EMAIL_SIGNATURE`, confirms it renders in the popup, and
+confirms a sent message's body has it after the typed text (160 TUI scenarios, was 159). See
+`src/app/CLAUDE.md`'s `mail.rs` row and `src/email/CLAUDE.md`'s `config.rs`/gotchas.
+
+## Slice 21: rule actions `archive`/`delete` (done, 2026-09-27)
+
+Extends [Slice 18](#slice-18-rules--auto-actions-done-2026-09-27)'s rules beyond the two pure-local
+actions: `parse_rule_spec` now also accepts `archive`/`delete`, e.g. `from spam@example.com delete`.
+Unlike `star`/`read`, these need a live IMAP round-trip per match, which `run_email_rules` cannot
+await inline without stalling every other rule and email in the same sync pass. `apply_rule_action`
+(`src/app/mail.rs`) now takes the full `&EmailMessage` (was just `email_id`, since `archive`/`delete`
+need the message's `account`/`folder`/`uid`, not only its id) and, for those two actions, hands off to
+new `spawn_archive`/`spawn_delete` helpers — the same `tokio::spawn` + `mpsc`-report shape the manual
+`a`/`d` keypresses already used, now factored out so a rule match and a manual keypress share one
+code path and one cleanup method (`apply_archive_result`/`apply_delete_result`). A rule action against
+an account with no IMAP config, or an email with an out-of-range UID, silently no-ops (still marks the
+email checked) — same guard-clause behavior the manual paths already had, minus the user-facing
+`notify`.
+
+New `tests/it/email_rules.rs` case covers `parse_rule_spec` accepting both new actions; new
+`tests/it/app.rs` case covers the no-IMAP-config no-op path (207 in-process tests, was 205). New
+scenario `email_rule_archive_delete` (161 TUI scenarios, was 160) drives both actions end-to-end
+against the fake IMAP server. Exercising two rule-triggered actions firing at once as genuinely
+concurrent IMAP connections exposed a pre-existing race in the *test fixture* itself — see
+[`tests/tui/CLAUDE.md`](../tests/tui/CLAUDE.md)'s `Mailbox` concurrency gotcha — not in
+`triptych`'s own code. See `src/app/CLAUDE.md`'s `mail.rs` row and `src/email/CLAUDE.md`'s
+`message.rs` row.
+
+## Slice 22: categories (color tags) (done, 2026-09-27)
+
+Outlook's colored-category tagging, simplified to one tag per message (Outlook allows several —
+one is enough to sort/scan by at a glance). `t` in the email list or the detail popup cycles the
+selected message's `category` column through a fixed six-color palette (`app::mail::CATEGORY_ORDER`:
+red, orange, yellow, green, blue, purple) and wraps back to untagged after purple, via the pure
+`app::mail::next_category` and `App::cycle_selected_category` (same shape as `toggle_selected_star`).
+Persisted through a new nullable `email_messages.category` column (`src/migrations.rs`, idempotent
+`ALTER TABLE`) and `email::store::set_category`; `EmailMessage.category` was added to the struct and
+all three of `store.rs`'s `EmailMessage`-selecting queries, but deliberately not to `NewEmail` — like
+`is_starred`, it's set post-insert, never at parse time.
+
+Rendered as a `[color]` bracket tag in the list row (`email_list_item`, colored via a new
+`category_color` helper — named ANSI colors only, `LightRed`/`Magenta` approximating orange/purple
+since ratatui's `Color` has no true variant for either) and as a "Category: <Name>" line in the
+detail popup; both title-bar hint strings gained `t: category`.
+
+New `tests/it/app.rs` cases cover `next_category`'s wraparound (pure) and
+`cycle_selected_category`'s full cycle through the DB (209 in-process tests, was 207). New scenario
+`email_category_cycle` drives all six colors plus the wrap back to untagged, checking both the DB
+column and the list-row tag (162 TUI scenarios, was 161). See `src/app/CLAUDE.md`'s `mail.rs` row,
+`src/email/CLAUDE.md`'s `message.rs`/`store.rs` rows, and `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+
+## Slice 23: attachment-presence filter (done, 2026-09-27)
+
+`H` in the email list cycles `App.attachment_filter` (`Option<bool>`) through merged (all mail) ->
+has attachments only -> no attachments only -> merged, via `App::cycle_attachment_filter` — same
+fixed 3-state shape as `cycle_focus_filter`, but simpler: `EmailMessage.has_attachments` is always
+known (computed at query time by `email::store::get_recent`'s `EXISTS(...)` subquery, never `None`),
+so unlike focus there's no "unclassified" bucket to fall out of. `refresh_emails` gained a matching
+`.retain()` step, placed right after `focus_filter`'s in the existing account -> folder -> focus ->
+attachment -> snooze chain. No schema change needed — `email_attachments` already existed (Slice 9).
+Title bar gained `H: attachment filter` and a `· attach: Yes`/`No` tag, same style as the other
+filters' tags. `handle_email_key` (`src/tui/keys.rs`) crossed clippy's 100-line function limit once
+`H` was added, so the four filter-cycle keys (`A`/`F`/`I`/`H`) were split into a private
+`handle_email_filter_key` helper.
+
+New `tests/it/app.rs` case `cycle_attachment_filter_walks_has_then_lacks_then_back_to_merged` covers
+the full 3-state cycle against the DB (210 in-process tests, was 209). New scenario
+`email_attachment_filter` seeds one message with an `email_attachments` row and one without, checking
+both the `[attach]` list tag and all three filter states (163 TUI scenarios, was 162). See
+`src/app/CLAUDE.md`'s `mail.rs` row and `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+
+## Slice 24: unread/starred filter chips (done, 2026-09-27)
+
+`U` cycles `App.unread_filter` and `S` cycles `App.starred_filter` (both `Option<bool>`) through
+merged (all mail) -> matching only -> non-matching only -> merged, via `App::cycle_unread_filter`/
+`App::cycle_starred_filter` — same fixed 3-state shape as `cycle_attachment_filter`:
+`EmailMessage.is_read`/`is_starred` are always known, never `None`, so neither has an "unclassified"
+bucket to fall out of. `refresh_emails` gained two matching `.retain()` steps, placed right after
+`attachment_filter`'s in the account -> folder -> focus -> attachment -> unread -> starred -> snooze
+chain. No schema change needed — both columns already existed. Title bar gained `U: unread filter`/
+`S: starred filter` and `· unread: Yes`/`No` / `· starred: Yes`/`No` tags, same style as the other
+filters. `handle_email_filter_key` (`src/tui/keys.rs`, split out in Slice 23) grew from four to six
+filter-cycle keys (`A`/`F`/`I`/`H`/`U`/`S`).
+
+New `tests/it/app.rs` cases `cycle_unread_filter_walks_unread_then_read_then_back_to_merged` and
+`cycle_starred_filter_walks_starred_then_unstarred_then_back_to_merged` cover both full 3-state
+cycles against the DB (214 in-process tests, was 212). New scenarios `email_unread_filter` and
+`email_starred_filter` each seed two messages, mark one read/starred via a raw `UPDATE`, and check
+all three filter states plus (for starred) the `●` list marker (165 TUI scenarios, was 163). See
+`src/app/CLAUDE.md`'s `mail.rs` row and `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+
+## Slice 25: sender-domain filter (done, 2026-09-27)
+
+`@` in the email list cycles `App.domain_filter` (`Option<String>`) through `None` (merged, the
+default) and every sender domain with >= 1 stored message, alphabetical
+(`email::store::distinct_domains`: `SELECT DISTINCT substr(from_addr, instr(from_addr, '@') + 1)
+... ORDER BY domain`, mirroring `distinct_accounts`/`distinct_folders`'s shape), then back to
+`None`, via `App::cycle_domain_filter` — same dynamic-list cycle shape as
+`cycle_account_filter`/`cycle_folder_filter`. `EmailMessage.from_addr` is always a bare address
+(`message.rs::parse_raw` already splits any display name off via `mail-parser`), so the retain
+predicate is a plain `rsplit('@').next()` comparison, no re-parsing needed. `refresh_emails`
+gained a matching `.retain()` step, placed last in the account -> folder -> focus -> attachment ->
+unread -> starred -> domain -> snooze chain. Title bar gained `@: domain filter` and a
+`· domain: {domain}` tag, same style as the other filters' tags.
+
+Not bound to `G`: `src/app/motion.rs`'s vim-motion layer claims `G` (bottom-of-list, paired with
+`gg`) ahead of every per-view key handler in the email list (`src/tui/CLAUDE.md`'s "Motions run
+first" rule), so a `G` binding here would never fire — caught by a failing TUI scenario before
+shipping (see `docs/DEVELOPMENT.md`'s Slice 25 entry). `@` was free (checked via `grep -n
+"MotionKey::Char\|Char('@')" src/app/motion.rs src/tui/keys.rs`) and reads naturally for "domain".
+
+New `tests/it/app.rs` case `cycle_domain_filter_walks_every_domain_then_back_to_merged` covers the
+full cycle against the DB (215 in-process tests, was 214). New scenario `email_domain_filter`
+seeds two messages at different domains and checks all three filter states (166 TUI scenarios, was
+165). See `src/app/CLAUDE.md`'s `mail.rs` row, `src/email/CLAUDE.md`'s `store.rs` row, and
+`src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+
 ## Explicitly deferred
 
 - OAuth2 / Gmail-native auth.
-- **Rules / auto-actions** (e.g. "always archive mail from X", "auto-star mail matching Y").
-  Not started. Would build on the triage/filter infrastructure above rather than replace it.
-- **Meeting scheduling from email** (detect a meeting request in a message, offer to create a
-  calendar block). Not started; needs `src/app/calendar.rs`/`schedule_io.rs` integration.
 - **Calendar integration with email** (e.g. surfacing today's events in the email view, or vice
-  versa). Not started.
+  versa, or writing an accepted invite into `schedule_blocks` instead of `tasks`). Not started —
+  [Slice 19](#slice-19-meeting-invites-done-2026-09-27) covers detect-and-accept only.
 - **Multiple simultaneous account inbox views** (side-by-side, not just the account filter's
   one-at-a-time cycle). Not started — `App.account_filter` is a single `Option<String>`, so this
   would need a real layout change, not just another filter state.
-- **Advanced filtering/sorting** beyond date, priority, and now focus (e.g. filter by attachment
-  presence, sender domain, or a saved combination of filters). Not started.
+- **Advanced filtering/sorting** beyond date, priority, focus, attachment presence, unread, star
+  state and sender domain (e.g. a saved combination of filters). Not started.
 
 ## Known limitations
 

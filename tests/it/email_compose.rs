@@ -1,7 +1,7 @@
 use chrono::Utc;
 use triptych::app::{
-    ComposeField, ComposeState, chain_references, forward_subject, merge_reply_all_cc,
-    quote_original, reply_subject,
+    ComposeField, ComposeState, chain_references, compose_full_body, forward_subject,
+    merge_reply_all_cc, quote_original, reply_subject,
 };
 use triptych::email::EmailMessage;
 
@@ -24,9 +24,14 @@ fn mail(subject: &str) -> EmailMessage {
         cc_addrs: Some("cc1@example.com, cc2@example.com".into()),
         references_header: None,
         is_starred: false,
+        category: None,
         has_attachments: false,
         snoozed_until: None,
         triage_focused: None,
+        meeting_title: None,
+        meeting_start: None,
+        meeting_end: None,
+        meeting_location: None,
     }
 }
 
@@ -98,4 +103,19 @@ fn compose_field_cycles_forward_and_back_through_all_four_fields() {
 
     state.prev_field();
     assert_eq!(state.active_field, ComposeField::Body);
+}
+
+#[test]
+fn compose_full_body_orders_signature_between_body_and_quoted() {
+    assert_eq!(
+        compose_full_body("hi", Some("-- \nMe"), Some("> old")),
+        "hi\n\n-- \nMe\n\n> old"
+    );
+}
+
+#[test]
+fn compose_full_body_omits_separators_for_absent_parts() {
+    assert_eq!(compose_full_body("hi", None, None), "hi");
+    assert_eq!(compose_full_body("", Some("sig"), None), "sig");
+    assert_eq!(compose_full_body("", None, Some("> old")), "> old");
 }

@@ -1283,6 +1283,20 @@ def _(c: Ctx):
     c.eq(c.db("select sum(is_read) from email_messages")[0][0], 1, "only selected email marked")
 
 
+@scenario("email_category_cycle")
+def _(c: Ctx):
+    c.seed_emails(1)
+    t = c.tui()
+    t.press("m")
+    c.eq(c.db("select category from email_messages")[0][0], None, "untagged before cycling")
+    for expected in ("red", "orange", "yellow", "green", "blue", "purple"):
+        t.press("t")
+        c.eq(c.db("select category from email_messages")[0][0], expected, f"category after cycling to {expected}")
+        c.check(t.has(f"[{expected}]"), f"[{expected}] tag missing from list row")
+    t.press("t")
+    c.eq(c.db("select category from email_messages")[0][0], None, "category after wrapping back to untagged")
+
+
 @scenario("email_convert_task")
 def _(c: Ctx):
     c.seed_emails(1, subject="Pay invoice tomorrow")
@@ -1639,6 +1653,27 @@ def _(c: Ctx):
     c.check(len(saved) == 1, f"attachment file not written under {c.sb.attachment_dir}")
 
 
+@scenario("imap_tui_meeting_invite")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Invitation: Team Sync", invite=True)
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("[invite]", msg="list did not show the meeting-invite tag")
+    t.press("v")
+    c.see("Meeting: Team Sync", msg="detail popup did not show the invite line")
+    c.see("Location: Conference Room A", msg="detail popup did not show the invite location")
+    c.see("Press M to accept as a task", msg="detail popup did not show the accept hint")
+    t.press("M")
+    c.see("Email converted to task", 5, msg="M did not report accepting the invite")
+    c.see("Press M to accept as a task", gone=True, msg="accept hint should disappear once converted")
+    c.wait_db("select count(*) from tasks where description = 'Meeting: Team Sync'", [(1,)])
+    t.press("ESC")
+    c.see("[task]", msg="list did not tag the email as converted after accepting the invite")
+    c.see("[invite]", gone=True, msg="[invite] tag should drop once accepted, [task] covers it")
+
+
 @scenario("imap_tui_folder_filter")
 def _(c: Ctx):
     mb = c.imap()
@@ -1758,6 +1793,32 @@ def _(c: Ctx):
         c.eq(msgs[0]["rcpt_to"], ["newperson@example.com"], "recipient")
         c.eq(msgs[0]["headers"].get("Subject"), "Hello there", "subject")
         c.check("Just checking in." in msgs[0]["body"], f"body: {msgs[0]['body']!r}")
+
+
+@scenario("email_compose_signature")
+def _(c: Ctx):
+    sm = c.smtp()
+    t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"EMAIL_SIGNATURE": "Best,\\nAlex"}), 42, 130)
+    c.t = t
+    t.spawn()
+    c.check(t.wait_for("To-Do", 10), "TUI did not start")
+    t.press("m", "c")
+    c.see("Ctrl-S: send")
+    c.check(t.has("Best,") and t.has("Alex"), "signature not shown in compose popup")
+    t.type("newperson@example.com")
+    t.press("TAB", "TAB")  # To -> Cc -> Subject
+    t.type("Hello there")
+    t.press("TAB")  # Subject -> Body
+    t.type("Just checking in.")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "messages recorded by the fake server")
+    if msgs:
+        body = msgs[0]["body"]
+        c.check("Just checking in." in body, f"body missing typed text: {body!r}")
+        c.check("Best," in body and "Alex" in body, f"body missing signature: {body!r}")
+        c.check(body.index("Just checking in.") < body.index("Best,"), "signature not after typed body")
 
 
 @scenario("email_compose_cancel")
@@ -2019,6 +2080,99 @@ def _(c: Ctx):
     c.check(t.has("Subject 0") and t.has("Subject 1") and t.has("Subject 2"), "merged view missing a row after cycling back")
 
 
+@scenario("email_attachment_filter")
+def _(c: Ctx):
+    c.seed_emails(2)  # Subject 0/1
+    c.db(
+        "insert into email_attachments (email_id, part_index, filename, content_type, size_bytes) "
+        "select id, 0, 'report.pdf', 'application/pdf', 1024 from email_messages where subject = 'Subject 0'"
+    )
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row")
+    c.check(t.has("[attach]"), "no [attach] tag on the row with an attachment")
+    c.check(not t.has("attach:"), "attachment tag shown before any filter")
+
+    t.press("H")
+    c.see("attach: Yes")
+    c.check(t.has("Subject 0") and not t.has("Subject 1"), "has-attachments filter wrong rows")
+
+    t.press("H")
+    c.see("attach: No")
+    c.check(not t.has("Subject 0") and t.has("Subject 1"), "no-attachments filter wrong rows")
+
+    t.press("H")
+    c.see("attach:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row after cycling back")
+
+
+@scenario("email_unread_filter")
+def _(c: Ctx):
+    c.seed_emails(2)  # Subject 0/1, both unread by default
+    c.db("update email_messages set is_read = 1 where subject = 'Subject 1'")
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row")
+    c.check(not t.has("unread:"), "unread tag shown before any filter")
+
+    t.press("U")
+    c.see("unread: Yes")
+    c.check(t.has("Subject 0") and not t.has("Subject 1"), "unread-only filter wrong rows")
+
+    t.press("U")
+    c.see("unread: No")
+    c.check(not t.has("Subject 0") and t.has("Subject 1"), "read-only filter wrong rows")
+
+    t.press("U")
+    c.see("unread:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row after cycling back")
+
+
+@scenario("email_starred_filter")
+def _(c: Ctx):
+    c.seed_emails(2)  # Subject 0/1
+    c.db("update email_messages set is_starred = 1 where subject = 'Subject 0'")
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row")
+    c.check(t.has("●"), "no star marker on the starred row")
+    c.check(not t.has("starred:"), "starred tag shown before any filter")
+
+    t.press("S")
+    c.see("starred: Yes")
+    c.check(t.has("Subject 0") and not t.has("Subject 1"), "starred-only filter wrong rows")
+
+    t.press("S")
+    c.see("starred: No")
+    c.check(not t.has("Subject 0") and t.has("Subject 1"), "unstarred-only filter wrong rows")
+
+    t.press("S")
+    c.see("starred:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row after cycling back")
+
+
+@scenario("email_domain_filter")
+def _(c: Ctx):
+    c.seed_emails(2)  # Subject 0/1, both from p{i}@ex.com by default
+    c.db("update email_messages set from_addr = 'boss@work.com' where subject = 'Subject 1'")
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row")
+    c.check(not t.has("domain:"), "domain tag shown before any filter")
+
+    t.press("@")
+    c.see("domain: ex.com")
+    c.check(t.has("Subject 0") and not t.has("Subject 1"), "first-domain filter wrong rows")
+
+    t.press("@")
+    c.see("domain: work.com")
+    c.check(not t.has("Subject 0") and t.has("Subject 1"), "second-domain filter wrong rows")
+
+    t.press("@")
+    c.see("domain:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row after cycling back")
+
+
 @scenario("email_triage_after_sync")
 def _(c: Ctx):
     mb = c.imap()
@@ -2033,7 +2187,9 @@ def _(c: Ctx):
     c.eq(c.db("select subject,triage_focused from email_messages order by subject"),
          [("Quarterly planning notes", 1), ("Weekly Newsletter", 0)],
          "triage misclassified subjects by the fake Ollama's bulk-keyword rule")
-    c.check(len(ol.triage_requests()) >= 2, "sync did not trigger a triage request per email")
+    # "Weekly Newsletter" is resolved by the Rust-side bulk_mail_heuristic before any Ollama call;
+    # only "Quarterly planning notes" is ambiguous enough to reach the fake server.
+    c.eq(len(ol.triage_requests()), 1, "heuristic should skip Ollama for the obvious newsletter")
 
 
 LONG_BODY = "The planning meeting covers the roadmap, staffing and budget for next quarter. " * 6
@@ -2098,6 +2254,37 @@ def _(c: Ctx):
     ol.set_mode("ok")
     t.press("ESC", "v")
     c.see("Summary: Fake summary of: Retry me", 8, msg="reopening did not retry the failed summary")
+
+
+@scenario("email_rule_archive_delete")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add_folder("Archive")  # SELECTable target for the archive rule's UID MOVE/COPY
+    mb.add("Please Archive This")
+    mb.add("Please Delete This")
+    t = c.tui()
+    t.press("m")
+    c.wait_db("select count(*) from email_messages", [(2,)])
+
+    t.press("R")
+    c.see("no saved rules")
+    t.press("n")
+    c.see("New rule:")
+    t.type("subject archive archive")
+    t.press("ENTER")
+    c.see("archive", msg="archive rule not listed after save")
+    t.press("n")
+    t.type("subject delete delete")
+    t.press("ENTER")
+    c.see("delete", msg="delete rule not listed after save")
+    t.press("ESC")
+
+    t.press("s")
+    c.wait_db(
+        "select count(*) from email_messages",
+        [(0,)],
+        timeout=20,
+    )
 
 
 # ---------------------------------------------------------------- vim motions

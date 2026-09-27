@@ -160,6 +160,9 @@ pub struct SmtpConfig {
     /// (or silently rewrite) a From that doesn't match the login, so there's no separate
     /// `SMTP_FROM` override.
     pub from_addr: String,
+    /// Appended below the editable body (and above any quoted original) on compose/reply/forward
+    /// — see `app::mail::compose_full_body`. `None` unless `EMAIL_SIGNATURE[_<LABEL>]` is set.
+    pub signature: Option<String>,
 }
 
 impl std::fmt::Debug for SmtpConfig {
@@ -171,8 +174,19 @@ impl std::fmt::Debug for SmtpConfig {
             .field("smtp_username", &self.smtp_username)
             .field("smtp_password", &"<redacted>")
             .field("from_addr", &self.from_addr)
+            .field("signature", &self.signature)
             .finish()
     }
+}
+
+/// Turns a raw `EMAIL_SIGNATURE` value into `Some(text)`, or `None` for a blank/whitespace-only one.
+///
+/// Converts literal two-character `\n` escapes into real newlines — a `.env` value is one line, so
+/// this is the only way to fit a multi-line signature in it.
+#[must_use]
+pub fn normalize_signature(raw: &str) -> Option<String> {
+    let sig = raw.replace("\\n", "\n");
+    if sig.trim().is_empty() { None } else { Some(sig) }
 }
 
 impl SmtpConfig {
@@ -216,6 +230,8 @@ impl SmtpConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(587);
 
+        let signature = env::var("EMAIL_SIGNATURE").ok().as_deref().and_then(normalize_signature);
+
         Some(Self {
             account: "default".to_string(),
             smtp_server,
@@ -223,6 +239,7 @@ impl SmtpConfig {
             from_addr: smtp_username.clone(),
             smtp_username,
             smtp_password,
+            signature,
         })
     }
 
@@ -235,6 +252,8 @@ impl SmtpConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(587);
+        let signature =
+            env::var(format!("EMAIL_SIGNATURE{suffix}")).ok().as_deref().and_then(normalize_signature);
 
         Some(Self {
             account: label.to_string(),
@@ -243,6 +262,7 @@ impl SmtpConfig {
             from_addr: smtp_username.clone(),
             smtp_username,
             smtp_password,
+            signature,
         })
     }
 }

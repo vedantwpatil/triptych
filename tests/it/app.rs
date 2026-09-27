@@ -860,6 +860,34 @@ async fn toggling_star_flips_the_flag_and_toggling_again_clears_it() {
     assert!(!app.emails[app.selected_email].is_starred);
 }
 
+#[test]
+fn next_category_walks_the_palette_and_wraps_to_none() {
+    use triptych::app::next_category;
+
+    assert_eq!(next_category(None).as_deref(), Some("red"));
+    assert_eq!(next_category(Some("red")).as_deref(), Some("orange"));
+    assert_eq!(next_category(Some("purple")), None);
+    // An unrecognized value (shouldn't happen in practice) restarts at the beginning.
+    assert_eq!(next_category(Some("not-a-color")).as_deref(), Some("red"));
+}
+
+#[tokio::test]
+async fn cycling_category_walks_the_fixed_palette_and_wraps_to_untagged() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.emails[app.selected_email].category, None);
+
+    for expected in triptych::app::CATEGORY_ORDER {
+        app.cycle_selected_category().await.expect("cycle");
+        assert_eq!(app.emails[app.selected_email].category.as_deref(), Some(expected));
+    }
+
+    app.cycle_selected_category().await.expect("wrap");
+    assert_eq!(app.emails[app.selected_email].category, None);
+}
+
 async fn insert_email_for_account(pool: &SqlitePool, uid: i64, subject: &str, account: &str) {
     sqlx::query(
         "INSERT INTO email_messages (uid, message_id, account, from_addr, subject, date_utc) VALUES (?, ?, ?, 'a@b.c', ?, '2026-01-01T00:00:00Z')",
@@ -954,6 +982,122 @@ async fn cycle_folder_filter_walks_every_folder_then_back_to_merged() {
     app.cycle_folder_filter().await.expect("cycle");
     assert_eq!(app.folder_filter, None);
     assert_eq!(app.emails.len(), 2);
+}
+
+#[tokio::test]
+async fn cycle_attachment_filter_walks_has_then_lacks_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_account(&pool, 1, "with attachment", "work").await;
+    insert_email_for_account(&pool, 2, "plain note", "work").await;
+    sqlx::query(
+        "INSERT INTO email_attachments (email_id, part_index, filename, content_type, size_bytes)
+         SELECT id, 0, 'report.pdf', 'application/pdf', 1024 FROM email_messages WHERE uid = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert attachment");
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.attachment_filter, None);
+
+    app.cycle_attachment_filter().await.expect("cycle");
+    assert_eq!(app.attachment_filter, Some(true));
+    assert_eq!(subjects(&app), ["with attachment"]);
+
+    app.cycle_attachment_filter().await.expect("cycle");
+    assert_eq!(app.attachment_filter, Some(false));
+    assert_eq!(subjects(&app), ["plain note"]);
+
+    app.cycle_attachment_filter().await.expect("cycle");
+    assert_eq!(app.attachment_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+#[tokio::test]
+async fn cycle_unread_filter_walks_unread_then_read_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_account(&pool, 1, "unread memo", "work").await;
+    insert_email_for_account(&pool, 2, "read memo", "work").await;
+    sqlx::query("UPDATE email_messages SET is_read = 1 WHERE uid = 2")
+        .execute(&pool)
+        .await
+        .expect("mark read");
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.unread_filter, None);
+
+    app.cycle_unread_filter().await.expect("cycle");
+    assert_eq!(app.unread_filter, Some(true));
+    assert_eq!(subjects(&app), ["unread memo"]);
+
+    app.cycle_unread_filter().await.expect("cycle");
+    assert_eq!(app.unread_filter, Some(false));
+    assert_eq!(subjects(&app), ["read memo"]);
+
+    app.cycle_unread_filter().await.expect("cycle");
+    assert_eq!(app.unread_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+#[tokio::test]
+async fn cycle_starred_filter_walks_starred_then_unstarred_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_account(&pool, 1, "starred memo", "work").await;
+    insert_email_for_account(&pool, 2, "plain memo", "work").await;
+    sqlx::query("UPDATE email_messages SET is_starred = 1 WHERE uid = 1")
+        .execute(&pool)
+        .await
+        .expect("mark starred");
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.starred_filter, None);
+
+    app.cycle_starred_filter().await.expect("cycle");
+    assert_eq!(app.starred_filter, Some(true));
+    assert_eq!(subjects(&app), ["starred memo"]);
+
+    app.cycle_starred_filter().await.expect("cycle");
+    assert_eq!(app.starred_filter, Some(false));
+    assert_eq!(subjects(&app), ["plain memo"]);
+
+    app.cycle_starred_filter().await.expect("cycle");
+    assert_eq!(app.starred_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+#[tokio::test]
+async fn cycle_domain_filter_walks_every_domain_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_from(&pool, 1, "gh notice", "bot@github.com").await;
+    insert_email_for_from(&pool, 2, "work memo", "boss@work.com").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.domain_filter, None);
+
+    app.cycle_domain_filter().await.expect("cycle");
+    assert_eq!(app.domain_filter.as_deref(), Some("github.com"));
+    assert_eq!(subjects(&app), ["gh notice"]);
+
+    app.cycle_domain_filter().await.expect("cycle");
+    assert_eq!(app.domain_filter.as_deref(), Some("work.com"));
+    assert_eq!(subjects(&app), ["work memo"]);
+
+    app.cycle_domain_filter().await.expect("cycle");
+    assert_eq!(app.domain_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+async fn insert_email_for_from(pool: &SqlitePool, uid: i64, subject: &str, from_addr: &str) {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, account, from_addr, subject, date_utc) VALUES (?, ?, 'work', ?, ?, '2026-01-01T00:00:00Z')",
+    )
+    .bind(uid)
+    .bind(format!("m{uid}"))
+    .bind(from_addr)
+    .bind(subject)
+    .execute(pool)
+    .await
+    .expect("insert email");
 }
 
 #[test]
@@ -1367,4 +1511,216 @@ async fn delete_selected_draft_removes_it_from_db_and_the_open_list() {
     assert_eq!(app.drafts.len(), 1);
     assert_eq!(draft_count(&pool).await, 1);
     assert_eq!(app.selected_draft, 0, "selection clamps back into range");
+}
+
+async fn insert_email_with_invite(
+    pool: &SqlitePool,
+    uid: i64,
+    subject: &str,
+    meeting_title: &str,
+    start: &str,
+    end: &str,
+) -> i64 {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc, meeting_title, meeting_start, meeting_end, meeting_location) \
+         VALUES (?, ?, 'a@b.c', ?, '2026-01-01T00:00:00Z', ?, ?, ?, 'Room 1')",
+    )
+    .bind(uid)
+    .bind(format!("m{uid}"))
+    .bind(subject)
+    .bind(meeting_title)
+    .bind(start)
+    .bind(end)
+    .execute(pool)
+    .await
+    .expect("insert email with invite")
+    .last_insert_rowid()
+}
+
+#[tokio::test]
+async fn accept_meeting_invite_creates_a_scheduled_task_and_marks_the_email_converted() {
+    let pool = test_pool().await;
+    insert_email_with_invite(
+        &pool,
+        1,
+        "Invitation: Team Sync",
+        "Team Sync",
+        "2026-01-15T14:00:00Z",
+        "2026-01-15T15:00:00Z",
+    )
+    .await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.accept_meeting_invite().await.expect("accept invite");
+
+    app.load_tasks().await.expect("load tasks");
+    assert_eq!(app.tasks.len(), 1);
+    assert_eq!(app.tasks[0].description, "Meeting: Team Sync");
+    assert_eq!(
+        app.tasks[0].scheduled_at,
+        Some(Utc.with_ymd_and_hms(2026, 1, 15, 14, 0, 0).unwrap())
+    );
+    assert_eq!(app.tasks[0].duration_minutes, Some(60));
+    let task_id = app.tasks[0].id;
+
+    app.refresh_emails().await.expect("reload emails");
+    assert_eq!(app.emails[0].task_id, Some(task_id));
+}
+
+#[tokio::test]
+async fn accept_meeting_invite_is_a_no_op_without_an_invite() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "just a normal email", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.accept_meeting_invite().await.expect("no-op");
+
+    app.load_tasks().await.expect("load tasks");
+    assert!(app.tasks.is_empty());
+}
+
+#[tokio::test]
+async fn accept_meeting_invite_is_idempotent_once_already_converted() {
+    let pool = test_pool().await;
+    insert_email_with_invite(
+        &pool,
+        1,
+        "Invitation: Team Sync",
+        "Team Sync",
+        "2026-01-15T14:00:00Z",
+        "2026-01-15T15:00:00Z",
+    )
+    .await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    app.accept_meeting_invite().await.expect("accept invite");
+
+    app.accept_meeting_invite().await.expect("second call no-ops");
+
+    app.load_tasks().await.expect("load tasks");
+    assert_eq!(app.tasks.len(), 1, "must not create a second task");
+}
+
+async fn rule_applied(pool: &SqlitePool, email_id: i64) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT rule_applied FROM email_messages WHERE id = ?")
+        .bind(email_id)
+        .fetch_one(pool)
+        .await
+        .expect("read rule_applied")
+        == 1
+}
+
+#[tokio::test]
+async fn commit_rule_input_saves_a_valid_spec_and_reloads_the_popup_list() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    app.start_rule_input();
+    "subject newsletter star".clone_into(&mut app.input_buffer);
+
+    app.commit_rule_input().await;
+
+    assert!(matches!(app.input_mode, InputMode::Normal));
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].match_field, "subject");
+    assert_eq!(app.rules[0].pattern, "newsletter");
+    assert_eq!(app.rules[0].action, "star");
+}
+
+#[tokio::test]
+async fn commit_rule_input_rejects_an_unparseable_spec_and_saves_nothing() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    app.start_rule_input();
+    "body newsletter star".clone_into(&mut app.input_buffer);
+
+    app.commit_rule_input().await;
+
+    assert!(app.rules.is_empty());
+}
+
+#[tokio::test]
+async fn run_email_rules_stars_only_the_matching_email() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "weekly newsletter", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "team sync", "2026-01-02T00:00:00Z").await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+    app.start_rule_input();
+    "subject newsletter star".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+
+    app.run_email_rules().await;
+
+    let by_subject = |s: &str| app.emails.iter().find(|e| e.subject == s).expect("email present");
+    assert!(by_subject("weekly newsletter").is_starred);
+    assert!(!by_subject("team sync").is_starred);
+    assert!(rule_applied(&pool, by_subject("weekly newsletter").id).await);
+    assert!(rule_applied(&pool, by_subject("team sync").id).await);
+}
+
+#[tokio::test]
+async fn run_email_rules_does_not_re_star_after_a_manual_unstar() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "weekly newsletter", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    app.start_rule_input();
+    "subject newsletter star".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+    app.run_email_rules().await;
+    app.toggle_selected_star().await.expect("unstar");
+    assert!(!app.emails[app.selected_email].is_starred);
+
+    app.run_email_rules().await;
+
+    assert!(
+        !app.emails[app.selected_email].is_starred,
+        "already-checked mail must not be re-matched on a later pass"
+    );
+}
+
+#[tokio::test]
+async fn run_email_rules_archive_and_delete_are_a_no_op_without_imap_config() {
+    // No IMAP_* env vars are set in this process (see tests/CLAUDE.md), so `EmailConfig::for_account`
+    // returns None for the row's `account = 'default'` and `apply_rule_action` must skip the spawn
+    // rather than panic — the email stays exactly as loaded, just marked checked.
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "please archive me", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "please delete me", "2026-01-02T00:00:00Z").await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+    app.start_rule_input();
+    "subject archive archive".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+    app.start_rule_input();
+    "subject delete delete".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+
+    app.run_email_rules().await;
+
+    assert_eq!(app.emails.len(), 2, "no config to archive/delete against, both rows remain");
+    let by_subject = |s: &str| app.emails.iter().find(|e| e.subject == s).expect("email present");
+    assert!(rule_applied(&pool, by_subject("please archive me").id).await);
+    assert!(rule_applied(&pool, by_subject("please delete me").id).await);
+}
+
+#[tokio::test]
+async fn delete_selected_rule_removes_it_and_clamps_selection() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    for spec in ["subject newsletter star", "from noreply read"] {
+        app.start_rule_input();
+        spec.clone_into(&mut app.input_buffer);
+        app.commit_rule_input().await;
+    }
+    assert_eq!(app.rules.len(), 2);
+    app.selected_rule = 1;
+
+    app.delete_selected_rule().await;
+
+    assert_eq!(app.rules.len(), 1);
+    assert_eq!(app.rules[0].pattern, "newsletter");
+    assert_eq!(app.selected_rule, 0);
 }

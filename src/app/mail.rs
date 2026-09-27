@@ -127,8 +127,10 @@ const SUMMARY_MIN_CHARS: usize = 200;
 const SUMMARY_INPUT_CHARS: usize = 4000;
 /// Cap on how many not-yet-classified emails one background triage pass classifies, so a large
 /// backlog (e.g. after a first-ever sync) doesn't serialize dozens of Ollama round-trips at once —
-/// the rest catch up on the next sync's pass.
-const TRIAGE_BATCH_LIMIT: i64 = 20;
+/// the rest catch up on the next sync's pass. Lowered from 20: most rows resolve via
+/// `bulk_mail_heuristic` with no Ollama call at all, so a smaller cap still clears a normal
+/// backlog in one or two passes while capping worst-case GPU load per pass.
+const TRIAGE_BATCH_LIMIT: i64 = 10;
 /// Cap on how many not-yet-checked emails one `run_email_rules` pass checks against every saved
 /// rule. Unlike `TRIAGE_BATCH_LIMIT`, this is pure local-DB work (no per-item Ollama/IMAP round
 /// trip), so a larger batch per pass costs nothing extra.
@@ -231,6 +233,18 @@ impl App {
         if let Some(focused) = self.focus_filter {
             self.emails.retain(|e| e.triage_focused == Some(focused));
         }
+        if let Some(has_attachments) = self.attachment_filter {
+            self.emails.retain(|e| e.has_attachments == has_attachments);
+        }
+        if let Some(unread) = self.unread_filter {
+            self.emails.retain(|e| e.is_read != unread);
+        }
+        if let Some(starred) = self.starred_filter {
+            self.emails.retain(|e| e.is_starred == starred);
+        }
+        if let Some(domain) = &self.domain_filter {
+            self.emails.retain(|e| e.from_addr.rsplit('@').next() == Some(domain.as_str()));
+        }
         let now = Utc::now();
         if self.show_snoozed {
             self.emails.retain(|e| e.snoozed_until.is_some_and(|t| t > now));
@@ -319,6 +333,84 @@ impl App {
             Some(true) => Some(false),
             Some(false) => None,
         };
+        self.refresh_emails().await
+    }
+
+    /// Cycles the email list's attachment filter: merged (all mail) -> has attachments only -> no
+    /// attachments only -> merged again (`H` in the email list, Slice 23). Same fixed 3-state shape
+    /// as `cycle_focus_filter` — `has_attachments` is always known (computed at query time, see
+    /// `email::store::get_recent`), never `None`, so there's no third "unclassified" bucket to fall
+    /// out of.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn cycle_attachment_filter(&mut self) -> Result<(), sqlx::Error> {
+        self.attachment_filter = match self.attachment_filter {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        self.refresh_emails().await
+    }
+
+    /// Cycles the email list's unread filter: merged (all mail) -> unread only -> read only ->
+    /// merged again (`U` in the email list, Slice 24). Same fixed 3-state shape as
+    /// `cycle_attachment_filter` — `EmailMessage.is_read` is always known, never unclassified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn cycle_unread_filter(&mut self) -> Result<(), sqlx::Error> {
+        self.unread_filter = match self.unread_filter {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        self.refresh_emails().await
+    }
+
+    /// Cycles the email list's starred filter: merged (all mail) -> starred only -> unstarred only
+    /// -> merged again (`S` in the email list, Slice 24). Same fixed 3-state shape as
+    /// `cycle_attachment_filter` — `EmailMessage.is_starred` is always known, never unclassified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn cycle_starred_filter(&mut self) -> Result<(), sqlx::Error> {
+        self.starred_filter = match self.starred_filter {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        self.refresh_emails().await
+    }
+
+    /// Cycles the email list's sender-domain filter: all domains merged -> the first domain with
+    /// any stored mail -> the next -> ... -> all domains merged again (`@` in the email list,
+    /// Slice 25 — every free uppercase letter that reads naturally for "domain" was already
+    /// claimed, `G` by the vim-motion `gg`/`G` top/bottom pair). Same shape as
+    /// `cycle_account_filter`/`cycle_folder_filter` — a dynamic label list read from the DB, not a
+    /// fixed 3-state cycle — since a domain is one of arbitrarily many values, not a
+    /// binary/tri-state property.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn cycle_domain_filter(&mut self) -> Result<(), sqlx::Error> {
+        let domains = email_store::distinct_domains(&self.db_pool)
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        if domains.is_empty() {
+            return Ok(());
+        }
+        self.domain_filter = self.domain_filter.as_ref().map_or_else(
+            || Some(domains[0].clone()),
+            |current| {
+                let next = domains.iter().position(|d| d == current).map_or(0, |i| i + 1);
+                domains.get(next).cloned()
+            },
+        );
         self.refresh_emails().await
     }
 
@@ -546,6 +638,28 @@ impl App {
         self.refresh_emails().await
     }
 
+    /// Cycles the selected email's colored category tag (`t` in the email list) through the fixed
+    /// [`CATEGORY_ORDER`] palette, wrapping back to untagged after the last colour — Outlook's
+    /// colored categories, one tag per message rather than Outlook's several. Same shape as
+    /// `toggle_selected_star`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn cycle_selected_category(&mut self) -> Result<(), sqlx::Error> {
+        let Some(email) = self.emails.get(self.selected_email) else {
+            return Ok(());
+        };
+        let email_id = email.id;
+        let next = next_category(email.category.as_deref());
+
+        crate::email::store::set_category(&self.db_pool, email_id, next.as_deref())
+            .await
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+        self.refresh_emails().await
+    }
+
     /// Opens the email detail popup on the selected email and marks it read,
     /// same as most mail clients do on open. `self.emails` (from `get_recent`)
     /// never carries `body_text` - fetched here, on demand, only for the one
@@ -734,15 +848,71 @@ impl App {
         self.refresh_emails().await
     }
 
+    /// Accepts the selected email's meeting invite (Slice 19: `meeting_title`/`meeting_start` set
+    /// by `email::message::parse_raw`'s ICS extraction) as a scheduled task, direct-`INSERT`ed with
+    /// `scheduled_at` already known — unlike `convert_selected_email_to_task`, this never goes
+    /// through `submit_task`'s NLP parse, since the exact time is already on hand from the ICS
+    /// `DTSTART`/`DTEND`, the same direct-insert shape as `placement::add_task_at_selected_cell`.
+    /// No-ops (with a status message) if the email has no invite or was already converted —
+    /// reuses `email_messages.task_id` as the same "already converted" marker
+    /// `convert_selected_email_to_task` uses, rather than a separate flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn accept_meeting_invite(&mut self) -> Result<(), sqlx::Error> {
+        let Some(email) = self.emails.get(self.selected_email) else {
+            return Ok(());
+        };
+        if email.task_id.is_some() {
+            self.notify("Email already converted to a task");
+            return Ok(());
+        }
+        let Some(title) = email.meeting_title.clone() else {
+            self.notify("This email has no meeting invite");
+            return Ok(());
+        };
+        let Some(start) = email.meeting_start else {
+            self.notify("This email has no meeting invite");
+            return Ok(());
+        };
+        let email_id = email.id;
+        let duration_minutes = email
+            .meeting_end
+            .and_then(|end| (end - start).num_minutes().try_into().ok())
+            .filter(|&m: &i32| m > 0);
+        let category = super::tasks::classify_task(&title).to_string();
+        let new_order = i64::try_from(self.tasks.len()).unwrap_or(i64::MAX);
+
+        let result = sqlx::query(
+            "INSERT INTO tasks (description, completed, item_order, priority, scheduled_at, duration_minutes, task_category) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(format!("Meeting: {title}"))
+        .bind(false)
+        .bind(new_order)
+        .bind(1i32)
+        .bind(start)
+        .bind(duration_minutes)
+        .bind(&category)
+        .execute(&self.db_pool)
+        .await?;
+        let task_id = result.last_insert_rowid();
+
+        self.load_tasks().await?;
+        self.refresh_calendar_data().await;
+        self.finish_email_conversion(email_id, task_id).await
+    }
+
     /// Opens a blank compose form addressed to nobody, sent from the first account with SMTP
     /// configured (multi-account "from" pick is future work — see `docs/roadmap-email.md`).
     pub fn start_compose_new(&mut self) {
-        let Some(account) = SmtpConfig::all_from_env().into_iter().next().map(|c| c.account)
-        else {
+        let Some(smtp) = SmtpConfig::all_from_env().into_iter().next() else {
             self.notify("No SMTP account configured (set SMTP_* in .env)");
             return;
         };
-        self.email_compose = Some(ComposeState::blank(account));
+        let mut compose = ComposeState::blank(smtp.account);
+        compose.signature = smtp.signature;
+        self.email_compose = Some(compose);
         self.input_mode = InputMode::EmailCompose;
     }
 
@@ -773,6 +943,7 @@ impl App {
             in_reply_to: Some(email.message_id.clone()),
             references: Some(chain_references(email)),
             quoted: Some(quote_original(email)),
+            signature: smtp.signature,
             draft_id: None,
         });
         self.input_mode = InputMode::EmailCompose;
@@ -784,10 +955,10 @@ impl App {
         let Some(email) = self.emails.get(self.selected_email) else {
             return;
         };
-        if SmtpConfig::for_account(&email.account).is_none() {
+        let Some(smtp) = SmtpConfig::for_account(&email.account) else {
             self.notify(&format!("No SMTP config for account '{}'", email.account));
             return;
-        }
+        };
         self.email_compose = Some(ComposeState {
             to: String::new(),
             cc: String::new(),
@@ -798,6 +969,7 @@ impl App {
             in_reply_to: None,
             references: None,
             quoted: Some(quote_original(email)),
+            signature: smtp.signature,
             draft_id: None,
         });
         self.input_mode = InputMode::EmailCompose;
@@ -879,10 +1051,8 @@ impl App {
         }
 
         let draft_id = compose.draft_id;
-        let body = compose
-            .quoted
-            .as_ref()
-            .map_or_else(|| compose.body.clone(), |quoted| format!("{}\n\n{quoted}", compose.body));
+        let body =
+            compose_full_body(&compose.body, compose.signature.as_deref(), compose.quoted.as_deref());
         let message = smtp::OutgoingMessage {
             to: compose.to,
             cc: compose.cc,
@@ -971,6 +1141,7 @@ impl App {
         let Some(draft) = self.drafts.get(self.selected_draft) else {
             return;
         };
+        let signature = SmtpConfig::for_account(&draft.account).and_then(|c| c.signature);
         self.email_compose = Some(ComposeState {
             to: draft.to_addrs.clone(),
             cc: draft.cc_addrs.clone(),
@@ -981,6 +1152,7 @@ impl App {
             in_reply_to: None,
             references: None,
             quoted: None,
+            signature,
             draft_id: Some(draft.id),
         });
         self.drafts_open = false;
@@ -1041,7 +1213,9 @@ impl App {
         let typed = self.input_buffer.trim().to_string();
         self.cancel_rule_input();
         let Some((match_field, pattern, action)) = parse_rule_spec(&typed) else {
-            self.notify("Rule not understood (e.g. 'subject newsletter star', 'from noreply read')");
+            self.notify(
+                "Rule not understood (e.g. 'subject newsletter star', 'from noreply archive')",
+            );
             return;
         };
         match email_store::create_rule(&self.db_pool, &match_field, &pattern, &action).await {
@@ -1071,9 +1245,10 @@ impl App {
 
     /// Applies every saved rule to messages not yet checked (`rule_applied = 0`), capped at
     /// `RULE_CHECK_LIMIT` per pass — wired in after every sync (`apply_mail_sync`,
-    /// `apply_folder_sync`), like `run_email_triage`, but inline and awaited rather than spawned:
-    /// unlike triage, a rule match is pure local-DB work (no Ollama/IMAP call), so there's no
-    /// long-running I/O to keep off the render loop.
+    /// `apply_folder_sync`), like `run_email_triage`. `star`/`read` are applied inline and
+    /// awaited (pure local-DB work, no long-running I/O to keep off the render loop); `archive`/
+    /// `delete` (Slice 21) are spawned by `apply_rule_action` itself and only reported back later
+    /// over `archive_tx`/`delete_tx`, same as their manual (`a`/`d`) counterparts.
     pub async fn run_email_rules(&mut self) {
         let rules = email_store::list_rules(&self.db_pool).await.unwrap_or_default();
         if rules.is_empty() {
@@ -1084,7 +1259,7 @@ impl App {
             .unwrap_or_default();
         for email in pending {
             for rule in rules.iter().filter(|r| match_rule(r, &email.subject, &email.from_addr)) {
-                self.apply_rule_action(email.id, &rule.action).await;
+                self.apply_rule_action(&email, &rule.action).await;
             }
             if let Err(e) = email_store::mark_rule_checked(&self.db_pool, email.id).await {
                 tracing::warn!("[Email] rule check mark failed for {}: {e}", email.id);
@@ -1092,25 +1267,65 @@ impl App {
         }
     }
 
-    /// Runs one rule's action against one email: writes it to the DB, then patches the matching
-    /// `App::emails` entry in memory (if loaded) — same reasoning as `apply_triage`, avoids a full
-    /// `refresh_emails` reload mid-pass.
-    async fn apply_rule_action(&mut self, email_id: i64, action: &str) {
-        let ok = match action {
-            "star" => email_store::set_starred(&self.db_pool, email_id, true).await.is_ok(),
-            "read" => email_store::mark_read(&self.db_pool, email_id).await.is_ok(),
-            _ => false,
-        };
-        if !ok {
-            return;
-        }
-        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
-            match action {
-                "star" => email.is_starred = true,
-                "read" => email.is_read = true,
-                _ => {}
+    /// Runs one rule's action against one email. `star`/`read` write straight to the DB and patch
+    /// the matching `App::emails` entry in memory (if loaded) — same reasoning as `apply_triage`,
+    /// avoids a full `refresh_emails` reload mid-pass. `archive`/`delete` (Slice 21) instead hand
+    /// off to `spawn_archive`/`spawn_delete`: a network call can't be awaited inline here without
+    /// stalling every other rule and email in the same sync pass, so their local-row cleanup
+    /// happens later, generically, via `apply_archive_result`/`apply_delete_result` — a rule match
+    /// is indistinguishable from a manual `a`/`d` press once spawned. Silently no-ops (skips this
+    /// action, still marks the email checked) when the account has no IMAP config or an invalid
+    /// UID, same as the manual paths' guard clauses minus the user-facing `notify`.
+    async fn apply_rule_action(&mut self, email: &EmailMessage, action: &str) {
+        match action {
+            "star" => {
+                if email_store::set_starred(&self.db_pool, email.id, true).await.is_ok()
+                    && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
+                {
+                    e.is_starred = true;
+                }
             }
+            "read" => {
+                if email_store::mark_read(&self.db_pool, email.id).await.is_ok()
+                    && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
+                {
+                    e.is_read = true;
+                }
+            }
+            "archive" | "delete" => {
+                let Some(config) = EmailConfig::for_account(&email.account) else {
+                    return;
+                };
+                let Ok(uid) = u32::try_from(email.uid) else {
+                    return;
+                };
+                let folder = email.folder.clone();
+                if action == "archive" {
+                    self.spawn_archive(config, folder, uid, email.id);
+                } else {
+                    self.spawn_delete(config, folder, uid, email.id);
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// Spawns the server-delete-then-local-drop sequence for one message and reports over
+    /// `delete_tx`, never awaited — shared by `delete_selected_email` (user-initiated, `d`) and
+    /// `apply_rule_action`'s `"delete"` action (Slice 21), so a rule's network call can't freeze
+    /// the TUI any more than a manual delete can.
+    fn spawn_delete(&self, config: EmailConfig, folder: String, uid: u32, email_id: i64) {
+        let (db_pool, tx) = (self.db_pool.clone(), self.delete_tx.clone());
+        tokio::spawn(async move {
+            let source = ImapMailSource::new(config);
+            let result = match source.delete(&folder, uid).await {
+                Ok(()) => email_store::delete_email(&db_pool, email_id)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(DeleteResult { email_id, result });
+        });
     }
 
     /// Deletes the selected email: server first (`UID STORE +FLAGS.SILENT (\Deleted)` then
@@ -1130,21 +1345,10 @@ impl App {
             self.notify("Cannot delete: invalid UID");
             return;
         };
-        let email_id = email.id;
-        let folder = email.folder.clone();
+        let (email_id, folder) = (email.id, email.folder.clone());
 
         self.notify("Deleting...");
-        let (db_pool, tx) = (self.db_pool.clone(), self.delete_tx.clone());
-        tokio::spawn(async move {
-            let source = ImapMailSource::new(config);
-            let result = match source.delete(&folder, uid).await {
-                Ok(()) => email_store::delete_email(&db_pool, email_id)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(DeleteResult { email_id, result });
-        });
+        self.spawn_delete(config, folder, uid, email_id);
     }
 
     /// Applies a finished background delete: on success, drops the row from the in-memory list
@@ -1167,6 +1371,23 @@ impl App {
         }
     }
 
+    /// Spawns the server-archive-then-local-drop sequence for one message and reports over
+    /// `archive_tx`, never awaited — shared by `archive_selected_email` (user-initiated, `a`) and
+    /// `apply_rule_action`'s `"archive"` action (Slice 21), same reasoning as `spawn_delete`.
+    fn spawn_archive(&self, config: EmailConfig, folder: String, uid: u32, email_id: i64) {
+        let (db_pool, tx) = (self.db_pool.clone(), self.archive_tx.clone());
+        tokio::spawn(async move {
+            let source = ImapMailSource::new(config);
+            let result = match source.archive(&folder, uid).await {
+                Ok(()) => email_store::delete_email(&db_pool, email_id)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(ArchiveResult { email_id, result });
+        });
+    }
+
     /// Archives the selected email: server first (`UID MOVE` to `EmailConfig::archive_folder`,
     /// falling back to `COPY`+`STORE`+`EXPUNGE` when the server lacks the `MOVE` extension —
     /// see `client.rs`'s `archive_inner`), local row only on that success, same reasoning as
@@ -1183,21 +1404,10 @@ impl App {
             self.notify("Cannot archive: invalid UID");
             return;
         };
-        let email_id = email.id;
-        let folder = email.folder.clone();
+        let (email_id, folder) = (email.id, email.folder.clone());
 
         self.notify("Archiving...");
-        let (db_pool, tx) = (self.db_pool.clone(), self.archive_tx.clone());
-        tokio::spawn(async move {
-            let source = ImapMailSource::new(config);
-            let result = match source.archive(&folder, uid).await {
-                Ok(()) => email_store::delete_email(&db_pool, email_id)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(ArchiveResult { email_id, result });
-        });
+        self.spawn_archive(config, folder, uid, email_id);
     }
 
     /// Applies a finished background archive: on success, drops the row from the in-memory list
@@ -1305,6 +1515,21 @@ pub fn forward_subject(subject: &str) -> String {
     }
 }
 
+/// Fixed palette a category cycles through (`t` in the email list).
+///
+/// none -> Red -> Orange -> Yellow -> Green -> Blue -> Purple -> none. Outlook's colored-category
+/// tagging, simplified to a single tag per message (Outlook allows several) since one is enough to
+/// sort/scan by at a glance.
+pub const CATEGORY_ORDER: [&str; 6] = ["red", "orange", "yellow", "green", "blue", "purple"];
+
+/// The next category after `current` in [`CATEGORY_ORDER`], wrapping back to `None` after the last.
+#[must_use]
+pub fn next_category(current: Option<&str>) -> Option<String> {
+    let next = current
+        .map_or(0, |c| CATEGORY_ORDER.iter().position(|&x| x == c).map_or(0, |i| i + 1));
+    CATEGORY_ORDER.get(next).map(|&s| s.to_string())
+}
+
 /// RFC 5322 `References`: the original's own `References` header (if any) plus its
 /// `Message-ID`, so mail clients thread the reply under the whole chain, not just one message.
 #[must_use]
@@ -1313,6 +1538,24 @@ pub fn chain_references(email: &EmailMessage) -> String {
         Some(refs) if !refs.is_empty() => format!("{refs} {}", email.message_id),
         _ => email.message_id.clone(),
     }
+}
+
+/// Assembles the outgoing body: the editable `body`, then the account's signature (if any), then
+/// the quoted original (if replying/forwarding) — Outlook's own ordering.
+///
+/// Each part is separated by a blank line, with no leading blank line when an earlier part is
+/// absent/empty. Shared by `send_compose` and the compose popup's live preview so the two can
+/// never drift apart.
+#[must_use]
+pub fn compose_full_body(body: &str, signature: Option<&str>, quoted: Option<&str>) -> String {
+    let mut out = body.to_string();
+    for extra in [signature, quoted].into_iter().flatten() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(extra);
+    }
+    out
 }
 
 #[must_use]
@@ -1476,18 +1719,22 @@ fn snooze_to_local_morning(days_ahead: i64) -> Option<DateTime<Utc>> {
     Some(resolve_local_datetime(naive))
 }
 
-/// Tests whether `rule` matches a message's subject or from-address. `match_field` selects which
-/// (`"from_addr"`, else `"subject"`); the test itself is a case-insensitive substring, not a
-/// regex — keeps rule specs typeable in one line (see `parse_rule_spec`).
+/// Tests whether `rule` matches a message's subject or from-address.
+///
+/// `match_field` selects which (`"from_addr"`, else `"subject"`); the test itself is a
+/// case-insensitive substring, not a regex — keeps rule specs typeable in one line
+/// (see `parse_rule_spec`).
 #[must_use]
 pub fn match_rule(rule: &EmailRule, subject: &str, from_addr: &str) -> bool {
     let haystack = if rule.match_field == "from_addr" { from_addr } else { subject };
     haystack.to_lowercase().contains(&rule.pattern.to_lowercase())
 }
 
-/// Parses a rule spec typed in the rules popup's `n` prompt: `<field> <pattern...> <action>`,
-/// e.g. `subject newsletter star` or `from noreply read`. `field` is `subject` or `from`/`sender`
-/// (mapped to the stored `from_addr`); `action` is `star` or `read`; `pattern` is everything in
+/// Parses a rule spec typed in the rules popup's `n` prompt: `<field> <pattern...> <action>`.
+///
+/// E.g. `subject newsletter star` or `from noreply archive`. `field` is `subject` or
+/// `from`/`sender` (mapped to the stored `from_addr`); `action` is `star`, `read`, `archive` or
+/// `delete` (Slice 21 added the latter two — see `apply_rule_action`); `pattern` is everything in
 /// between (may contain spaces). `None` for anything that doesn't fit this shape.
 #[must_use]
 pub fn parse_rule_spec(spec: &str) -> Option<(String, String, String)> {
@@ -1509,6 +1756,8 @@ pub fn parse_rule_spec(spec: &str) -> Option<(String, String, String)> {
     let action = match action.to_lowercase().as_str() {
         "star" => "star",
         "read" => "read",
+        "archive" => "archive",
+        "delete" => "delete",
         _ => return None,
     };
 

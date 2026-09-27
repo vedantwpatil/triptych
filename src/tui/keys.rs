@@ -418,27 +418,22 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
+        KeyCode::Char('t') => {
+            if let Err(e) = app.cycle_selected_category().await {
+                set_error(app, e);
+            }
+        }
         KeyCode::Char('c') => app.start_compose_new(),
         KeyCode::Char('d') => app.delete_selected_email(),
         KeyCode::Char('a') => app.archive_selected_email(),
+        KeyCode::Char('M') => {
+            if let Err(e) = app.accept_meeting_invite().await {
+                set_error(app, e);
+            }
+        }
         KeyCode::Char('D') => app.open_drafts_list().await,
         KeyCode::Char('B') => app.open_folder_browser(),
         KeyCode::Char('R') => app.open_rules_list().await,
-        KeyCode::Char('A') => {
-            if let Err(e) = app.cycle_account_filter().await {
-                set_error(app, e);
-            }
-        }
-        KeyCode::Char('F') => {
-            if let Err(e) = app.cycle_folder_filter().await {
-                set_error(app, e);
-            }
-        }
-        KeyCode::Char('I') => {
-            if let Err(e) = app.cycle_focus_filter().await {
-                set_error(app, e);
-            }
-        }
         KeyCode::Char('z') => app.start_snooze_prompt(),
         KeyCode::Char('Z') => {
             if let Err(e) = app.toggle_show_snoozed().await {
@@ -450,9 +445,29 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
-        _ => {}
+        _ => handle_email_filter_key(app, code).await,
     }
     KeyOutcome::Continue
+}
+
+/// The email list's seven filter-cycle keys (`A`/`F`/`I`/`H`/`U`/`S`/`@`), split out of
+/// `handle_email_key` to keep it under clippy's line-count lint. `@` (not a letter — every free
+/// uppercase letter that reads naturally for "domain" is already claimed, `G` by the vim-motion
+/// `gg`/`G` top/bottom pair) cycles the sender-domain filter. A no-op for any other key.
+async fn handle_email_filter_key(app: &mut App, code: KeyCode) {
+    let result = match code {
+        KeyCode::Char('A') => app.cycle_account_filter().await,
+        KeyCode::Char('F') => app.cycle_folder_filter().await,
+        KeyCode::Char('I') => app.cycle_focus_filter().await,
+        KeyCode::Char('H') => app.cycle_attachment_filter().await,
+        KeyCode::Char('U') => app.cycle_unread_filter().await,
+        KeyCode::Char('S') => app.cycle_starred_filter().await,
+        KeyCode::Char('@') => app.cycle_domain_filter().await,
+        _ => return,
+    };
+    if let Err(e) = result {
+        set_error(app, e);
+    }
 }
 
 /// Keys while typing a snooze spec (`z` in the email list), e.g. `10m`, `2h`, `3d`, `tomorrow`,
@@ -545,9 +560,11 @@ fn handle_folder_browser_key(app: &mut App, code: KeyCode) -> KeyOutcome {
 }
 
 /// Keys while the email detail popup (`v`) is open: close it (scrolling is a motion, see
-/// `handle_motion`), start a reply/reply-all/forward from the open message, or save its
-/// attachments to disk (`s`, no-ops if it has none). Doesn't fall through to the list keys below
-/// it, same as how `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
+/// `handle_motion`), start a reply/reply-all/forward from the open message, save its
+/// attachments to disk (`s`, no-ops if it has none), cycle its category tag (`t`, same as the
+/// list), or accept a meeting invite as a task (`M`, `App::accept_meeting_invite`, no-ops if the
+/// email has none). Doesn't fall through to the list keys below it, same as how
+/// `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
 async fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     match code {
         KeyCode::Esc | KeyCode::Char('v') => app.close_email_detail(),
@@ -564,9 +581,19 @@ async fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
+        KeyCode::Char('t') => {
+            if let Err(e) = app.cycle_selected_category().await {
+                set_error(app, e);
+            }
+        }
         KeyCode::Char('d') => app.delete_selected_email(),
         KeyCode::Char('a') => app.archive_selected_email(),
         KeyCode::Char('s') => app.save_selected_attachments(),
+        KeyCode::Char('M') => {
+            if let Err(e) = app.accept_meeting_invite().await {
+                set_error(app, e);
+            }
+        }
         _ => {}
     }
     KeyOutcome::Continue

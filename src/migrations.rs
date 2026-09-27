@@ -396,6 +396,45 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         tracing::info!("  ✓ Added rule_applied column to email_messages");
     }
 
+    // Meeting-invite fields (Slice 19), extracted from a `text/calendar` MIME part at parse time
+    // (`email::message::parse_raw`'s private `extract_meeting_invite`). All `NULL` for a message
+    // with no calendar part — that's the common case, not a migration gap. `meeting_start`/
+    // `meeting_end` are UTC text, same representation as `date_utc`.
+    if !column_exists(pool, "email_messages", "meeting_title").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN meeting_title TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added meeting_title column to email_messages");
+    }
+    if !column_exists(pool, "email_messages", "meeting_start").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN meeting_start TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added meeting_start column to email_messages");
+    }
+    if !column_exists(pool, "email_messages", "meeting_end").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN meeting_end TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added meeting_end column to email_messages");
+    }
+    if !column_exists(pool, "email_messages", "meeting_location").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN meeting_location TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added meeting_location column to email_messages");
+    }
+
+    // Outlook-style colored category tag (Slice 22), one per message: `NULL` (untagged) or one of
+    // `app::mail::CATEGORY_ORDER`'s colour names. Cycled by `App::cycle_selected_category` (`t` in
+    // the email list).
+    if !column_exists(pool, "email_messages", "category").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN category TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added category column to email_messages");
+    }
+
     tracing::debug!("[Migration] Email schema ready ✓");
     Ok(())
 }

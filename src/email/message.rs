@@ -1,5 +1,8 @@
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
+use icalendar::{Calendar, CalendarDateTime, Component, DatePerhapsTime, EventLike};
 use mail_parser::{MessageParser, MimeHeaders};
 use sqlx::FromRow;
 
@@ -28,6 +31,9 @@ pub struct EmailMessage {
     /// not here, since `parse_raw` only extracts what's already on the wire.
     pub references_header: Option<String>,
     pub is_starred: bool,
+    /// `None` (untagged) or one of `app::mail::CATEGORY_ORDER`'s colour names — Outlook's
+    /// colored-category tag, one per message. Set by `App::cycle_selected_category` (Slice 22).
+    pub category: Option<String>,
     /// `EXISTS(...)` over `email_attachments`, computed by `store::get_recent`'s query rather than
     /// stored — always in sync with the real rows, no separate write path to forget.
     pub has_attachments: bool,
@@ -40,6 +46,13 @@ pub struct EmailMessage {
     /// mail worth attention), `Some(false)` is Other (bulk/automated) — Outlook's Focused Inbox
     /// split. Set by `email::store::set_triage`.
     pub triage_focused: Option<bool>,
+    /// `Some` when this message carried a `text/calendar` `VEVENT` part (Slice 19) — a meeting
+    /// invite. Populated once at parse time (`extract_meeting_invite`), never re-derived, so a
+    /// malformed/unparseable ICS part just leaves these `None` rather than erroring the sync.
+    pub meeting_title: Option<String>,
+    pub meeting_start: Option<DateTime<Utc>>,
+    pub meeting_end: Option<DateTime<Utc>>,
+    pub meeting_location: Option<String>,
 }
 
 /// One MIME attachment's metadata, mirrors the `email_attachments` table. Bytes are never stored
@@ -57,9 +70,11 @@ pub struct EmailAttachment {
     pub size_bytes: i64,
 }
 
-/// A user-defined auto-action, mirrors the `email_rules` table (Slice 18). `match_field` is
-/// `"subject"` or `"from_addr"`, `action` is `"star"` or `"read"` — see `app::mail::match_rule`
-/// for how `pattern` is tested.
+/// A user-defined auto-action, mirrors the `email_rules` table (Slice 18).
+///
+/// `match_field` is `"subject"` or `"from_addr"`, `action` is `"star"`, `"read"`, `"archive"` or
+/// `"delete"` (the latter two added in Slice 21) — see `app::mail::match_rule` for how `pattern`
+/// is tested and `app::mail::apply_rule_action` for how each action is carried out.
 #[derive(Debug, Clone, FromRow)]
 pub struct EmailRule {
     pub id: i64,
@@ -95,6 +110,10 @@ pub struct NewEmail {
     pub cc_addrs: Option<String>,
     pub references_header: Option<String>,
     pub attachments: Vec<NewAttachment>,
+    pub meeting_title: Option<String>,
+    pub meeting_start: Option<DateTime<Utc>>,
+    pub meeting_end: Option<DateTime<Utc>>,
+    pub meeting_location: Option<String>,
 }
 
 /// Comma-joins every address in a `To`/`Cc` header, dropping addresses with no
@@ -171,10 +190,10 @@ pub fn parse_raw(
 
     // A `header_only` fetch (see `client.rs`'s `LARGE_MESSAGE_BYTES`) has no body, so the MIME
     // part structure genuinely can't be known — an empty list here, not a guess.
-    let attachments = if header_only {
-        Vec::new()
+    let (attachments, invite) = if header_only {
+        (Vec::new(), None)
     } else {
-        extract_attachments(&message)
+        (extract_attachments(&message), extract_meeting_invite(&message))
     };
 
     Ok(NewEmail {
@@ -192,6 +211,66 @@ pub fn parse_raw(
         cc_addrs,
         references_header,
         attachments,
+        meeting_title: invite.as_ref().map(|i| i.title.clone()),
+        meeting_start: invite.as_ref().map(|i| i.start),
+        meeting_end: invite.as_ref().and_then(|i| i.end),
+        meeting_location: invite.and_then(|i| i.location),
+    })
+}
+
+/// A meeting invite extracted from a `text/calendar` MIME part.
+#[derive(Debug, Clone)]
+struct MeetingInvite {
+    title: String,
+    start: DateTime<Utc>,
+    end: Option<DateTime<Utc>>,
+    location: Option<String>,
+}
+
+/// `DatePerhapsTime` -> UTC. A bare `DATE` (all-day event) or a `Floating` `DATE-TIME` (no `Z`
+/// suffix, no `TZID`) has no real timezone to resolve against — real Google/Outlook/Apple invites
+/// always emit `Utc` or a `TZID`-qualified time in practice, so treating either as UTC directly is
+/// an acceptable best-effort simplification for a first pass, not a guess relied on elsewhere.
+fn date_perhaps_time_to_utc(dpt: &DatePerhapsTime) -> Option<DateTime<Utc>> {
+    match dpt {
+        DatePerhapsTime::DateTime(cdt) => match cdt {
+            CalendarDateTime::Floating(naive) => Some(naive.and_utc()),
+            _ => cdt.try_into_utc(),
+        },
+        DatePerhapsTime::Date(date) => date.and_hms_opt(0, 0, 0).map(|naive| naive.and_utc()),
+    }
+}
+
+/// Finds the first `VEVENT` in a `text/calendar` MIME part (sent as an attachment either way,
+/// whether or not it declares `Content-Disposition: attachment` — `mail-parser` classifies any
+/// non-plain/html text part that way) and extracts the fields a meeting invite needs to become a
+/// task. `None` if the message has no calendar part, the part doesn't parse as an ICS calendar, or
+/// the event has no usable `DTSTART`.
+fn extract_meeting_invite(message: &mail_parser::Message<'_>) -> Option<MeetingInvite> {
+    let ics_part = message.attachments().find(|part| {
+        part.content_type().is_some_and(|ct| {
+            ct.c_type.eq_ignore_ascii_case("text")
+                && ct.c_subtype.as_deref().is_some_and(|sub| sub.eq_ignore_ascii_case("calendar"))
+        })
+    })?;
+    let text = match &ics_part.body {
+        mail_parser::PartType::Text(t) => t.to_string(),
+        mail_parser::PartType::Binary(b) | mail_parser::PartType::InlineBinary(b) => {
+            String::from_utf8_lossy(b).into_owned()
+        }
+        _ => return None,
+    };
+
+    let calendar = Calendar::from_str(&text).ok()?;
+    let event = calendar.events().next()?;
+    let start = date_perhaps_time_to_utc(&event.get_start()?)?;
+    let end = event.get_end().and_then(|dpt| date_perhaps_time_to_utc(&dpt));
+
+    Some(MeetingInvite {
+        title: event.get_summary().unwrap_or("(no title)").to_string(),
+        start,
+        end,
+        location: event.get_location().map(str::to_string),
     })
 }
 

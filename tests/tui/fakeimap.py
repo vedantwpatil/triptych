@@ -20,6 +20,9 @@ implemented since `client.rs`'s `list_folders_inner` only ever sends `LIST "" *`
 The mailbox is a JSON file (`Mailbox`), re-read on every command, so tests change it between syncs.
 `Mailbox.add(..., attachment=True)` builds a multipart/mixed message with one `application/pdf`
 part (`report-<uid>.pdf`), for exercising attachment extraction/save without a real MIME payload.
+`Mailbox.add(..., invite=True)` builds a multipart/mixed message with a `text/calendar` `VEVENT`
+part (fixed "Team Sync" summary, 2030-01-15 14:00-15:00 UTC, "Conference Room A"), for exercising
+meeting-invite extraction/acceptance (Slice 19).
 Every command is appended to `commands.log` for assertions. TLS uses a throwaway CA made with the
 openssl CLI; the binary trusts it through `SSL_CERT_FILE`, which also stops it trusting real CAs.
 
@@ -69,13 +72,23 @@ def make_certs(d: Path) -> None:
 
 
 def make_message(uid: int, subject: str, sender: str = "Alice Example <alice@example.com>", body: str = "",
-                 pad: int = 0, age_minutes: int = 0, attachment: bool = False) -> str:
+                 pad: int = 0, age_minutes: int = 0, attachment: bool = False, invite: bool = False) -> str:
     date = format_datetime(datetime.now(timezone.utc) - timedelta(minutes=age_minutes + uid))
     body = body or f"Body of {subject}."
     if pad:
         body += "\r\n" + ("x" * 76 + "\r\n") * (pad // 78 + 1)
     headers = (f"From: {sender}\r\nTo: tester@example.com\r\nSubject: {subject}\r\nDate: {date}\r\n"
                f"Message-ID: <fake-{uid}-{abs(hash(subject)) % 10**8}@fakeimap>\r\n")
+    if invite:
+        boundary = f"BOUNDARY{uid}"
+        ics = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\n"
+               f"UID:invite-{uid}@fakeimap\r\nDTSTAMP:20300101T000000Z\r\n"
+               "DTSTART:20300115T140000Z\r\nDTEND:20300115T150000Z\r\n"
+               "SUMMARY:Team Sync\r\nLOCATION:Conference Room A\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+        return (headers + f"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"
+                f"--{boundary}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
+                f"--{boundary}\r\nContent-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n{ics}"
+                f"--{boundary}--\r\n")
     if not attachment:
         return headers + f"Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
     boundary = f"BOUNDARY{uid}"
@@ -87,11 +100,18 @@ def make_message(uid: int, subject: str, sender: str = "Alice Example <alice@exa
             f"--{boundary}--\r\n")
 
 
+# Guards every load-mutate-save sequence against another connection's handler thread (each
+# `Handler` builds its own `Mailbox` instance, so per-instance locking would not help) racing
+# the same mailbox.json: a lost update, or a crash in `save()` when two `.tmp` writers collide.
+_BOX_LOCK = threading.Lock()
+
+
 class Mailbox:
     """JSON-backed INBOX: {"uidvalidity", "next_uid", "messages": [{"uid", "raw"}],
     "archived": [{"uid", "raw", "folder"}]}. `archived` doubles as every other SELECTable
     mailbox's storage, partitioned by its `folder` tag (see `Handler._mailbox_messages`).
-    Safe to edit while serving."""
+    Safe to edit while serving. Concurrent handler threads must wrap their own
+    load-mutate-save sequence in `_BOX_LOCK`; `save()` alone only protects the tmp-file swap."""
 
     def __init__(self, d: Path):
         self.path = d / "mailbox.json"
@@ -103,7 +123,7 @@ class Mailbox:
             return {"uidvalidity": 1, "next_uid": 1, "messages": []}
 
     def save(self, box: dict) -> None:
-        tmp = self.path.with_suffix(".tmp")
+        tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
         tmp.write_text(json.dumps(box))
         tmp.replace(self.path)
 
@@ -306,41 +326,44 @@ class Handler:
                 self.w(f"{tag} BAD unsupported store {flags_arg}\r\n")
                 return
             sign = m.group(1) or "+"
-            box = self.box.load()
-            targets = _uid_set(spec, uids)
-            for msg in self._mailbox_messages(box):
-                if msg["uid"] in targets:
-                    if sign == "-":
-                        msg.pop("deleted", None)
-                    else:
-                        msg["deleted"] = True
-            self.box.save(box)
+            with _BOX_LOCK:
+                box = self.box.load()
+                targets = _uid_set(spec, uids)
+                for msg in self._mailbox_messages(box):
+                    if msg["uid"] in targets:
+                        if sign == "-":
+                            msg.pop("deleted", None)
+                        else:
+                            msg["deleted"] = True
+                self.box.save(box)
             self.w(f"{tag} OK STORE completed\r\n")
         elif sub.upper() == "MOVE":
-            box = self.box.load()
-            if box.get("no_move"):
-                self.w(f"{tag} BAD MOVE not supported\r\n")
-                return
             spec, _, dest_arg = rest.partition(" ")
             dest = (_args(dest_arg) or [""])[0]
-            targets = set(_uid_set(spec, uids))
-            moved = [m for m in self._mailbox_messages(box) if m["uid"] in targets]
-            self._remove_messages(box, targets)
-            box.setdefault("archived", []).extend(
-                {"uid": m["uid"], "raw": m["raw"], "folder": dest} for m in moved
-            )
-            self.box.save(box)
+            with _BOX_LOCK:
+                box = self.box.load()
+                if box.get("no_move"):
+                    self.w(f"{tag} BAD MOVE not supported\r\n")
+                    return
+                targets = set(_uid_set(spec, uids))
+                moved = [m for m in self._mailbox_messages(box) if m["uid"] in targets]
+                self._remove_messages(box, targets)
+                box.setdefault("archived", []).extend(
+                    {"uid": m["uid"], "raw": m["raw"], "folder": dest} for m in moved
+                )
+                self.box.save(box)
             self.w(f"{tag} OK MOVE completed\r\n")
         elif sub.upper() == "COPY":
             spec, _, dest_arg = rest.partition(" ")
             dest = (_args(dest_arg) or [""])[0]
-            box = self.box.load()
-            targets = set(_uid_set(spec, uids))
-            copied = [m for m in self._mailbox_messages(box) if m["uid"] in targets]
-            box.setdefault("archived", []).extend(
-                {"uid": m["uid"], "raw": m["raw"], "folder": dest} for m in copied
-            )
-            self.box.save(box)
+            with _BOX_LOCK:
+                box = self.box.load()
+                targets = set(_uid_set(spec, uids))
+                copied = [m for m in self._mailbox_messages(box) if m["uid"] in targets]
+                box.setdefault("archived", []).extend(
+                    {"uid": m["uid"], "raw": m["raw"], "folder": dest} for m in copied
+                )
+                self.box.save(box)
             self.w(f"{tag} OK COPY completed\r\n")
         else:
             self.w(f"{tag} BAD unsupported UID {sub}\r\n")
@@ -388,12 +411,13 @@ class Handler:
         RFC 3501: sequence numbers shift down as earlier removals in the same response take
         effect, so the n-th removed message (in ascending original order) is reported as
         `original_seq - n` (n 0-based)."""
-        box = self.box.load()
-        msgs = self._mailbox_messages(box)
-        removed_at = [i + 1 for i, m in enumerate(msgs) if m.get("deleted")]
-        removed_uids = {m["uid"] for m in msgs if m.get("deleted")}
-        self._remove_messages(box, removed_uids)
-        self.box.save(box)
+        with _BOX_LOCK:
+            box = self.box.load()
+            msgs = self._mailbox_messages(box)
+            removed_at = [i + 1 for i, m in enumerate(msgs) if m.get("deleted")]
+            removed_uids = {m["uid"] for m in msgs if m.get("deleted")}
+            self._remove_messages(box, removed_uids)
+            self.box.save(box)
         out = "".join(f"* {seq - i} EXPUNGE\r\n" for i, seq in enumerate(removed_at))
         self.w(f"{out}{tag} OK EXPUNGE completed\r\n")
 

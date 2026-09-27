@@ -229,6 +229,10 @@ pub struct ComposeState {
     /// `body` and appended to it at send time — kept separate so backspace/typing in `body` never
     /// touches the quoted text.
     pub quoted: Option<String>,
+    /// The sending account's signature (`SmtpConfig::signature`), rendered between `body` and
+    /// `quoted` and spliced in the same way at send time — see `app::mail::compose_full_body`.
+    /// Read-only in the popup, like `quoted`.
+    pub signature: Option<String>,
     /// Set when resuming a saved draft: the `email_drafts` row to overwrite (rather than insert a
     /// new one) on the next save-as-draft, and to delete once this compose is actually sent.
     pub draft_id: Option<i64>,
@@ -247,6 +251,7 @@ impl ComposeState {
             in_reply_to: None,
             references: None,
             quoted: None,
+            signature: None,
             draft_id: None,
         }
     }

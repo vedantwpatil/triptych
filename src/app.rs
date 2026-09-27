@@ -25,10 +25,11 @@ mod time;
 pub use allocation::*;
 pub use calendar::*;
 pub use mail::{
-    ArchiveResult, AttachmentSaveResult, DeleteResult, FolderListResult, FolderSyncResult, MailSync,
-    SendResult, Summary, SummaryDone, TriageDone, chain_references, forward_subject,
-    match_rule, merge_reply_all_cc, normalize_subject, parse_rule_spec, parse_snooze_spec,
-    quote_original, reply_subject, sanitize_filename, thread_count,
+    ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, DeleteResult, FolderListResult,
+    FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, chain_references,
+    compose_full_body, forward_subject, match_rule, merge_reply_all_cc, next_category,
+    normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original, reply_subject,
+    sanitize_filename, thread_count,
 };
 pub use model::*;
 pub use motion::*;
@@ -149,6 +150,21 @@ pub struct App {
     /// restricts `refresh_emails` to Focused/Other only (Outlook's Focused Inbox split). Cycled
     /// with `I` in the email list.
     pub focus_filter: Option<bool>,
+    /// `None` shows every email regardless of attachments (the default); `Some(true)`/`Some(false)`
+    /// restricts `refresh_emails` to messages with/without at least one attachment. Cycled with `H`
+    /// in the email list (Slice 23).
+    pub attachment_filter: Option<bool>,
+    /// `None` shows every email regardless of read state (the default); `Some(true)`/`Some(false)`
+    /// restricts `refresh_emails` to unread/read only. Cycled with `U` in the email list (Slice 24).
+    pub unread_filter: Option<bool>,
+    /// `None` shows every email regardless of star (the default); `Some(true)`/`Some(false)`
+    /// restricts `refresh_emails` to starred/unstarred only. Cycled with `S` in the email list
+    /// (Slice 24).
+    pub starred_filter: Option<bool>,
+    /// `None` shows every sender domain merged (the default); `Some(domain)` restricts
+    /// `refresh_emails` to senders at that domain (e.g. `"github.com"`). Cycled with `@` in the
+    /// email list (Slice 25).
+    pub domain_filter: Option<String>,
     folder_list_tx: tokio::sync::mpsc::UnboundedSender<FolderListResult>,
     /// Result of a background folder-discovery LIST pass; drained by `run_app`.
     pub folder_list_rx: tokio::sync::mpsc::UnboundedReceiver<FolderListResult>,
@@ -251,6 +267,10 @@ impl App {
             folder_filter: None,
             show_snoozed: false,
             focus_filter: None,
+            attachment_filter: None,
+            unread_filter: None,
+            starred_filter: None,
+            domain_filter: None,
             folder_list_tx,
             folder_list_rx,
             folder_sync_tx,

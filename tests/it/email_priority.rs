@@ -21,9 +21,14 @@ fn mail(subject: &str, snippet: &str, from: &str) -> EmailMessage {
         cc_addrs: None,
         references_header: None,
         is_starred: false,
+        category: None,
         has_attachments: false,
         snoozed_until: None,
         triage_focused: None,
+        meeting_title: None,
+        meeting_start: None,
+        meeting_end: None,
+        meeting_location: None,
     }
 }
 

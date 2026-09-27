@@ -1,7 +1,7 @@
 //! The email list view and its message popup.
 
 use super::centered_rect;
-use crate::app::{App, ComposeField, InputMode, Summary, thread_count};
+use crate::app::{App, ComposeField, InputMode, Summary, compose_full_body, thread_count};
 use crate::email::{EmailMessage, priority};
 use ratatui::{
     Frame,
@@ -11,8 +11,30 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
+/// Maps a [`crate::app::CATEGORY_ORDER`] colour name to a named ANSI colour (Slice 22) — no
+/// `Color::Rgb`/`Indexed`, so the terminal's own theme applies, same convention as `src/urgency.rs`.
+/// Ratatui has no true orange/purple variant, so `LightRed`/`Magenta` approximate them.
+fn category_color(name: &str) -> Color {
+    match name {
+        "red" => Color::Red,
+        "orange" => Color::LightRed,
+        "yellow" => Color::Yellow,
+        "green" => Color::Green,
+        "blue" => Color::Blue,
+        "purple" => Color::Magenta,
+        _ => Color::White,
+    }
+}
+
+/// Title-cases a category name (`"red"` -> `"Red"`) for the detail popup's "Category: " line.
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + chars.as_str())
+}
+
 /// One row of the email list: account/date/sender, `[folder]` tag when not `INBOX` (Slice 13),
-/// priority badge, star, thread-count badge, subject (bold if unread), `[attach]`/`[task]` tags.
+/// priority badge, star, `[category]` tag (Slice 22), thread-count badge, subject (bold if
+/// unread), `[attach]`/`[invite]`/`[task]` tags.
 fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListItem<'static> {
     let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
     let date_text = email
@@ -59,6 +81,12 @@ fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListIte
     if email.is_starred {
         spans.push(Span::styled("● ", Style::default().fg(Color::Yellow)));
     }
+    if let Some(category) = &email.category {
+        spans.push(Span::styled(
+            format!("[{category}] "),
+            Style::default().fg(category_color(category)),
+        ));
+    }
     let count = thread_count(all_emails, email.id);
     if count > 1 {
         spans.push(Span::styled(
@@ -70,6 +98,10 @@ fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListIte
 
     if email.has_attachments {
         spans.push(Span::styled(" [attach]", Style::default().fg(Color::Gray)));
+    }
+    // Once accepted, task_id is set and the [task] tag below already covers it.
+    if email.meeting_title.is_some() && email.task_id.is_none() {
+        spans.push(Span::styled(" [invite]", Style::default().fg(Color::Cyan)));
     }
     if email.task_id.is_some() {
         spans.push(Span::styled(" [task]", Style::default().fg(Color::Blue)));
@@ -115,10 +147,10 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Email (m/Esc: todo, Tab: next view, j/k: move, /: search, v: view, c: compose, s: sync, o: order, Enter: to task, r: read, u: unread, f: star, d: delete, a: archive, D: drafts, A: account filter, F: folder filter, I: focus filter, B: browse folders, R: rules, z: snooze, Z: snoozed view, x: unsnooze)")
+                .title("Email (m/Esc: todo, Tab: next view, j/k: move, /: search, v: view, c: compose, s: sync, o: order, Enter: to task, M: accept meeting, r: read, u: unread, f: star, t: category, d: delete, a: archive, D: drafts, A: account filter, F: folder filter, I: focus filter, H: attachment filter, U: unread filter, S: starred filter, @: domain filter, B: browse folders, R: rules, z: snooze, Z: snoozed view, x: unsnooze)")
                 .title_top(
                     Line::from(format!(
-                        "sorted by {}{}{}{}{} ",
+                        "sorted by {}{}{}{}{}{}{}{}{} ",
                         app.email_sort.label(),
                         app.account_filter
                             .as_deref()
@@ -130,6 +162,21 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
                             "  ·  focus: {}",
                             if focused { "Focused" } else { "Other" }
                         )),
+                        app.attachment_filter.map_or_else(String::new, |has_attach| format!(
+                            "  ·  attach: {}",
+                            if has_attach { "Yes" } else { "No" }
+                        )),
+                        app.unread_filter.map_or_else(String::new, |unread| format!(
+                            "  ·  unread: {}",
+                            if unread { "Yes" } else { "No" }
+                        )),
+                        app.starred_filter.map_or_else(String::new, |starred| format!(
+                            "  ·  starred: {}",
+                            if starred { "Yes" } else { "No" }
+                        )),
+                        app.domain_filter
+                            .as_deref()
+                            .map_or_else(String::new, |d| format!("  ·  domain: {d}")),
                         if app.show_snoozed { "  ·  snoozed view" } else { "" }
                     ))
                     .right_aligned(),
@@ -298,6 +345,33 @@ fn render_rules_popup(f: &mut Frame, app: &App) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+/// Appends the meeting-invite lines (title/time, location, accept hint) when `email` carries one
+/// (Slice 19: `EmailMessage.meeting_title`). No-op otherwise.
+fn push_meeting_invite_lines<'a>(text: &mut Vec<Line<'a>>, email: &'a EmailMessage) {
+    let Some(title) = &email.meeting_title else {
+        return;
+    };
+    let when = email.meeting_start.map_or_else(String::new, |start| {
+        start.with_timezone(&chrono::Local).format(" — %a %b %d, %l:%M %P").to_string()
+    });
+    text.push(Line::from(Span::styled(
+        format!("Meeting: {title}{when}"),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(location) = &email.meeting_location {
+        text.push(Line::from(vec![
+            Span::styled("Location: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(location.clone()),
+        ]));
+    }
+    if email.task_id.is_none() {
+        text.push(Line::from(Span::styled(
+            "Press M to accept as a task",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+}
+
 fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
     let Some(email) = app.emails.get(app.selected_email) else {
         return;
@@ -330,6 +404,12 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             Style::default().fg(Color::Yellow),
         )));
     }
+    if let Some(category) = &email.category {
+        text.push(Line::from(vec![
+            Span::styled("Category: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(capitalize(category), Style::default().fg(category_color(category))),
+        ]));
+    }
     let thread_size = thread_count(&app.emails, email.id);
     if thread_size > 1 {
         text.push(Line::from(Span::styled(
@@ -337,6 +417,7 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             Style::default().fg(Color::DarkGray),
         )));
     }
+    push_meeting_invite_lines(&mut text, email);
     if let Some(attachments) = app.email_attachments.get(&email.id)
         && !attachments.is_empty()
     {
@@ -371,7 +452,7 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    "{} (Esc/v: close, j/k/gg/G: scroll, R: reply, A: reply-all, F: forward, f: star, u: unread, d: delete, a: archive, s: save attachments)",
+                    "{} (Esc/v: close, j/k/gg/G: scroll, R: reply, A: reply-all, F: forward, f: star, u: unread, t: category, d: delete, a: archive, s: save attachments, M: accept meeting)",
                     email.subject
                 ))
                 .style(Style::default().bg(Color::Black)),
@@ -425,13 +506,8 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         compose.active_field == ComposeField::Subject,
     );
 
-    let mut body_text = compose.body.clone();
-    if let Some(quoted) = &compose.quoted {
-        if !body_text.is_empty() {
-            body_text.push_str("\n\n");
-        }
-        body_text.push_str(quoted);
-    }
+    let body_text =
+        compose_full_body(&compose.body, compose.signature.as_deref(), compose.quoted.as_deref());
     let body_active = compose.active_field == ComposeField::Body;
     let body_style = if body_active {
         Style::default().fg(Color::Yellow)

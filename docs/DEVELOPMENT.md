@@ -21,6 +21,139 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-27 (sender-domain filter, Slice 25): `@` in the email list cycles `App.domain_filter`
+  (`Option<String>`) through `None` (merged) and every sender domain with a stored message,
+  alphabetical, then back — same dynamic-list cycle shape as `cycle_account_filter`/
+  `cycle_folder_filter`, via new `App::cycle_domain_filter` and `email::store::distinct_domains`
+  (`SELECT DISTINCT substr(from_addr, instr(from_addr, '@') + 1) ...`, mirroring
+  `distinct_accounts`/`distinct_folders`). `refresh_emails` gained a matching `.retain()` step,
+  last in the filter chain (after `starred_filter`, before snooze). Title bar gained
+  `@: domain filter` and a `· domain: {domain}` tag.
+  First wired to `G` for "domain," which never fired: `src/app/motion.rs` claims `G` for the vim
+  `gg`/`G` bottom motion, and per `src/tui/CLAUDE.md`'s "motions run first" rule in the email list,
+  the per-view key handler never sees it. Caught by the new TUI scenario failing with `screen lacks
+  'domain: ex.com'` on the very first run; root-caused by grepping `MotionKey::Char` in
+  `src/app/motion.rs`, then switched every reference (`src/tui/keys.rs`, `src/tui/ui/email.rs`,
+  `src/app/mail.rs`, `src/app.rs`) from `G` to `@`, confirmed free via `grep -n
+  "MotionKey::Char\|Char('@')"` across both files. New `tests/it/app.rs` case
+  `cycle_domain_filter_walks_every_domain_then_back_to_merged` (215 in-process tests, was 214). New
+  scenario `email_domain_filter` seeds two messages at different domains and drives all three
+  filter states (166 TUI scenarios, was 165). Full gate green: `cargo build`/`cargo test` (215
+  passed)/`cargo clippy --all-targets` clean, full TUI suite 166/166. See
+  `docs/roadmap-email.md`'s Slice 25, `src/app/CLAUDE.md`'s `mail.rs` row, `src/email/CLAUDE.md`'s
+  `store.rs` row, `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+- 2026-09-27 (unread/starred filter chips, Slice 24): `U` and `S` in the email list cycle
+  `App.unread_filter`/`App.starred_filter` (both `Option<bool>`) through merged (all mail) ->
+  matching only -> non-matching only -> merged, via `App::cycle_unread_filter`/
+  `App::cycle_starred_filter` — same fixed 3-state shape as Slice 23's `cycle_attachment_filter`,
+  since `EmailMessage.is_read`/`is_starred` are always known, never unclassified. `refresh_emails`
+  gained two more `.retain()` steps right after `attachment_filter`'s. Title bar gained `U: unread
+  filter`/`S: starred filter` and `· unread: Yes`/`No` / `· starred: Yes`/`No` tags.
+  `handle_email_filter_key` (`src/tui/keys.rs`) grew from four to six filter-cycle keys. New
+  `tests/it/app.rs` cases cover both full 3-state cycles (214 in-process tests, was 212). New
+  scenarios `email_unread_filter`/`email_starred_filter` seed two messages, mark one read/starred via
+  a raw `UPDATE`, and check all three filter states (165 TUI scenarios, was 163). See
+  `docs/roadmap-email.md`'s Slice 24, `src/app/CLAUDE.md`'s `mail.rs` row, `src/tui/CLAUDE.md`'s
+  `keys.rs`/`ui.rs` row.
+- 2026-09-27 (Rust idiom review): pass over the GPU-efficiency changes plus a repo-wide antipattern
+  scan (`&Vec<T>`/`&String` params, reflexive `.clone()`, index loops, manual `Arc<Mutex>`, ad hoc
+  statics, missing `Debug`, `Box<dyn Trait>`). `src/nlp/ollama_client.rs`'s `OllamaRequest` changed
+  from owning `String`/`Option<String>` fields to borrowing (`OllamaRequest<'a>`, `&'a str` model
+  and prompt, `Option<&'static str>` format) — every call site serializes and drops the request
+  immediately, so owning a copy of `self.model` and the built prompt allocated for no reason.
+  `bulk_mail_heuristic` switched from `to_lowercase()` to `to_ascii_lowercase()` since the keyword
+  list is ASCII-only, skipping the Unicode case-folding table. Repo-wide scan found nothing else to
+  fix: no raw-`Vec`/`String` signatures, no manual `Arc<Mutex>`/`Rc<RefCell>`, no ad hoc global
+  statics, no `Debug`-missing public types (`EmailConfig`/`SmtpConfig`'s custom `Debug` impls that
+  redact passwords are intentional), `src/lib.rs`'s `BoxError` is a standard top-level error alias.
+  The two `account.clone()` calls in `open_folder_browser`'s IMAP-config loop
+  (`src/app/mail.rs`) are not reflexive — `config` is moved into `ImapMailSource::new` before the
+  clones happen, so `account` has to be captured before that move and re-cloned per discovered
+  folder to give each result tuple its own owned `String`. `cargo build`/`cargo test` (212 passed)/
+  `cargo clippy --all-targets` all clean after both fixes; no behavior change, so the TUI suite
+  wasn't re-run.
+- 2026-09-27 (Ollama/GPU efficiency, triage+summary): four changes to cut GPU load from the email
+  feature's background LLM calls. (1) `NLPParser` now owns a second `OllamaClient` (`triage_client`,
+  model `qwen2.5:1.5b`) for `summarize`/`triage`, leaving the original 7B client dedicated to
+  `parse`'s structured extraction — triage/summary are short classification/summarization tasks that
+  don't need `parse`'s accuracy, and the smaller model loads and infers faster. (2) new
+  `bulk_mail_heuristic(subject, snippet)` in `src/nlp/ollama_client.rs` matches the same
+  `newsletter`/`receipt`/`notification`/`unsubscribe` keyword list the TUI test driver's fake Ollama
+  server already treats as bulk mail; `NLPParser::triage` tries it before ever calling Ollama, so an
+  obvious newsletter/receipt resolves for free — mirrors the existing regex-first `parse()` pipeline
+  (see `src/nlp/CLAUDE.md`). (3) `TRIAGE_BATCH_LIMIT` (`src/app/mail.rs`) lowered 20 -> 10: most rows
+  now resolve via the heuristic with no Ollama call at all, so a smaller cap still clears a normal
+  backlog in one or two passes while capping worst-case GPU load per pass. (4) every `OllamaRequest`
+  (and `warm()`'s ad-hoc JSON) now sends `keep_alive: "30m"`, so Ollama keeps a model resident between
+  calls instead of unloading it on its own idle timeout — an unload-then-reload mid-session costs far
+  more GPU time than steady inference. `NLPParser::prewarm()` now warms both clients concurrently
+  (`tokio::join!`), logging a warning per-client on failure without propagating one. Updated
+  `tests/tui/tui_suite.py`'s `email_triage_after_sync` to expect exactly 1 real triage request (only
+  "Quarterly planning notes" is ambiguous enough to reach the fake server; "Weekly Newsletter" is now
+  caught by the heuristic) — DB-classification assertion unchanged. New
+  `tests/it/nlp_llm.rs` cases cover the heuristic's keyword match (case-insensitive) and its `None`
+  fallthrough for ambiguous mail (212 in-process tests, was 210). Full TUI suite unaffected
+  (163 scenarios). See `src/nlp/CLAUDE.md`.
+- 2026-09-27 (attachment-presence filter, Slice 23): `H` in the email list cycles
+  `App.attachment_filter` (`Option<bool>`) through merged (all mail) -> has attachments only -> no
+  attachments only -> merged, via `App::cycle_attachment_filter` — same fixed 3-state shape as
+  `cycle_focus_filter`, but simpler: `EmailMessage.has_attachments` is always known (computed at
+  query time by `email::store::get_recent`'s `EXISTS(...)` subquery), so there's no "unclassified"
+  bucket to fall out of. `refresh_emails` gained a matching `.retain()` step in the existing
+  account -> folder -> focus -> attachment -> snooze chain. No schema change needed — the
+  `email_attachments` table already existed (Slice 9). Title bar gained `H: attachment filter` and a
+  `· attach: Yes`/`No` tag. Adding a fifth filter-cycle key pushed `handle_email_key`
+  (`src/tui/keys.rs`) over clippy's 100-line function limit, so `A`/`F`/`I`/`H` were split into a
+  private `handle_email_filter_key` helper. New `tests/it/app.rs` case
+  `cycle_attachment_filter_walks_has_then_lacks_then_back_to_merged` covers the full cycle against
+  the DB (210 in-process tests, was 209). New scenario `email_attachment_filter` seeds one message
+  with an `email_attachments` row and one without, checking the `[attach]` list tag and all three
+  filter states (163 TUI scenarios, was 162). See [`roadmap-email.md`](./roadmap-email.md)'s
+  Slice 23, `src/app/CLAUDE.md`'s `mail.rs` row, `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+- 2026-09-27 (categories / color tags, Slice 22): Outlook's colored-category tagging, one tag per
+  message rather than Outlook's several. `t` in the email list or detail popup cycles the selected
+  message through a fixed six-color palette (`app::mail::CATEGORY_ORDER`: red, orange, yellow,
+  green, blue, purple), wrapping to untagged after purple, via pure `app::mail::next_category` and
+  `App::cycle_selected_category` — same shape as `toggle_selected_star`. New nullable
+  `email_messages.category` column (idempotent `ALTER TABLE`, `src/migrations.rs`) and
+  `email::store::set_category`; `EmailMessage.category` was added to the struct and all three of
+  `store.rs`'s `EmailMessage`-selecting queries, but not to `NewEmail` — set post-insert, like
+  `is_starred`, never at parse time. Rendered as a `[color]` list-row tag (new `category_color`
+  helper, named ANSI colors only — `LightRed`/`Magenta` approximate orange/purple, ratatui has no
+  true variant for either) and a "Category: <Name>" detail-popup line; both title-bar hints gained
+  `t: category`. New `tests/it/app.rs` cases cover `next_category`'s wraparound and
+  `cycle_selected_category`'s full DB cycle (209 in-process tests, was 207). New scenario
+  `email_category_cycle` drives all six colors plus the wrap, checking both the DB column and the
+  list-row tag (162 TUI scenarios, was 161). See [`roadmap-email.md`](./roadmap-email.md)'s Slice 22,
+  `src/app/CLAUDE.md`'s `mail.rs` row, `src/email/CLAUDE.md`'s `message.rs`/`store.rs` rows,
+  `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` row.
+- 2026-09-27 (rule actions `archive`/`delete`, Slice 21): extends Slice 18's rules
+  (`subject`/`from` match on `star`/`read`) with the two actions that need a live IMAP round-trip.
+  `parse_rule_spec` now also accepts `archive`/`delete`. `apply_rule_action` (`src/app/mail.rs`) took
+  `email_id: i64`; it now takes `&EmailMessage`, since `archive`/`delete` need `account`/`folder`/
+  `uid` too. Those two actions hand off to new `spawn_archive`/`spawn_delete` helpers, factored out of
+  `archive_selected_email`/`delete_selected_email` — the manual `a`/`d` keypress and a rule match now
+  share one `tokio::spawn` + `mpsc`-report code path and one cleanup method
+  (`apply_archive_result`/`apply_delete_result`) — `run_email_rules` still runs inline right after
+  every sync, never awaiting the network itself, since `apply_rule_action` only ever spawns and
+  returns for these two actions. No IMAP config for the account, or an out-of-range UID, silently
+  no-ops the action (still marks the email checked), same guard-clause shape the manual paths use.
+  New `tests/it/email_rules.rs` case covers `parse_rule_spec` accepting both actions; new
+  `tests/it/app.rs` case covers the no-config no-op path (207 in-process tests, was 205). New
+  scenario `email_rule_archive_delete` drives both actions end-to-end against the fake IMAP server
+  (161 TUI scenarios, was 160).
+  Verifying it exposed a real concurrency bug in the *test fixture*, not `triptych` itself: two rule
+  actions firing in the same sync pass each spawn their own IMAP connection, and this was the first
+  scenario in the suite's history to make two connections mutate `tests/tui/fakeimap.py`'s
+  `mailbox.json` at the same time. `Mailbox.save()` wrote to a fixed `.tmp` path shared across every
+  connection's own `Mailbox` instance (each `Handler` builds a fresh one), so two concurrent saves
+  raced `Path.replace` and one threw `FileNotFoundError` — captured directly via a standalone
+  reproduction script reading `sb.imap_log()`, not inferred. Fixed with a module-level `_BOX_LOCK`
+  wrapped around every load-mutate-save sequence (`STORE`, `MOVE`, `COPY`, `expunge()`) plus a
+  per-`(pid, thread)` tmp filename in `save()` as defense in depth; confirmed stable across 5
+  standalone repro runs and 3 harness runs with zero failures before trusting it. See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 21, `src/app/CLAUDE.md`'s `mail.rs` row,
+  `tests/tui/CLAUDE.md`'s `Mailbox` concurrency gotcha.
 - 2026-09-27 (unified inbox AI triage / Focused Inbox split, Slice 17): every synced email now
   gets a one-time binary classification, Focused or Other, via the same local Ollama model already
   used for parsing and summaries — Outlook's Focused/Other split, no new dependency.

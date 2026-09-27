@@ -1,4 +1,4 @@
-use crate::nlp::ollama_client::{OllamaClient, OllamaError};
+use crate::nlp::ollama_client::{OllamaClient, OllamaError, bulk_mail_heuristic};
 use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use lru::LruCache;
@@ -11,10 +11,16 @@ use tokio::sync::Mutex;
 /// Cache entries older than this are treated as misses, so parsing behavior
 /// (e.g. relative dates like "tomorrow") doesn't go stale across long sessions.
 const CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Triage/summarize don't need `parse`'s structured-extraction accuracy, so they get a
+/// smaller model that loads and infers faster — cutting GPU load without hurting either
+/// feature (both are short classification/summarization tasks, not schema extraction).
+const TRIAGE_MODEL: &str = "qwen2.5:1.5b";
 
 #[derive(Debug)]
 pub struct NLPParser {
     ollama_client: OllamaClient,
+    /// Separate, smaller-model client for `summarize`/`triage` — see [`TRIAGE_MODEL`].
+    triage_client: OllamaClient,
     ollama_available: bool,
     cache: Mutex<LruCache<String, CachedParse>>,
     /// Whether a parse may wait for the model to load. On by default; the TUI turns it off so a
@@ -47,6 +53,7 @@ fn elapsed_ms(start: Instant) -> u64 {
 impl NLPParser {
     pub async fn new() -> Self {
         let ollama_client = OllamaClient::new(None);
+        let triage_client = OllamaClient::new(Some(TRIAGE_MODEL.to_string()));
         let ollama_available = ollama_client.health_check().await;
 
         if !ollama_available {
@@ -55,6 +62,7 @@ impl NLPParser {
 
         Self {
             ollama_client,
+            triage_client,
             ollama_available,
             // 1000 is a non-zero literal, so this is never `None`.
             cache: Mutex::new(LruCache::new(
@@ -244,8 +252,13 @@ impl NLPParser {
         if !self.ollama_available || self.warming.swap(true, Ordering::AcqRel) {
             return;
         }
-        if let Err(e) = self.ollama_client.warm().await {
+        let (parse_result, triage_result) =
+            tokio::join!(self.ollama_client.warm(), self.triage_client.warm());
+        if let Err(e) = parse_result {
             tracing::warn!("Ollama prewarm failed: {e}");
+        }
+        if let Err(e) = triage_result {
+            tracing::warn!("Ollama triage-model prewarm failed: {e}");
         }
         self.warming.store(false, Ordering::Release);
     }
@@ -271,17 +284,21 @@ impl NLPParser {
     ///
     /// Returns an error if the request times out or fails, or the model returns nothing.
     pub async fn summarize(&self, email: &str) -> Result<String, OllamaError> {
-        self.ollama_client.summarize(email).await
+        self.triage_client.summarize(email).await
     }
 
     /// Classifies an email as Focused or Other (Outlook's Focused Inbox split). Same
-    /// not-sticky-availability shape as [`Self::summarize`].
+    /// not-sticky-availability shape as [`Self::summarize`]. Tries [`bulk_mail_heuristic`] first
+    /// so an obvious newsletter/receipt/notification never costs an Ollama round-trip.
     ///
     /// # Errors
     ///
     /// Returns an error if the request times out or fails, or the model returns unusable output.
     pub async fn triage(&self, subject: &str, snippet: &str) -> Result<bool, OllamaError> {
-        self.ollama_client.triage(subject, snippet).await
+        if let Some(focused) = bulk_mail_heuristic(subject, snippet) {
+            return Ok(focused);
+        }
+        self.triage_client.triage(subject, snippet).await
     }
 
     pub const fn is_ollama_available(&self) -> bool {

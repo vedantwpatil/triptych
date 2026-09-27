@@ -34,3 +34,31 @@ fn debug_output_redacts_the_password() {
     assert!(!shown.contains("hunter2"));
     assert!(shown.contains("<redacted>"));
 }
+
+#[test]
+fn normalize_signature_converts_escaped_newlines_to_real_ones() {
+    assert_eq!(normalize_signature("Best,\\nAlex"), Some("Best,\nAlex".to_string()));
+}
+
+#[test]
+fn normalize_signature_treats_blank_or_whitespace_as_none() {
+    assert_eq!(normalize_signature(""), None);
+    assert_eq!(normalize_signature("   "), None);
+}
+
+#[test]
+fn smtp_debug_output_redacts_the_password_but_shows_the_signature() {
+    let config = SmtpConfig {
+        account: "work".into(),
+        smtp_server: "smtp.example.com".into(),
+        smtp_port: 587,
+        smtp_username: "me@example.com".into(),
+        smtp_password: "hunter2".into(),
+        from_addr: "me@example.com".into(),
+        signature: Some("Best,\nMe".into()),
+    };
+    let shown = format!("{config:?}");
+    assert!(!shown.contains("hunter2"));
+    assert!(shown.contains("<redacted>"));
+    assert!(shown.contains("Best"));
+}
