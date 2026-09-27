@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{Row, SqlitePool};
 
-use super::message::{EmailMessage, NewEmail};
+use super::message::{EmailAttachment, EmailMessage, EmailRule, NewEmail};
 
 /// Insert newly-fetched emails, skipping ones already stored (same `account` +
 /// `message_id` — the same Message-ID can legitimately show up in more than one
@@ -12,11 +14,12 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
     let mut inserted = 0;
 
     for email in emails {
-        inserted += sqlx::query(
+        let result = sqlx::query(
             r"
             INSERT OR IGNORE INTO email_messages
-                (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text,
+                 to_addrs, cc_addrs, references_header)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(email.uid)
@@ -29,9 +32,34 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
         .bind(email.date_utc)
         .bind(&email.snippet)
         .bind(&email.body_text)
+        .bind(&email.to_addrs)
+        .bind(&email.cc_addrs)
+        .bind(&email.references_header)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        .await?;
+
+        // `rows_affected() == 0` means the uniqueness constraint skipped this row (already
+        // stored) — `last_insert_rowid()` would then be stale, pointing at some earlier insert,
+        // not this email. Only trust it right after a row this call actually inserted.
+        if result.rows_affected() == 1 {
+            inserted += 1;
+            let email_id = result.last_insert_rowid();
+            for attachment in &email.attachments {
+                sqlx::query(
+                    r"
+                    INSERT INTO email_attachments (email_id, part_index, filename, content_type, size_bytes)
+                    VALUES (?, ?, ?, ?, ?)
+                    ",
+                )
+                .bind(email_id)
+                .bind(attachment.part_index)
+                .bind(&attachment.filename)
+                .bind(&attachment.content_type)
+                .bind(attachment.size_bytes)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
     }
 
     tx.commit().await?;
@@ -112,7 +140,9 @@ pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessag
     let emails = sqlx::query_as::<_, EmailMessage>(
         r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
-               snippet, is_read, task_id, NULL AS body_text
+               snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
+               is_starred, snoozed_until, triage_focused,
+               EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
         FROM email_messages
         ORDER BY date_utc DESC
         LIMIT ?
@@ -125,6 +155,25 @@ pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessag
     Ok(emails)
 }
 
+/// One email's attachment metadata (no bytes — see `MailSource::fetch_attachments`), in
+/// `part_index` order. Populated into `App`'s per-email cache when its detail popup opens
+/// (mirrors `get_body`'s on-demand load), not carried by `get_recent`'s list rows.
+pub async fn get_attachments(pool: &SqlitePool, email_id: i64) -> Result<Vec<EmailAttachment>> {
+    let attachments = sqlx::query_as::<_, EmailAttachment>(
+        r"
+        SELECT id, email_id, part_index, filename, content_type, size_bytes
+        FROM email_attachments
+        WHERE email_id = ?
+        ORDER BY part_index
+        ",
+    )
+    .bind(email_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(attachments)
+}
+
 /// Fetches one email's full body on demand — the counterpart to [`get_recent`]
 /// leaving `body_text` unset in its listing.
 pub async fn get_body(pool: &SqlitePool, email_id: i64) -> Result<Option<String>> {
@@ -134,6 +183,39 @@ pub async fn get_body(pool: &SqlitePool, email_id: i64) -> Result<Option<String>
         .await?;
 
     Ok(row.and_then(|row| row.try_get::<Option<String>, _>("body_text").ok().flatten()))
+}
+
+/// Ids of every email whose stored `body_text` contains `needle` (SQLite `LIKE`, case-insensitive
+/// for ASCII). Backs `/` search's body-text match, since [`get_recent`]'s listing never carries
+/// `body_text` in memory to scan.
+pub async fn search_body_matches(pool: &SqlitePool, needle: &str) -> Result<HashSet<i64>> {
+    let pattern = format!("%{}%", needle.replace('%', "\\%").replace('_', "\\_"));
+    let rows = sqlx::query("SELECT id FROM email_messages WHERE body_text LIKE ? ESCAPE '\\'")
+        .bind(pattern)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.iter().map(|row| row.get::<i64, _>("id")).collect())
+}
+
+/// Every distinct account label with at least one stored message, alphabetical — backs the
+/// email list's per-account filter cycle.
+pub async fn distinct_accounts(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows = sqlx::query("SELECT DISTINCT account FROM email_messages ORDER BY account")
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.iter().map(|row| row.get::<String, _>("account")).collect())
+}
+
+/// Every distinct folder name with at least one stored message, alphabetical — backs the
+/// email list's per-folder filter cycle (Slice 13).
+pub async fn distinct_folders(pool: &SqlitePool) -> Result<Vec<String>> {
+    let rows = sqlx::query("SELECT DISTINCT folder FROM email_messages ORDER BY folder")
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows.iter().map(|row| row.get::<String, _>("folder")).collect())
 }
 
 /// The cached AI summary for one email, if one was generated.
@@ -150,6 +232,42 @@ pub async fn get_summary(pool: &SqlitePool, email_id: i64) -> Result<Option<Stri
 pub async fn set_summary(pool: &SqlitePool, email_id: i64, summary: &str) -> Result<()> {
     sqlx::query("UPDATE email_messages SET summary = ? WHERE id = ?")
         .bind(summary)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Emails not yet classified (`triage_focused IS NULL`), most recent first, capped at `limit` —
+/// backs `App::run_email_triage`, which runs a pass after every sync over whatever's new. Subject
+/// and snippet (never the full body, `NULL AS body_text` as in [`get_recent`]) are enough for the
+/// model to classify, the same fields `priority::score` already keys off of.
+pub async fn pending_triage(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessage>> {
+    let emails = sqlx::query_as::<_, EmailMessage>(
+        r"
+        SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
+               snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
+               is_starred, snoozed_until, triage_focused,
+               EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
+        FROM email_messages
+        WHERE triage_focused IS NULL
+        ORDER BY date_utc DESC
+        LIMIT ?
+        ",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(emails)
+}
+
+/// Records one email's Focused/Other classification (Outlook's Focused Inbox split), so the model
+/// is asked once per email.
+pub async fn set_triage(pool: &SqlitePool, email_id: i64, focused: bool) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET triage_focused = ? WHERE id = ?")
+        .bind(focused)
         .bind(email_id)
         .execute(pool)
         .await?;
@@ -180,9 +298,138 @@ pub async fn mark_read(pool: &SqlitePool, email_id: i64) -> Result<()> {
     Ok(())
 }
 
+pub async fn mark_unread(pool: &SqlitePool, email_id: i64) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET is_read = 0 WHERE id = ?")
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn set_starred(pool: &SqlitePool, email_id: i64, starred: bool) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET is_starred = ? WHERE id = ?")
+        .bind(starred)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Hides a message from the normal list until `until` (see `EmailMessage::snoozed_until`).
+pub async fn set_snooze(pool: &SqlitePool, email_id: i64, until: DateTime<Utc>) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET snoozed_until = ? WHERE id = ?")
+        .bind(until)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Clears an in-progress snooze early, before `snoozed_until` would have lapsed on its own.
+pub async fn clear_snooze(pool: &SqlitePool, email_id: i64) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET snoozed_until = NULL WHERE id = ?")
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Removes one message's local row. Caller deletes it on the server first (`MailSource::delete`)
+/// and only calls this on that success, so a failed remote delete never desyncs the local copy
+/// from mail the server still has.
+pub async fn delete_email(pool: &SqlitePool, email_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM email_messages WHERE id = ?")
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 pub async fn link_task(pool: &SqlitePool, email_id: i64, task_id: i64) -> Result<()> {
     sqlx::query("UPDATE email_messages SET task_id = ? WHERE id = ?")
         .bind(task_id)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Every user-defined rule, oldest first (creation order — the order they'd have been applied in
+/// if run one at a time) — backs `App::run_email_rules` and the rules-list popup.
+pub async fn list_rules(pool: &SqlitePool) -> Result<Vec<EmailRule>> {
+    let rules = sqlx::query_as::<_, EmailRule>(
+        "SELECT id, match_field, pattern, action, created_at FROM email_rules ORDER BY created_at",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rules)
+}
+
+/// Adds one rule, returns its new id.
+pub async fn create_rule(
+    pool: &SqlitePool,
+    match_field: &str,
+    pattern: &str,
+    action: &str,
+) -> Result<i64> {
+    let result = sqlx::query(
+        "INSERT INTO email_rules (match_field, pattern, action, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(match_field)
+    .bind(pattern)
+    .bind(action)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+pub async fn delete_rule(pool: &SqlitePool, rule_id: i64) -> Result<()> {
+    sqlx::query("DELETE FROM email_rules WHERE id = ?")
+        .bind(rule_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Emails not yet checked against `email_rules` (`rule_applied = 0`), most recent first, capped at
+/// `limit` — backs `App::run_email_rules`, the same pending-work shape as [`pending_triage`]. Only
+/// `subject`/`from_addr` are selected (plus the id), since those are the only fields any rule can
+/// currently match on.
+pub async fn pending_rule_check(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessage>> {
+    let emails = sqlx::query_as::<_, EmailMessage>(
+        r"
+        SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
+               snippet, is_read, task_id, NULL AS body_text, to_addrs, cc_addrs, references_header,
+               is_starred, snoozed_until, triage_focused,
+               EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
+        FROM email_messages
+        WHERE rule_applied = 0
+        ORDER BY date_utc DESC
+        LIMIT ?
+        ",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(emails)
+}
+
+/// Marks one email as checked against every current rule, so `pending_rule_check` never
+/// re-offers it. Set regardless of whether any rule actually matched — a non-match is still a
+/// completed check, not pending work.
+pub async fn mark_rule_checked(pool: &SqlitePool, email_id: i64) -> Result<()> {
+    sqlx::query("UPDATE email_messages SET rule_applied = 1 WHERE id = ?")
         .bind(email_id)
         .execute(pool)
         .await?;

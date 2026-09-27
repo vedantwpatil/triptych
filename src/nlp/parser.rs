@@ -274,6 +274,16 @@ impl NLPParser {
         self.ollama_client.summarize(email).await
     }
 
+    /// Classifies an email as Focused or Other (Outlook's Focused Inbox split). Same
+    /// not-sticky-availability shape as [`Self::summarize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out or fails, or the model returns unusable output.
+    pub async fn triage(&self, subject: &str, snippet: &str) -> Result<bool, OllamaError> {
+        self.ollama_client.triage(subject, snippet).await
+    }
+
     pub const fn is_ollama_available(&self) -> bool {
         self.ollama_available
     }

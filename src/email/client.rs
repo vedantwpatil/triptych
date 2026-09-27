@@ -1,28 +1,17 @@
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
+use mail_parser::MimeHeaders;
 use std::future::Future;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 use super::config::EmailConfig;
 use super::store::SyncCursor;
-
-static INIT_CRYPTO_PROVIDER: Once = Once::new();
-
-/// Rustls 0.23 requires a process-wide default `CryptoProvider`. Both `ring` and
-/// `aws-lc-rs` end up enabled in this workspace's dependency tree (pulled in by
-/// different crates), which makes rustls' own auto-detection ambiguous and panic.
-/// Install one explicitly, once; if something else (e.g. sqlx) already installed a
-/// default first, this is a no-op.
-fn ensure_crypto_provider() {
-    INIT_CRYPTO_PROVIDER.call_once(|| {
-        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-    });
-}
+use super::tls::{build_root_store, ensure_crypto_provider};
 
 /// First-sync cap: when there's no prior `since_uid` to resume from, fetch only the
 /// most recent N messages instead of the entire mailbox history. Full-body IMAP
@@ -46,6 +35,43 @@ const LARGE_MESSAGE_BYTES: u32 = 1_048_576;
 /// every account, and the task never returns to poll `shutdown_rx` either.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Upper bound on one `delete` call (connect through logout) — much shorter than
+/// [`FETCH_TIMEOUT`] since a delete is one STORE and one EXPUNGE, not a bulk fetch.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound on one `archive` call — same budget as [`DELETE_TIMEOUT`], since the
+/// MOVE path is one command and the COPY/STORE/EXPUNGE fallback is the same shape as
+/// delete plus one extra COPY.
+const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound on one `fetch_attachments` call. Unlike delete/archive this refetches the whole
+/// `RFC822` message (there's no cheap "just this MIME part" IMAP fetch item this client uses), so
+/// it gets [`FETCH_TIMEOUT`]'s budget rather than [`DELETE_TIMEOUT`]'s.
+const FETCH_ATTACHMENT_TIMEOUT: Duration = FETCH_TIMEOUT;
+
+/// Extra budget on top of the caller's own `idle_wait` timeout, covering just the
+/// connect/login/select portion before `IDLE` itself is even sent — same rationale as
+/// [`FETCH_TIMEOUT`], applied to a call whose overall bound is caller-supplied data rather than a
+/// fixed constant, so it can't reuse `FETCH_TIMEOUT` directly.
+const IDLE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound on one `list_folders` call — same budget as [`DELETE_TIMEOUT`]/[`ARCHIVE_TIMEOUT`],
+/// since `LIST` is one command against the whole account, not a per-message operation.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What one [`MailSource::idle_wait`] call found out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleOutcome {
+    /// The server pushed at least one unsolicited response (new mail, a flag change, etc.) —
+    /// the caller should run its normal sync pass to find out what actually changed, since IDLE
+    /// itself only proves *something* happened, not what.
+    NewData,
+    /// No push arrived before the timeout elapsed. Not an error — IDLE is best-effort, some
+    /// servers push nothing — so the caller should still run a normal sync pass, same as it
+    /// would on a plain poll tick.
+    Timeout,
+}
+
 /// `(uid, raw_bytes, header_only)` for one fetched message. `header_only` is true
 /// when the message exceeded [`LARGE_MESSAGE_BYTES`] and `raw_bytes` is just its
 /// `RFC822.HEADER` (no body) rather than the full `RFC822`.
@@ -54,7 +80,7 @@ type RawMessage = (u32, Vec<u8>, bool);
 /// Abstraction over where new mail comes from, so alternative auth (`OAuth2`, other
 /// providers) can slot in later without touching callers.
 pub trait MailSource: Send + Sync {
-    /// Returns the mailbox's current UIDVALIDITY plus every new message. IMAP only
+    /// Selects `folder` and returns its current UIDVALIDITY plus every new message. IMAP only
     /// guarantees UIDs are stable within one UIDVALIDITY epoch (RFC 3501) — Gmail,
     /// e.g., can change it without any user action, silently invalidating every
     /// previously-stored UID. If the server's current UIDVALIDITY doesn't match
@@ -63,8 +89,51 @@ pub trait MailSource: Send + Sync {
     /// that may no longer mean what it used to.
     fn fetch_new(
         &self,
+        folder: &str,
         since: Option<SyncCursor>,
     ) -> impl Future<Output = Result<(Option<u32>, Vec<RawMessage>)>> + Send;
+
+    /// Permanently removes one message from `folder` (the folder it's actually stored under —
+    /// see `EmailMessage::folder`): `UID STORE +FLAGS.SILENT (\Deleted)` then `EXPUNGE`. No
+    /// move-to-Trash — unlike most mail clients' delete key, this cannot be undone from within
+    /// Triptych.
+    fn delete(&self, folder: &str, uid: u32) -> impl Future<Output = Result<()>> + Send;
+
+    /// Moves one message from `folder` to `EmailConfig::archive_folder`. Tries
+    /// RFC 6851 `UID MOVE` first; if the server doesn't support it, falls back to
+    /// `UID COPY` + `UID STORE +FLAGS.SILENT (\Deleted)` + `EXPUNGE`. Does not create the
+    /// destination folder — a missing archive folder is a real error, not auto-fixed.
+    fn archive(&self, folder: &str, uid: u32) -> impl Future<Output = Result<()>> + Send;
+
+    /// Re-fetches one message's full `RFC822` body (from `folder`, the folder it's actually
+    /// stored under) and returns every attachment's filename (`None` if the part had none) and
+    /// raw bytes, in the same order `message.rs::parse_raw` enumerates them — attachment bytes
+    /// are never persisted, so this is the only way to get them back. One connect fetches all of
+    /// a message's attachments, not one connect each.
+    fn fetch_attachments(
+        &self,
+        folder: &str,
+        uid: u32,
+    ) -> impl Future<Output = Result<Vec<(Option<String>, Vec<u8>)>>> + Send;
+
+    /// Opens IDLE (RFC 2177) on `folder` and blocks until the server pushes an unsolicited
+    /// response or `timeout` elapses, whichever first — a push-based alternative to polling
+    /// `fetch_new` on a fixed interval. Uses its own fresh connection like every other method
+    /// here, so a long-blocking call never holds up a concurrent `fetch_new`/`delete`/etc. on a
+    /// different connection; it does mean this connection's own mailbox can't be otherwise
+    /// accessed until the call returns (the `Handle` this wraps is documented to disallow it).
+    fn idle_wait(
+        &self,
+        folder: &str,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<IdleOutcome>> + Send;
+
+    /// Lists every selectable mailbox on the server (RFC 3501 `LIST "" "*"`), so the TUI can offer
+    /// folders beyond the two this client otherwise ever names (`imap_folder`, `archive_folder`) —
+    /// e.g. Sent, Drafts, Junk, or any custom folder. A name flagged `\Noselect` (a hierarchy node
+    /// with no mailbox of its own, e.g. a `%`-style parent) is dropped, since it can never be
+    /// `SELECT`ed to sync. Sorted and deduplicated.
+    fn list_folders(&self) -> impl Future<Output = Result<Vec<String>>> + Send;
 }
 
 #[derive(Debug)]
@@ -80,13 +149,82 @@ impl ImapMailSource {
 }
 
 impl MailSource for ImapMailSource {
-    async fn fetch_new(&self, since: Option<SyncCursor>) -> Result<(Option<u32>, Vec<RawMessage>)> {
-        match tokio::time::timeout(FETCH_TIMEOUT, self.fetch_new_inner(since)).await {
+    async fn fetch_new(
+        &self,
+        folder: &str,
+        since: Option<SyncCursor>,
+    ) -> Result<(Option<u32>, Vec<RawMessage>)> {
+        match tokio::time::timeout(FETCH_TIMEOUT, self.fetch_new_inner(folder, since)).await {
             Ok(result) => result,
             Err(_) => anyhow::bail!(
                 "IMAP sync for '{}' timed out after {}s",
                 self.config.account,
                 FETCH_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
+    async fn delete(&self, folder: &str, uid: u32) -> Result<()> {
+        match tokio::time::timeout(DELETE_TIMEOUT, self.delete_inner(folder, uid)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP delete for '{}' timed out after {}s",
+                self.config.account,
+                DELETE_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
+    async fn archive(&self, folder: &str, uid: u32) -> Result<()> {
+        match tokio::time::timeout(ARCHIVE_TIMEOUT, self.archive_inner(folder, uid)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP archive for '{}' timed out after {}s",
+                self.config.account,
+                ARCHIVE_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
+    async fn fetch_attachments(
+        &self,
+        folder: &str,
+        uid: u32,
+    ) -> Result<Vec<(Option<String>, Vec<u8>)>> {
+        match tokio::time::timeout(
+            FETCH_ATTACHMENT_TIMEOUT,
+            self.fetch_attachments_inner(folder, uid),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP attachment fetch for '{}' timed out after {}s",
+                self.config.account,
+                FETCH_ATTACHMENT_TIMEOUT.as_secs()
+            ),
+        }
+    }
+
+    async fn idle_wait(&self, folder: &str, timeout: Duration) -> Result<IdleOutcome> {
+        let outer_timeout = timeout + IDLE_CONNECT_TIMEOUT;
+        match tokio::time::timeout(outer_timeout, self.idle_wait_inner(folder, timeout)).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP IDLE for '{}' timed out after {}s (connect/login/select never finished)",
+                self.config.account,
+                outer_timeout.as_secs()
+            ),
+        }
+    }
+
+    async fn list_folders(&self) -> Result<Vec<String>> {
+        match tokio::time::timeout(LIST_TIMEOUT, self.list_folders_inner()).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "IMAP LIST for '{}' timed out after {}s",
+                self.config.account,
+                LIST_TIMEOUT.as_secs()
             ),
         }
     }
@@ -99,6 +237,7 @@ impl ImapMailSource {
     #[allow(clippy::too_many_lines)]
     async fn fetch_new_inner(
         &self,
+        folder: &str,
         since: Option<SyncCursor>,
     ) -> Result<(Option<u32>, Vec<RawMessage>)> {
         ensure_crypto_provider();
@@ -143,12 +282,9 @@ impl ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        tracing::debug!(
-            "[Mail:{account}] selecting folder {}",
-            self.config.imap_folder
-        );
+        tracing::debug!("[Mail:{account}] selecting folder {folder}");
         let mailbox = session
-            .select(&self.config.imap_folder)
+            .select(folder)
             .await
             .context("failed to select IMAP folder")?;
         let current_uid_validity = mailbox.uid_validity;
@@ -301,16 +437,320 @@ impl ImapMailSource {
 
         Ok((current_uid_validity, result))
     }
-}
 
-fn build_root_store() -> Result<RootCertStore> {
-    let mut store = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    let (added, _skipped) = store.add_parsable_certificates(native.certs);
+    async fn delete_inner(&self, folder: &str, uid: u32) -> Result<()> {
+        ensure_crypto_provider();
+        let account = &self.config.account;
 
-    if added == 0 {
-        anyhow::bail!("no usable native root certificates found");
+        let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
+            .await
+            .context("failed to connect to IMAP server")?;
+
+        let root_store = build_root_store()?;
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = ServerName::try_from(self.config.imap_server.clone())
+            .context("invalid IMAP server hostname")?;
+        let tls_stream = connector
+            .connect(domain, tcp)
+            .await
+            .context("TLS handshake with IMAP server failed")?;
+
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client
+            .read_response()
+            .await
+            .context("failed to read IMAP greeting")?;
+
+        let mut session = client
+            .login(&self.config.imap_username, &self.config.imap_password)
+            .await
+            .map_err(|(err, _client)| err)
+            .context("IMAP login failed")?;
+
+        session.select(folder).await.context("failed to select IMAP folder")?;
+
+        tracing::debug!("[Mail:{account}] deleting UID {uid}");
+        let mut store_stream = session
+            .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+            .await
+            .context("IMAP UID STORE failed")?;
+        while store_stream
+            .try_next()
+            .await
+            .context("error reading IMAP STORE response")?
+            .is_some()
+        {}
+        drop(store_stream);
+
+        // Must be drained, not just dropped: an unpolled stream leaves its untagged/tagged
+        // responses unread on the wire, which would desync the next command (`logout`, below)
+        // into parsing leftover EXPUNGE bytes as its own reply.
+        let expunge_stream = session.expunge().await.context("IMAP EXPUNGE failed")?;
+        let _: Vec<u32> = expunge_stream
+            .try_collect()
+            .await
+            .context("error reading IMAP EXPUNGE response")?;
+
+        let _ = session.logout().await;
+        Ok(())
     }
 
-    Ok(store)
+    async fn archive_inner(&self, folder: &str, uid: u32) -> Result<()> {
+        ensure_crypto_provider();
+        let account = &self.config.account;
+        let dest = &self.config.archive_folder;
+
+        let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
+            .await
+            .context("failed to connect to IMAP server")?;
+
+        let root_store = build_root_store()?;
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = ServerName::try_from(self.config.imap_server.clone())
+            .context("invalid IMAP server hostname")?;
+        let tls_stream = connector
+            .connect(domain, tcp)
+            .await
+            .context("TLS handshake with IMAP server failed")?;
+
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client
+            .read_response()
+            .await
+            .context("failed to read IMAP greeting")?;
+
+        let mut session = client
+            .login(&self.config.imap_username, &self.config.imap_password)
+            .await
+            .map_err(|(err, _client)| err)
+            .context("IMAP login failed")?;
+
+        session.select(folder).await.context("failed to select IMAP folder")?;
+
+        tracing::debug!("[Mail:{account}] archiving UID {uid} to '{dest}'");
+        // RFC 6851 MOVE in one round trip when the server supports it; a server that doesn't
+        // (`BAD`/`NO` — no `MOVE` capability) falls back to the classical
+        // COPY + STORE \Deleted + EXPUNGE sequence MOVE is defined to be equivalent to.
+        match session.uid_mv(uid.to_string(), dest.as_str()).await {
+            Ok(()) => {}
+            Err(async_imap::error::Error::Bad(_) | async_imap::error::Error::No(_)) => {
+                session
+                    .uid_copy(uid.to_string(), dest.as_str())
+                    .await
+                    .context("IMAP UID COPY (archive fallback) failed")?;
+
+                let mut store_stream = session
+                    .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
+                    .await
+                    .context("IMAP UID STORE (archive fallback) failed")?;
+                while store_stream
+                    .try_next()
+                    .await
+                    .context("error reading IMAP STORE response")?
+                    .is_some()
+                {}
+                drop(store_stream);
+
+                // Must be drained, not just dropped — see the identical note in `delete_inner`.
+                let expunge_stream = session
+                    .expunge()
+                    .await
+                    .context("IMAP EXPUNGE (archive fallback) failed")?;
+                let _: Vec<u32> = expunge_stream
+                    .try_collect()
+                    .await
+                    .context("error reading IMAP EXPUNGE response")?;
+            }
+            Err(err) => return Err(err).context("IMAP UID MOVE failed"),
+        }
+
+        let _ = session.logout().await;
+        Ok(())
+    }
+
+    async fn fetch_attachments_inner(
+        &self,
+        folder: &str,
+        uid: u32,
+    ) -> Result<Vec<(Option<String>, Vec<u8>)>> {
+        ensure_crypto_provider();
+        let account = &self.config.account;
+
+        let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
+            .await
+            .context("failed to connect to IMAP server")?;
+
+        let root_store = build_root_store()?;
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = ServerName::try_from(self.config.imap_server.clone())
+            .context("invalid IMAP server hostname")?;
+        let tls_stream = connector
+            .connect(domain, tcp)
+            .await
+            .context("TLS handshake with IMAP server failed")?;
+
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client
+            .read_response()
+            .await
+            .context("failed to read IMAP greeting")?;
+
+        let mut session = client
+            .login(&self.config.imap_username, &self.config.imap_password)
+            .await
+            .map_err(|(err, _client)| err)
+            .context("IMAP login failed")?;
+
+        session.select(folder).await.context("failed to select IMAP folder")?;
+
+        tracing::debug!("[Mail:{account}] fetching attachments for UID {uid}");
+        let mut stream = session
+            .uid_fetch(uid.to_string(), "RFC822")
+            .await
+            .context("IMAP UID FETCH failed")?;
+
+        let mut raw = None;
+        while let Some(fetch) = stream
+            .try_next()
+            .await
+            .context("error reading IMAP fetch response")?
+        {
+            if let Some(body) = fetch.body() {
+                raw = Some(body.to_vec());
+            }
+        }
+        drop(stream);
+        let _ = session.logout().await;
+
+        let raw = raw.context("message not found on server")?;
+        let message = mail_parser::MessageParser::default()
+            .parse(&raw)
+            .context("failed to parse RFC822 message")?;
+
+        Ok(message
+            .attachments()
+            .map(|part| (part.attachment_name().map(str::to_string), part.contents().to_vec()))
+            .collect())
+    }
+
+    async fn idle_wait_inner(&self, folder: &str, timeout: Duration) -> Result<IdleOutcome> {
+        ensure_crypto_provider();
+        let account = &self.config.account;
+
+        let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
+            .await
+            .context("failed to connect to IMAP server")?;
+
+        let root_store = build_root_store()?;
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = ServerName::try_from(self.config.imap_server.clone())
+            .context("invalid IMAP server hostname")?;
+        let tls_stream = connector
+            .connect(domain, tcp)
+            .await
+            .context("TLS handshake with IMAP server failed")?;
+
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client
+            .read_response()
+            .await
+            .context("failed to read IMAP greeting")?;
+
+        let mut session = client
+            .login(&self.config.imap_username, &self.config.imap_password)
+            .await
+            .map_err(|(err, _client)| err)
+            .context("IMAP login failed")?;
+
+        session.select(folder).await.context("failed to select IMAP folder")?;
+
+        tracing::debug!("[Mail:{account}] entering IDLE on {folder}");
+        let mut handle = session.idle();
+        handle.init().await.context("IMAP IDLE init failed")?;
+        let (idle_wait, _stop) = handle.wait_with_timeout(timeout);
+        let outcome = match idle_wait.await {
+            Ok(async_imap::extensions::idle::IdleResponse::NewData(data)) => {
+                tracing::debug!("[Mail:{account}] IDLE got new data: {:?}", data.parsed());
+                IdleOutcome::NewData
+            }
+            Ok(
+                async_imap::extensions::idle::IdleResponse::Timeout
+                | async_imap::extensions::idle::IdleResponse::ManualInterrupt,
+            ) => IdleOutcome::Timeout,
+            Err(e) => {
+                tracing::warn!("[Mail:{account}] IDLE wait failed, treating as a timeout: {e}");
+                IdleOutcome::Timeout
+            }
+        };
+
+        // DONE must be sent to leave IDLE cleanly before the connection can do anything else
+        // (including logout) — `Handle::done` sends it and hands back the underlying `Session`.
+        let mut session = handle.done().await.context("IMAP IDLE DONE failed")?;
+        let _ = session.logout().await;
+        Ok(outcome)
+    }
+
+    async fn list_folders_inner(&self) -> Result<Vec<String>> {
+        ensure_crypto_provider();
+        let account = &self.config.account;
+
+        let tcp = TcpStream::connect((self.config.imap_server.as_str(), self.config.imap_port))
+            .await
+            .context("failed to connect to IMAP server")?;
+
+        let root_store = build_root_store()?;
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = ServerName::try_from(self.config.imap_server.clone())
+            .context("invalid IMAP server hostname")?;
+        let tls_stream = connector
+            .connect(domain, tcp)
+            .await
+            .context("TLS handshake with IMAP server failed")?;
+
+        let mut client = async_imap::Client::new(tls_stream);
+        let _greeting = client
+            .read_response()
+            .await
+            .context("failed to read IMAP greeting")?;
+
+        let mut session = client
+            .login(&self.config.imap_username, &self.config.imap_password)
+            .await
+            .map_err(|(err, _client)| err)
+            .context("IMAP login failed")?;
+
+        tracing::debug!("[Mail:{account}] listing folders");
+        let names_stream = session.list(None, Some("*")).await.context("IMAP LIST failed")?;
+        // Must be drained, not just dropped — see the identical note on `expunge()` in
+        // `delete_inner`; `Name` carries the same not-`Unpin` shape, so `try_collect` (takes
+        // `self`) rather than `try_next` (needs `&mut self: Unpin`).
+        let names: Vec<async_imap::types::Name> =
+            names_stream.try_collect().await.context("error reading IMAP LIST response")?;
+
+        let mut folders: Vec<String> = names
+            .iter()
+            .filter(|n| !n.attributes().contains(&async_imap::types::NameAttribute::NoSelect))
+            .map(|n| n.name().to_string())
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+
+        let _ = session.logout().await;
+        Ok(folders)
+    }
 }

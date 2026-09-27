@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Local fake Ollama for the TUI driver, so summary scenarios never depend on a real model.
+"""Local fake Ollama for the TUI driver, so summary/triage scenarios never depend on a real model.
 
 Serves what src/nlp/ollama_client.rs calls: GET /api/tags, GET /api/ps (the model counts as loaded),
-POST /api/generate. A prompt that asks for a summary gets "Fake summary of: <subject>"; an empty
-prompt (the model warm-up) gets an empty reply; anything else (a task parse) gets `{}`, which the
-parser rejects, so it falls back to regex. The mode file (`Ollama.set_mode`) can switch generate to
-HTTP 500 while running. Every request is appended to DIR/requests.log as one JSON line.
+POST /api/generate. A prompt that asks for a summary gets "Fake summary of: <subject>"; a triage
+prompt (Focused Inbox classification) gets `{"focused": true}` unless the subject or snippet
+contains a bulk-mail keyword ("newsletter", "receipt", "notification", "unsubscribe"), which gets
+`{"focused": false}` instead, so a scenario can control the split just by wording the subject; an
+empty prompt (the model warm-up) gets an empty reply; anything else (a task parse) gets `{}`, which
+the parser rejects, so it falls back to regex. The mode file (`Ollama.set_mode`) can switch generate
+to HTTP 500 while running. Every request is appended to DIR/requests.log as one JSON line.
 
 Run as `fakeollama.py DIR`: serves on 127.0.0.1, writes the port to DIR/port.
 Usage from the driver: docs/TUI_DRIVER.md ("Ollama").
@@ -44,11 +47,21 @@ class Ollama:
     def summary_requests(self) -> list[dict]:
         return [r for r in self.requests() if r["kind"] == "summary"]
 
+    def triage_requests(self) -> list[dict]:
+        return [r for r in self.requests() if r["kind"] == "triage"]
+
+
+_BULK_KEYWORDS = ("newsletter", "receipt", "notification", "unsubscribe")
+
 
 def _kind(prompt: str) -> str:
     if not prompt:
         return "warm"
-    return "summary" if prompt.startswith("Summarize the email") else "parse"
+    if prompt.startswith("Summarize the email"):
+        return "summary"
+    if prompt.startswith("Classify the email"):
+        return "triage"
+    return "parse"
 
 
 def make_handler(d: Path):
@@ -89,6 +102,15 @@ def make_handler(d: Path):
             elif kind == "summary":
                 subject = re.search(r"^Subject: (.*)$", prompt, re.M)
                 self._send(200, {"response": f"Fake summary of: {subject.group(1) if subject else '?'}"})
+            elif kind == "triage":
+                # Only the fenced <email> section is the subject/snippet under test; the
+                # instructions above it name these same keywords as examples of bulk mail, and
+                # even mention the literal string "<email>" itself when explaining the tag, so the
+                # opening tag must be matched with its trailing newline to skip past that mention.
+                fenced = re.search(r"<email>\n(.*)</email>", prompt, re.S)
+                haystack = (fenced.group(1) if fenced else prompt).lower()
+                focused = not any(kw in haystack for kw in _BULK_KEYWORDS)
+                self._send(200, {"response": json.dumps({"focused": focused})})
             elif kind == "warm":
                 self._send(200, {"response": "", "done": True})
             else:

@@ -115,6 +115,10 @@ class Ctx:
         """Local TLS IMAP server for this sandbox (tests/tui/fakeimap.py); the binary then syncs against it."""
         return self.sb.imap()
 
+    def smtp(self):
+        """Local STARTTLS SMTP server for this sandbox (tests/tui/fakesmtp.py); compose/reply/forward send uses it."""
+        return self.sb.smtp()
+
     def wait_db(self, sql: str, want: list, timeout: float = 15) -> bool:
         """Poll `sql` until it returns `want` (background sync writes land asynchronously)."""
         end = time.time() + timeout
@@ -1313,6 +1317,19 @@ def _(c: Ctx):
     c.eq(len(c.tasks()), 1, "tasks after converting the same email twice")
 
 
+@scenario("email_convert_body_due")
+def _(c: Ctx):
+    """The subject alone has no date phrase; only the snippet (body preview) does. The task should
+    still pick up a deadline from it, but its title stays the bare subject, not body prose."""
+    c.seed_emails(1, subject="project update", snippet="please finish this by tomorrow")
+    t = c.tui()
+    t.press("m", "ENTER")
+    c.see("Email converted to task")
+    c.eq(c.descs(), ["project update"], "title must stay the subject, not the body snippet")
+    t.press("m")
+    c.check(t.has("[DUE"), "deadline from the body snippet not applied")
+
+
 @scenario("email_cli")
 def _(c: Ctx):
     c.check("No emails yet" in c.cli("email", "list").out, "empty list message")
@@ -1484,6 +1501,24 @@ def _(c: Ctx):
     c.check("> " in t.text().split("Arrived later")[0].splitlines()[-1], "cursor jumped off its message on refresh")
 
 
+@scenario("imap_idle_push")
+def _(c: Ctx):
+    """Mail arriving while the TUI sits untouched on the To-Do view (no 'm', no manual sync)
+    still shows up: the background worker holds a real IMAP IDLE connection open and reacts to
+    the server's unsolicited push, rather than only picking it up on the next poll tick."""
+    mb = c.imap()
+    t = c.tui()
+    end = time.time() + 10
+    while time.time() < end and "IDLE" not in c.sb.imap_log():
+        t.pump(0.2)
+    c.check("IDLE" in c.sb.imap_log(), f"background worker never entered IDLE:\n{c.sb.imap_log()}")
+    mb.add("Pushed while idling")
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    c.check("DONE" in c.sb.imap_log(), f"client never exited IDLE after the push:\n{c.sb.imap_log()}")
+    t.press("m")
+    c.see("Pushed while idling")
+
+
 @scenario("imap_tui_bad_login")
 def _(c: Ctx):
     c.imap().add(count=1)
@@ -1499,6 +1534,162 @@ def _(c: Ctx):
     c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows stored despite bad login")
     log = c.sb.imap_log()
     c.check("LOGIN" in log and "SELECT" not in log, f"server should see LOGIN only:\n{log}")
+
+
+@scenario("imap_tui_delete")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Delete me")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Delete me")
+    t.press("d")
+    c.see("Deleted", 5)
+    c.check(not t.has("Delete me"), "deleted email still shown in the list")
+    c.wait_db("select count(*) from email_messages", [(0,)])
+    log = c.sb.imap_log()
+    c.check("STORE" in log and "\\Deleted" in log and "EXPUNGE" in log, f"protocol steps missing:\n{log}")
+    c.check(not mb.load()["messages"], "message still present in the fake mailbox after delete")
+
+
+@scenario("imap_tui_delete_popup")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Delete from popup")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m", "v")
+    c.see("Esc/v: close")
+    t.press("d")
+    c.see("Deleted", 5)
+    c.see("Esc/v: close", gone=True, msg="detail popup did not close after a successful delete")
+    c.wait_db("select count(*) from email_messages", [(0,)])
+    c.check(not mb.load()["messages"], "message still present in the fake mailbox after delete")
+
+
+@scenario("imap_tui_archive")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Archive me")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Archive me")
+    t.press("a")
+    c.see("Archived", 5)
+    c.check(not t.has("Archive me"), "archived email still shown in the list")
+    c.wait_db("select count(*) from email_messages", [(0,)])
+    log = c.sb.imap_log()
+    c.check("MOVE" in log, f"protocol steps missing MOVE:\n{log}")
+    box = mb.load()
+    c.check(not box["messages"], "message still present in the fake INBOX after archive")
+    c.check(box.get("archived"), "message not recorded in the fake server's archived list")
+
+
+@scenario("imap_tui_archive_popup")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Archive from popup")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m", "v")
+    c.see("Esc/v: close")
+    t.press("a")
+    c.see("Archived", 5)
+    c.see("Esc/v: close", gone=True, msg="detail popup did not close after a successful archive")
+    c.wait_db("select count(*) from email_messages", [(0,)])
+    c.check(not mb.load()["messages"], "message still present in the fake mailbox after archive")
+
+
+@scenario("imap_tui_archive_no_move")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.disable_move()
+    mb.add("Archive without MOVE support")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Archive without MOVE support")
+    t.press("a")
+    c.see("Archived", 5)
+    c.wait_db("select count(*) from email_messages", [(0,)])
+    log = c.sb.imap_log()
+    c.check("MOVE" in log, f"client should still attempt MOVE first:\n{log}")
+    c.check("COPY" in log and "STORE" in log and "\\Deleted" in log and "EXPUNGE" in log,
+            f"fallback protocol steps missing:\n{log}")
+    box = mb.load()
+    c.check(not box["messages"], "message still present in the fake INBOX after fallback archive")
+    c.check(box.get("archived"), "message not recorded in the fake server's archived list")
+
+
+@scenario("imap_tui_attachment_save")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Report attached", attachment=True)
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("[attach]", msg="list did not show the attachment tag")
+    t.press("v")
+    c.see("Attachments: report-1.pdf", msg="detail popup did not list the attachment")
+    t.press("s")
+    c.see("Saved 1 attachment(s) to", 10, msg="s did not report a saved attachment")
+    saved = list(c.sb.attachment_dir.rglob("report-1.pdf"))
+    c.check(len(saved) == 1, f"attachment file not written under {c.sb.attachment_dir}")
+
+
+@scenario("imap_tui_folder_filter")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Archive then browse")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Archive then browse")
+    t.press("a")
+    c.see("Archived", 5)
+    c.wait_db("select count(*) from email_messages", [(0,)])
+
+    t.press("s")
+    c.see("Synced 1 new email(s)", 15, msg="s did not resync the archived message back in from Archive")
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    c.see("[Archive]", msg="merged view did not tag the resynced row with its folder")
+
+    t.press("F")
+    c.see("folder: Archive")
+    c.check(t.has("Archive then browse"), "folder filter hid the archived message")
+
+    t.press("F")
+    c.see("folder:", gone=True, msg="folder filter did not cycle back to merged")
+    c.check(t.has("Archive then browse"), "merged view missing the archived message after cycling back")
+
+
+@scenario("imap_tui_folder_browse")
+def _(c: Ctx):
+    """Slice 16: `B` lists every server folder via IMAP LIST, not just ones already synced —
+    unlike `F`'s filter (`imap_tui_folder_filter`, above), which only cycles folders already in
+    the local DB. A `\\Noselect` hierarchy node is dropped client-side; picking a real one syncs
+    it in on the spot."""
+    mb = c.imap()
+    mb.add("In the inbox")
+    mb.add_folder("Sent")
+    mb.add_folder("Hidden", noselect=True)
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("In the inbox")
+
+    t.press("B")
+    c.see("(default) Sent", 10, msg="folder browser did not discover the Sent folder via LIST")
+    c.check(t.has("(default) INBOX"), "folder browser missing INBOX")
+    c.check(not t.has("Hidden"), "folder browser must drop a \\Noselect folder")
+
+    t.press("j")
+    t.press("ENTER")
+    c.see("'Sent' - nothing new", 10, msg="one-folder sync of an empty folder did not report back")
+    c.see("folder: Sent", msg="picking a discovered folder did not set the folder filter")
+    c.check(not t.has("In the inbox"), "Sent filter should hide the INBOX-only message")
 
 
 @scenario("email_s_sync")
@@ -1545,6 +1736,173 @@ def _(c: Ctx):
     c.eq(c.db("select count(*) from email_messages"), [(0,)], "rows stored despite bad login")
 
 
+# ---------------------------------------------------------------- email send (fake STARTTLS server)
+
+
+@scenario("email_compose_send")
+def _(c: Ctx):
+    sm = c.smtp()
+    t = c.tui()
+    t.press("m", "c")
+    c.see("Ctrl-S: send")
+    t.type("newperson@example.com")
+    t.press("TAB", "TAB")  # To -> Cc -> Subject
+    t.type("Hello there")
+    t.press("TAB")  # Subject -> Body
+    t.type("Just checking in.")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "messages recorded by the fake server")
+    if msgs:
+        c.eq(msgs[0]["rcpt_to"], ["newperson@example.com"], "recipient")
+        c.eq(msgs[0]["headers"].get("Subject"), "Hello there", "subject")
+        c.check("Just checking in." in msgs[0]["body"], f"body: {msgs[0]['body']!r}")
+
+
+@scenario("email_compose_cancel")
+def _(c: Ctx):
+    sm = c.smtp()
+    t = c.tui()
+    t.press("m", "c")
+    c.see("Ctrl-S: send")
+    t.type("nobody@example.com")
+    t.press("ESC")
+    c.see("Email (", msg="Esc did not return to the email list")
+    c.check(t.alive(), "TUI died on compose cancel")
+    c.eq(sm.messages(), [], "cancel must not send anything")
+
+
+@scenario("email_reply_send")
+def _(c: Ctx):
+    sm = c.smtp()
+    c.seed_emails(1, account="default", from_addr="alice@example.com", from_name="Alice", subject="Lunch plans",
+                  message_id="<orig1@x>", references_header="<ref0@x>", body_text="Want lunch?")
+    t = c.tui()
+    t.press("m", "v")
+    c.see("R: reply")
+    t.press("R")
+    c.see("Ctrl-S: send")
+    c.check(t.has("alice@example.com"), "reply did not prefill To")
+    c.check(t.has("Re: Lunch plans"), "reply did not prefill Subject")
+    c.check(t.has("Alice wrote:"), "reply did not quote the original")
+    t.type("Sounds good.")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "messages recorded by the fake server")
+    if msgs:
+        h = msgs[0]["headers"]
+        c.eq(msgs[0]["rcpt_to"], ["alice@example.com"], "recipient")
+        c.eq(h.get("In-Reply-To"), "<orig1@x>", "In-Reply-To")
+        c.eq(h.get("References"), "<ref0@x> <orig1@x>", "References")
+        c.check("Sounds good." in msgs[0]["body"] and "Want lunch?" in msgs[0]["body"], f"body: {msgs[0]['body']!r}")
+
+
+@scenario("email_reply_all_cc")
+def _(c: Ctx):
+    sm = c.smtp()
+    c.seed_emails(1, account="default", from_addr="alice@example.com", from_name="Alice", subject="Team sync",
+                  message_id="<orig2@x>", to_addrs="tester@example.com", cc_addrs="carol@example.com, dave@example.com",
+                  body_text="Standup at 10.")
+    t = c.tui()
+    t.press("m", "v")
+    t.press("A")
+    c.see("Ctrl-S: send")
+    c.check(t.has("carol@example.com, dave@example.com"), "reply-all did not merge Cc")
+    t.type("Works for me.")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "messages recorded by the fake server")
+    if msgs:
+        c.eq(sorted(msgs[0]["rcpt_to"]), sorted(["alice@example.com", "carol@example.com", "dave@example.com"]), "recipients")
+        c.eq(msgs[0]["headers"].get("Cc"), "carol@example.com, dave@example.com", "Cc header")
+
+
+@scenario("email_forward_send")
+def _(c: Ctx):
+    sm = c.smtp()
+    c.seed_emails(1, account="default", from_addr="alice@example.com", from_name="Alice", subject="Lunch plans",
+                  message_id="<orig3@x>", body_text="Want lunch?")
+    t = c.tui()
+    t.press("m", "v")
+    t.press("F")
+    c.see("Ctrl-S: send")
+    c.check(t.has("Fwd: Lunch plans"), "forward did not prefill Subject")
+    c.check(t.has("Alice wrote:"), "forward did not quote the original")
+    t.type("eve@example.com")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "messages recorded by the fake server")
+    if msgs:
+        c.eq(msgs[0]["rcpt_to"], ["eve@example.com"], "recipient")
+        c.check("In-Reply-To" not in msgs[0]["headers"], "forward must not carry reply threading headers")
+        c.check("Want lunch?" in msgs[0]["body"], f"body: {msgs[0]['body']!r}")
+
+
+@scenario("email_send_auth_fail")
+def _(c: Ctx):
+    sm = c.smtp()
+    sm.set_mode("auth_fail")
+    t = c.tui()
+    t.press("m", "c")
+    c.see("Ctrl-S: send")
+    t.type("nobody@example.com")
+    t.press("C-s", settle=1.0)
+    c.see("Send failed", 5, msg="auth failure did not surface as Send failed")
+    c.see("Ctrl-S: send", msg="compose form closed despite the failed send")
+    c.eq(sm.messages(), [], "a rejected send must not record a message")
+
+
+@scenario("email_drafts_lifecycle")
+def _(c: Ctx):
+    sm = c.smtp()
+    t = c.tui()
+
+    # Save a draft, back out to the list, then a second draft.
+    t.press("m", "c")
+    c.see("Ctrl-D: save draft")
+    t.type("nobody@example.com")
+    t.press("TAB", "TAB")
+    t.type("First draft")
+    t.press("C-d", settle=0.5)
+    c.see("Draft saved")
+    c.eq(c.db("select count(*) from email_drafts"), [(1,)], "first draft persisted")
+
+    t.press("c")
+    t.type("second@example.com")
+    t.press("TAB", "TAB")
+    t.type("Second draft")
+    t.press("C-d", settle=0.5)
+    c.eq(c.db("select count(*) from email_drafts"), [(2,)], "second draft persisted")
+
+    # Open the drafts list, resume the most recent (second) one, and finish sending it.
+    t.press("D")
+    c.see("Drafts (", msg="drafts popup did not open")
+    c.check(t.has("Second draft"), "drafts popup missing the newer draft's subject")
+    t.press("ENTER")
+    c.see("Ctrl-D: save draft", msg="Enter on a draft did not reopen compose")
+    c.check(t.has("second@example.com") and t.has("Second draft"), "resumed draft lost its content")
+    t.press("C-s", settle=1.0)
+    c.see("Sent")
+    msgs = sm.messages()
+    c.eq(len(msgs), 1, "the resumed draft was sent")
+    if msgs:
+        c.eq(msgs[0]["rcpt_to"], ["second@example.com"], "recipient")
+    c.eq(c.db("select count(*) from email_drafts"), [(1,)], "sending a resumed draft deletes it")
+
+    # The one remaining draft (the first) can still be deleted straight from the popup.
+    t.press("D")
+    c.check(t.has("First draft"), "drafts popup missing the remaining draft")
+    t.press("d")
+    c.eq(c.db("select count(*) from email_drafts"), [(0,)], "d in the drafts popup deletes it")
+    c.see("(no saved drafts)")
+    t.press("ESC")
+    c.see("Email (", msg="Esc did not close the drafts popup")
+
+
 def _seed_priority(c: Ctx) -> None:
     """Newest first by date: lunch, urgent, assignment. By priority: urgent, assignment, lunch."""
     now = datetime.now(timezone.utc)
@@ -1588,6 +1946,94 @@ def _(c: Ctx):
     names = ("Lunch plans", "URGENT server down", "Assignment 4 out")
     c.eq(_order(t, *names), ["URGENT server down", "Assignment 4 out", "Lunch plans"], "reading reordered the list")
     c.check("> " in t.text().split("URGENT server down")[0].splitlines()[-1], "cursor left the opened message")
+
+
+@scenario("email_account_filter")
+def _(c: Ctx):
+    c.seed_emails(3)  # Subject 0/2 -> work, Subject 1 -> home (see seed_emails)
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1") and t.has("Subject 2"), "merged view missing a row")
+    c.check(not t.has("account:"), "account tag shown before any filter")
+
+    t.press("A")
+    c.see("account: home")
+    c.check(t.has("Subject 1") and not t.has("Subject 0") and not t.has("Subject 2"), "home filter wrong rows")
+
+    t.press("A")
+    c.see("account: work")
+    c.check(t.has("Subject 0") and t.has("Subject 2") and not t.has("Subject 1"), "work filter wrong rows")
+
+    t.press("A")
+    c.see("account:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1") and t.has("Subject 2"), "merged view missing a row after cycling back")
+
+
+@scenario("email_snooze_hide_show")
+def _(c: Ctx):
+    c.seed_emails(2)
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row")
+
+    t.press("z")
+    c.see("Snooze until")
+    t.type("10m")
+    t.press("ENTER")
+    c.see("Snoozed until")
+    c.check(not t.has("Subject 0") and t.has("Subject 1"), "snoozed message still in normal view")
+
+    t.press("Z")
+    c.see("snoozed view")
+    c.check(t.has("Subject 0") and not t.has("Subject 1"), "snoozed view wrong rows")
+    c.check(t.has("[snoozed until"), "no snooze tag on the snoozed row")
+
+    t.press("x")
+    c.check(not t.has("Subject 0"), "unsnoozed message still in snoozed view")
+
+    t.press("Z")
+    c.see("snoozed view", gone=True, msg="did not return to normal view")
+    c.check(t.has("Subject 0") and t.has("Subject 1"), "merged view missing a row after unsnooze")
+
+
+@scenario("email_focus_filter")
+def _(c: Ctx):
+    c.seed_emails(3)  # Subject 0/1/2
+    c.db("update email_messages set triage_focused=1 where subject in ('Subject 0','Subject 1')")
+    c.db("update email_messages set triage_focused=0 where subject='Subject 2'")
+    t = c.tui()
+    t.press("m")
+    c.check(t.has("Subject 0") and t.has("Subject 1") and t.has("Subject 2"), "merged view missing a row")
+    c.check(t.has("[other]"), "no [other] tag on the not-focused row in the merged view")
+
+    t.press("I")
+    c.see("focus: Focused")
+    c.check(t.has("Subject 0") and t.has("Subject 1") and not t.has("Subject 2"), "focused filter wrong rows")
+
+    t.press("I")
+    c.see("focus: Other")
+    c.check(not t.has("Subject 0") and not t.has("Subject 1") and t.has("Subject 2"), "other filter wrong rows")
+
+    t.press("I")
+    c.see("focus:", gone=True, msg="filter did not clear back to merged")
+    c.check(t.has("Subject 0") and t.has("Subject 1") and t.has("Subject 2"), "merged view missing a row after cycling back")
+
+
+@scenario("email_triage_after_sync")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Quarterly planning notes")
+    mb.add("Weekly Newsletter")
+    ol = c.sb.ollama()
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(2,)])
+    t.press("m")
+    t.pump(2.0)  # let the sync started by entering the view finish, then the triage pass it kicks off
+    c.wait_db("select count(*) from email_messages where triage_focused is not null", [(2,)])
+    c.eq(c.db("select subject,triage_focused from email_messages order by subject"),
+         [("Quarterly planning notes", 1), ("Weekly Newsletter", 0)],
+         "triage misclassified subjects by the fake Ollama's bulk-keyword rule")
+    c.check(len(ol.triage_requests()) >= 2, "sync did not trigger a triage request per email")
 
 
 LONG_BODY = "The planning meeting covers the roadmap, staffing and budget for next quarter. " * 6
@@ -1908,6 +2354,18 @@ def _(c: Ctx):
     t.type("nomatch")
     t.press("ENTER")
     c.see("Pattern not found: nomatch", 2)
+
+
+@scenario("vim_email_search_body")
+def _(c: Ctx):
+    c.seed_emails(8)
+    t = c.tui()
+    t.press("m")
+    c.see("Email (")
+    t.press("/")
+    t.type("line one 5")
+    t.press("ENTER")
+    c.eq(_cur_email(t), "Subject 5", "search did not match body_text via the DB")
 
 
 @scenario("vim_email_popup_scroll")

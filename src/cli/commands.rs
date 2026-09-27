@@ -246,7 +246,7 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
 
                 let mut any_failed = false;
                 for config in &configs {
-                    match sync_account(&app.db_pool, config).await {
+                    match sync_account(&app.db_pool, config, true).await {
                         Ok(report) => {
                             if report.epoch_changed {
                                 eprintln!(

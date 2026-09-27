@@ -17,6 +17,13 @@ fn mail(subject: &str, snippet: &str, from: &str) -> EmailMessage {
         is_read: false,
         task_id: None,
         body_text: None,
+        to_addrs: None,
+        cc_addrs: None,
+        references_header: None,
+        is_starred: false,
+        has_attachments: false,
+        snoozed_until: None,
+        triage_focused: None,
     }
 }
 

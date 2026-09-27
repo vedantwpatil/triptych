@@ -24,7 +24,12 @@ mod time;
 
 pub use allocation::*;
 pub use calendar::*;
-pub use mail::{MailSync, Summary, SummaryDone};
+pub use mail::{
+    ArchiveResult, AttachmentSaveResult, DeleteResult, FolderListResult, FolderSyncResult, MailSync,
+    SendResult, Summary, SummaryDone, TriageDone, chain_references, forward_subject,
+    match_rule, merge_reply_all_cc, normalize_subject, parse_rule_spec, parse_snooze_spec,
+    quote_original, reply_subject, sanitize_filename, thread_count,
+};
 pub use model::*;
 pub use motion::*;
 pub use tasks::*;
@@ -40,6 +45,7 @@ fn db_url() -> String {
 }
 
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub db_pool: SqlitePool,
     pub tasks: Vec<Task>,
@@ -96,7 +102,66 @@ pub struct App {
     pub summary_rx: tokio::sync::mpsc::UnboundedReceiver<SummaryDone>,
     /// AI summary state per email id, for emails opened this session.
     pub email_summaries: std::collections::HashMap<i64, Summary>,
+    triage_tx: tokio::sync::mpsc::UnboundedSender<TriageDone>,
+    /// Results of background email triage classifications; drained by `run_app`.
+    pub triage_rx: tokio::sync::mpsc::UnboundedReceiver<TriageDone>,
+    /// A background triage pass is running; a second one is not started.
+    triage_running: bool,
+    send_tx: tokio::sync::mpsc::UnboundedSender<SendResult>,
+    /// Result of a background compose/reply/forward send; drained by `run_app`.
+    pub send_rx: tokio::sync::mpsc::UnboundedReceiver<SendResult>,
+    delete_tx: tokio::sync::mpsc::UnboundedSender<DeleteResult>,
+    /// Result of a background email delete; drained by `run_app`.
+    pub delete_rx: tokio::sync::mpsc::UnboundedReceiver<DeleteResult>,
+    archive_tx: tokio::sync::mpsc::UnboundedSender<ArchiveResult>,
+    /// Result of a background email archive; drained by `run_app`.
+    pub archive_rx: tokio::sync::mpsc::UnboundedReceiver<ArchiveResult>,
+    attachment_tx: tokio::sync::mpsc::UnboundedSender<AttachmentSaveResult>,
+    /// Result of a background attachment save; drained by `run_app`.
+    pub attachment_rx: tokio::sync::mpsc::UnboundedReceiver<AttachmentSaveResult>,
+    /// Attachment metadata for emails opened this session (no bytes — see
+    /// `MailSource::fetch_attachments`), keyed by email id. Populated by
+    /// `App::open_selected_email`, mirroring `email_summaries`.
+    pub email_attachments: std::collections::HashMap<i64, Vec<crate::email::EmailAttachment>>,
+    /// The open compose/reply/forward form, when `input_mode` is `InputMode::EmailCompose`.
+    pub email_compose: Option<ComposeState>,
+    /// Loaded fresh from the DB each time the drafts list popup (`D` in the email view) opens.
+    pub drafts: Vec<crate::email::Draft>,
+    pub drafts_open: bool,
+    pub selected_draft: usize,
+    /// Loaded fresh from the DB each time the rules popup (`R` in the email view) opens.
+    pub rules: Vec<crate::email::EmailRule>,
+    pub rules_open: bool,
+    pub selected_rule: usize,
     pub emails: Vec<crate::email::EmailMessage>,
+    /// `None` shows every configured account's mail merged (the default); `Some(label)` restricts
+    /// `refresh_emails` to that one account. Cycled with `A` in the email list.
+    pub account_filter: Option<String>,
+    /// `None` shows every synced folder merged (the default); `Some(name)` restricts
+    /// `refresh_emails` to that one folder (e.g. `"INBOX"`, `"Archive"`). Cycled with `F` in the
+    /// email list; see Slice 13 (folder browsing) in `docs/roadmap-email.md`.
+    pub folder_filter: Option<String>,
+    /// `false` (the default) shows the normal inbox, hiding any message with a future
+    /// `snoozed_until`; `true` shows only those, so a snooze can be reviewed or cleared early.
+    /// Toggled with `Z` in the email list.
+    pub show_snoozed: bool,
+    /// `None` shows every email regardless of triage (the default); `Some(true)`/`Some(false)`
+    /// restricts `refresh_emails` to Focused/Other only (Outlook's Focused Inbox split). Cycled
+    /// with `I` in the email list.
+    pub focus_filter: Option<bool>,
+    folder_list_tx: tokio::sync::mpsc::UnboundedSender<FolderListResult>,
+    /// Result of a background folder-discovery LIST pass; drained by `run_app`.
+    pub folder_list_rx: tokio::sync::mpsc::UnboundedReceiver<FolderListResult>,
+    folder_sync_tx: tokio::sync::mpsc::UnboundedSender<FolderSyncResult>,
+    /// Result of a background one-folder sync kicked off from the folder browser; drained by
+    /// `run_app`.
+    pub folder_sync_rx: tokio::sync::mpsc::UnboundedReceiver<FolderSyncResult>,
+    /// Set when the folder-browser popup (`B` in the email list) is open.
+    pub folder_browser_open: bool,
+    /// `(account, folder)` pairs found by the last `App::open_folder_browser` LIST pass,
+    /// alphabetical by account then folder. Empty until that finishes.
+    pub discovered_folders: Vec<(String, String)>,
+    pub selected_discovered_folder: usize,
     pub email_sort: crate::email::EmailSort,
     pub selected_email: usize,
     /// Set when the email detail popup is open (`v` on a selected email in
@@ -118,6 +183,13 @@ impl App {
         let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel();
         let (mail_tx, mail_rx) = tokio::sync::mpsc::unbounded_channel();
         let (summary_tx, summary_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (delete_tx, delete_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (archive_tx, archive_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (attachment_tx, attachment_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (triage_tx, triage_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (folder_list_tx, folder_list_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (folder_sync_tx, folder_sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             db_pool: pool,
@@ -155,7 +227,37 @@ impl App {
             summary_tx,
             summary_rx,
             email_summaries: std::collections::HashMap::new(),
+            triage_tx,
+            triage_rx,
+            triage_running: false,
+            send_tx,
+            send_rx,
+            delete_tx,
+            delete_rx,
+            archive_tx,
+            archive_rx,
+            attachment_tx,
+            attachment_rx,
+            email_attachments: std::collections::HashMap::new(),
+            email_compose: None,
+            drafts: Vec::new(),
+            drafts_open: false,
+            selected_draft: 0,
+            rules: Vec::new(),
+            rules_open: false,
+            selected_rule: 0,
             emails: Vec::new(),
+            account_filter: None,
+            folder_filter: None,
+            show_snoozed: false,
+            focus_filter: None,
+            folder_list_tx,
+            folder_list_rx,
+            folder_sync_tx,
+            folder_sync_rx,
+            folder_browser_open: false,
+            discovered_folders: Vec::new(),
+            selected_discovered_folder: 0,
             email_sort: crate::email::EmailSort::default(),
             selected_email: 0,
             email_detail_open: false,

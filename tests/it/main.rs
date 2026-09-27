@@ -5,9 +5,13 @@
 
 mod app;
 mod cli;
+mod email_attachments;
+mod email_compose;
 mod email_config;
 mod email_message;
 mod email_priority;
+mod email_smtp;
+mod email_thread;
 mod motion;
 mod nlp_llm;
 mod nlp_rules;

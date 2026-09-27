@@ -15,6 +15,10 @@ pub struct TaskParse {
     description: String,
     /// Set when the task comes from converting this email (`App::convert_selected_email_to_task`).
     email_id: Option<i64>,
+    /// Set alongside `email_id`: the email's subject, forced back onto the parsed item's title so a
+    /// body snippet folded into `description` for date/priority/tag extraction never leaks into the
+    /// task's name (see `App::convert_selected_email_to_task`).
+    title_override: Option<String>,
     item: Result<ParsedItem, String>,
 }
 
@@ -143,14 +147,21 @@ impl App {
             .parse(description)
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {e}")))?;
-        self.insert_parsed_task(description, parse_result.item)
+        self.insert_parsed_task(description, parse_result.item, None)
             .await
     }
 
     /// Parses `description` in the background, so the TUI never waits on the parser: a parse that
     /// reaches the LLM takes about a second, up to 15s if Ollama hangs. The result arrives on
-    /// `task_rx` and `apply_task_parse` inserts it.
-    pub fn submit_task(&mut self, description: String, email_id: Option<i64>) {
+    /// `task_rx` and `apply_task_parse` inserts it. `title_override`, when set, replaces the parsed
+    /// item's title before insert — used to fold extra text (an email body snippet) into
+    /// `description` for date/priority/tag extraction without letting it become the task's name.
+    pub fn submit_task(
+        &mut self,
+        description: String,
+        email_id: Option<i64>,
+        title_override: Option<String>,
+    ) {
         self.status_message = Some(("Adding task...".to_string(), std::time::Instant::now()));
         let parser = Arc::clone(&self.nlp_parser);
         let tx = self.task_tx.clone();
@@ -163,6 +174,7 @@ impl App {
             let _ = tx.send(TaskParse {
                 description,
                 email_id,
+                title_override,
                 item,
             });
         });
@@ -178,6 +190,7 @@ impl App {
         let TaskParse {
             description,
             email_id,
+            title_override,
             item,
         } = parsed;
         let item = item.map_err(sqlx::Error::Protocol)?;
@@ -195,7 +208,9 @@ impl App {
             return Ok(());
         }
 
-        let task_id = self.insert_parsed_task(&description, item).await?;
+        let task_id = self
+            .insert_parsed_task(&description, item, title_override.as_deref())
+            .await?;
         self.status_message = None;
         match email_id {
             Some(email_id) => self.finish_email_conversion(email_id, task_id).await,
@@ -207,9 +222,11 @@ impl App {
         &mut self,
         description: &str,
         item: ParsedItem,
+        title_override: Option<&str>,
     ) -> Result<i64, sqlx::Error> {
-        let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
+        let (parsed_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
             extract_task_fields(item);
+        let task_title = title_override.map_or(parsed_title, ToString::to_string);
 
         let new_order: i64 = if self.tasks.is_empty() {
             0

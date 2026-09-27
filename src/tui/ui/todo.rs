@@ -162,6 +162,9 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             });
         }
         InputMode::Search => super::render_search_box(f, &app.input_buffer, chunks[1]),
+        // Compose/snooze/rule-input only open from the Email view; nothing to draw over the todo
+        // list for them.
+        InputMode::EmailCompose | InputMode::EmailSnooze | InputMode::EmailRuleInput => {}
         InputMode::Normal => {
             if let Some((msg, instant)) = &app.status_message
                 && instant.elapsed() < std::time::Duration::from_secs(3)

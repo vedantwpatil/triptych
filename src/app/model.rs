@@ -98,6 +98,14 @@ pub enum InputMode {
     Editing,
     /// Typing a `/` query in the todo or email list.
     Search,
+    /// Composing, replying to, or forwarding an email; fields live in `App::email_compose`.
+    EmailCompose,
+    /// Typing a snooze spec (`z` in the email list) into `input_buffer`; see
+    /// `App::parse_snooze_spec`.
+    EmailSnooze,
+    /// Typing a rule spec (`n` in the rules popup) into `input_buffer`; see
+    /// `App::parse_rule_spec`.
+    EmailRuleInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +194,78 @@ impl BlockFormState {
             BlockFormField::StartTime => BlockFormField::BlockType,
             BlockFormField::EndTime => BlockFormField::StartTime,
             BlockFormField::Title => BlockFormField::EndTime,
+        };
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeField {
+    To,
+    Cc,
+    Subject,
+    Body,
+}
+
+/// One in-progress compose/reply/forward, edited via `InputMode::EmailCompose`.
+///
+/// `to`/`cc`/`subject`/`body` are plain editable text; `Enter` inserts a newline into `body` but
+/// is otherwise ignored on the single-line fields — see `handle_email_compose_key`.
+#[derive(Debug, Clone)]
+pub struct ComposeState {
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub body: String,
+    pub active_field: ComposeField,
+    /// Which configured account to send from (an `EmailConfig`/`SmtpConfig` label).
+    pub account: String,
+    /// Set when replying or forwarding: the original message's `Message-ID`, sent as this
+    /// message's `In-Reply-To`.
+    pub in_reply_to: Option<String>,
+    /// Set when replying or forwarding: `in_reply_to` chained onto the original's own
+    /// `References` header, sent as this message's `References`.
+    pub references: Option<String>,
+    /// Set when replying or forwarding: the quoted original message, rendered below the editable
+    /// `body` and appended to it at send time — kept separate so backspace/typing in `body` never
+    /// touches the quoted text.
+    pub quoted: Option<String>,
+    /// Set when resuming a saved draft: the `email_drafts` row to overwrite (rather than insert a
+    /// new one) on the next save-as-draft, and to delete once this compose is actually sent.
+    pub draft_id: Option<i64>,
+}
+
+impl ComposeState {
+    #[must_use]
+    pub const fn blank(account: String) -> Self {
+        Self {
+            to: String::new(),
+            cc: String::new(),
+            subject: String::new(),
+            body: String::new(),
+            active_field: ComposeField::To,
+            account,
+            in_reply_to: None,
+            references: None,
+            quoted: None,
+            draft_id: None,
+        }
+    }
+
+    pub const fn next_field(&mut self) {
+        self.active_field = match self.active_field {
+            ComposeField::To => ComposeField::Cc,
+            ComposeField::Cc => ComposeField::Subject,
+            ComposeField::Subject => ComposeField::Body,
+            ComposeField::Body => ComposeField::To,
+        };
+    }
+
+    pub const fn prev_field(&mut self) {
+        self.active_field = match self.active_field {
+            ComposeField::To => ComposeField::Body,
+            ComposeField::Cc => ComposeField::To,
+            ComposeField::Subject => ComposeField::Cc,
+            ComposeField::Body => ComposeField::Subject,
         };
     }
 }

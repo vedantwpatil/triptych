@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fakeimap  # noqa: E402
 import fakeollama  # noqa: E402
+import fakesmtp  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 VENV = ROOT / "target" / "tuidrive-venv"
@@ -49,7 +50,7 @@ except ImportError:  # first run: build a private venv under target/ (gitignored
 
 BIN = Path(os.environ.get("TRIPTYCH_BIN") or ROOT / "target" / "debug" / "triptych")
 HOME = Path(os.environ.get("TUIDRIVE_HOME") or f"/tmp/tuidrive-{os.getuid()}")
-PROTECTED_ENV = {"DATABASE_URL", "TRIPTYCH_SOCKET_PATH", "TRIPTYCH_LOG_PATH"}
+PROTECTED_ENV = {"DATABASE_URL", "TRIPTYCH_SOCKET_PATH", "TRIPTYCH_LOG_PATH", "TRIPTYCH_ATTACHMENT_DIR"}
 ALT_ON = b"\x1b[?1049h"
 CURSOR_BG = "7f7f7f"  # calendar selection highlight colour
 
@@ -100,6 +101,8 @@ class Sandbox:
         self.sock_path = self.dir / "t.sock"
         self.imap_dir = self.dir / "imap"
         self.ollama_dir = self.dir / "ollama"
+        self.smtp_dir = self.dir / "smtp"
+        self.attachment_dir = self.dir / "attachments"
         self.bg: list[subprocess.Popen] = []
 
     @classmethod
@@ -124,12 +127,19 @@ class Sandbox:
             TRIPTYCH_SOCKET_PATH=str(self.sock_path),
             TRIPTYCH_LOG_PATH=str(self.dir / "t.log"),
             TRIPTYCH_EMAIL_ENABLED="false",
+            TRIPTYCH_ATTACHMENT_DIR=str(self.attachment_dir),
             TERM="xterm-256color",
         )
         if (self.imap_dir / "port").exists():  # only ever the local fake server, never an inherited real account
             env.update(fakeimap.env_for(self.imap_dir))
         if (self.ollama_dir / "port").exists():  # only ever the local fake; otherwise the real default URL
             env.update(fakeollama.env_for(self.ollama_dir))
+        if (self.smtp_dir / "port").exists():  # only ever the local fake server, never an inherited real account
+            env.update(fakesmtp.env_for(self.smtp_dir))
+        if (self.imap_dir / "port").exists() and (self.smtp_dir / "port").exists():
+            bundle = self.dir / "ca-bundle.pem"
+            bundle.write_text((self.imap_dir / "ca.pem").read_text() + (self.smtp_dir / "ca.pem").read_text())
+            env["SSL_CERT_FILE"] = str(bundle)  # both fakes' CAs trusted at once
         for k, v in (extra or {}).items():
             if k in PROTECTED_ENV:
                 raise SystemExit(f"refusing to override {k}: sandbox isolation")
@@ -159,6 +169,20 @@ class Sandbox:
         """Every IMAP command the binary sent (passwords masked)."""
         try:
             return (self.imap_dir / "commands.log").read_text()
+        except OSError:
+            return ""
+
+    def smtp(self) -> fakesmtp.Smtp:
+        """Start a local STARTTLS SMTP server for this sandbox; `env()` then enables send through it."""
+        proc = fakesmtp.start(self.smtp_dir)
+        self.bg.append(proc)
+        (self.dir / "bg-smtp.pid").write_text(str(proc.pid))
+        return fakesmtp.Smtp(self.smtp_dir)
+
+    def smtp_log(self) -> str:
+        """Every SMTP command the binary sent (credentials masked)."""
+        try:
+            return (self.smtp_dir / "commands.log").read_text()
         except OSError:
             return ""
 
@@ -387,7 +411,7 @@ class Term:
             day = next((dn for cx, dn in reversed(cols) if cx <= xs[0] + 1), "?")
             label = ""
             for yy in range(y, hdr_row, -1):
-                if m := re.match(r"\s*.?(\d\d[ap]m)", self.screen.display[yy]):
+                if m := re.match(r"\s*.{0,2}?(\d\d[ap]m)", self.screen.display[yy]):
                     label = m.group(1)
                     break
             return {"day": day, "time": label, "row": y, "text": self.screen.display[y][xs[0]: xs[-1] + 1].strip()}
@@ -542,6 +566,9 @@ def cmd_start(a: argparse.Namespace) -> int:
     if a.ollama:
         sb.ollama()
         print(f"ollama: fake server on 127.0.0.1:{(sb.ollama_dir / 'port').read_text()}")
+    if a.smtp:
+        sb.smtp()
+        print(f"smtp: fake STARTTLS server on 127.0.0.1:{(sb.smtp_dir / 'port').read_text()}")
     for pre in a.pre:
         r = sb.cli(*shlex.split(pre), env=extra)
         print(f"pre: {pre!r} rc={r.rc} {r.clean_out.strip()}")
@@ -575,6 +602,7 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for the TUI (not DB/socket paths)")
     st.add_argument("--ollama", action="store_true", help="start a fake Ollama (email summaries answer 'Fake summary of: <subject>')")
     st.add_argument("--imap", type=int, metavar="N", help="start a local fake IMAP server holding N messages; email sync uses it")
+    st.add_argument("--smtp", action="store_true", help="start a local fake STARTTLS SMTP server; compose/reply/forward send uses it")
     st.add_argument("--build", action="store_true", help="cargo build first")
     st.add_argument("--compact", action="store_true")
 
@@ -617,6 +645,11 @@ def main(argv: list[str] | None = None) -> int:
     om = ols.add_parser("mode", help="ok, or error to make generate fail")
     om.add_argument("mode", choices=["ok", "error"])
     ols.add_parser("log", help="requests the binary sent")
+    sm = sub.add_parser("smtp", help="control the session's fake SMTP server (start the session with --smtp)")
+    sms = sm.add_subparsers(dest="smtp_cmd", required=True)
+    smm = sms.add_parser("mode", help="ok, auth_fail, or reject_recipient")
+    smm.add_argument("mode", choices=["ok", "auth_fail", "reject_recipient"])
+    sms.add_parser("log", help="messages the binary sent")
     rs = sub.add_parser("resize")
     rs.add_argument("rows", type=int)
     rs.add_argument("cols", type=int)
@@ -691,6 +724,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"mode={a.mode}")
         else:
             print("\n".join(f"{r['kind']:8} {r['path']}" for r in fo.requests()))
+        return 0
+    if a.cmd == "smtp":
+        if not (sb.smtp_dir / "port").exists():
+            raise SystemExit(f"session {name!r} has no fake SMTP server (start it with --smtp)")
+        fs = fakesmtp.Smtp(sb.smtp_dir)
+        if a.smtp_cmd == "mode":
+            fs.set_mode(a.mode)
+            print(f"mode={a.mode}")
+        else:
+            for m in fs.messages():
+                print(f"{m['mail_from']} -> {','.join(m['rcpt_to'])}: {m['headers'].get('Subject', '')}")
         return 0
     if a.cmd == "db":
         for row in sb.db(a.sql):

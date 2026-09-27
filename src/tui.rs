@@ -119,6 +119,34 @@ where
                 app.apply_summary(done).await;
             }
 
+            Some(sent) = app.send_rx.recv() => {
+                app.apply_send_result(sent).await;
+            }
+
+            Some(done) = app.delete_rx.recv() => {
+                app.apply_delete_result(done);
+            }
+
+            Some(done) = app.archive_rx.recv() => {
+                app.apply_archive_result(done);
+            }
+
+            Some(done) = app.attachment_rx.recv() => {
+                app.apply_attachment_save(done);
+            }
+
+            Some(done) = app.folder_list_rx.recv() => {
+                app.apply_folder_list(done);
+            }
+
+            Some(done) = app.folder_sync_rx.recv() => {
+                app.apply_folder_sync(done).await;
+            }
+
+            Some(done) = app.triage_rx.recv() => {
+                app.apply_triage(done);
+            }
+
             _ = mail_tick.tick(), if app.view_mode == ViewMode::Email && !app.email_detail_open => {
                 let _ = app.refresh_emails().await;
             }

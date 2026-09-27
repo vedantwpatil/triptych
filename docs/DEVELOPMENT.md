@@ -21,6 +21,373 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-27 (unified inbox AI triage / Focused Inbox split, Slice 17): every synced email now
+  gets a one-time binary classification, Focused or Other, via the same local Ollama model already
+  used for parsing and summaries — Outlook's Focused/Other split, no new dependency.
+  `email_messages.triage_focused` (idempotent `ALTER TABLE`, `src/migrations.rs`) is `NULL` until
+  classified. `OllamaClient::triage`/`build_triage_prompt` (`src/nlp/ollama_client.rs`) mirror
+  `summarize`'s shape (ignores the sticky `ollama_available` flag), fencing the subject and a
+  400-char-capped snippet as untrusted data, same convention as the summary prompt.
+  `App::run_email_triage` (`src/app/mail.rs`) runs a background pass over
+  `email::store::pending_triage` (rows with `triage_focused IS NULL`, capped at
+  `TRIAGE_BATCH_LIMIT` = 20/pass) after every mail/folder sync, guarded by a `triage_running` flag
+  so passes never overlap; results land over a new `triage_rx` channel, applied in place
+  (`apply_triage`, wired into `run_app`'s `tokio::select!` in `src/tui.rs`) without a full
+  `refresh_emails` reload. `I` in the email list cycles `App.focus_filter` through `None` (merged)
+  -> `Some(true)` (Focused only) -> `Some(false)` (Other only) -> `None`
+  (`App::cycle_focus_filter`); `refresh_emails`'s `.retain()` chain gained a `focus_filter` step
+  right after `folder_filter` — a not-yet-classified message matches neither `Some` state, so it
+  drops from both filtered views until triage catches up. UI: `· focus: Focused`/`Other` in the
+  title, `[other]` row tag (Focused stays untagged, same as the folder tag's "don't clutter the
+  common case" convention).
+  New `tests/it/nlp_llm.rs` case asserts the triage prompt fences subject/snippet as untrusted data
+  (181 in-process tests, was 180); new scenarios `email_focus_filter` (drives `I` end-to-end
+  against seeded rows) and `email_triage_after_sync` (real fake-IMAP sync + fake-Ollama
+  classification, asserting the DB is actually populated by the background pass) (158 TUI
+  scenarios, was 156). `tests/tui/fakeollama.py` gained a `"triage"` prompt kind, answering
+  `{"focused": false}` when the fenced `<email>` body contains a bulk-mail keyword ("newsletter"/
+  "receipt"/"notification"/"unsubscribe"), `{"focused": true}` otherwise — matched against only the
+  fenced section, since the prompt's own instructions name those same keywords (and the literal
+  substring `<email>`, in "the `<email>` tags") as examples before the real fence appears, so the
+  regex requires the newline that only follows the genuine opening tag (`r"<email>\n(.*)</email>"`)
+  to avoid the instructions text itself being swallowed into the classified haystack — caught via
+  `email_triage_after_sync` initially failing with every message misclassified `Other`, root-caused
+  with a standalone regex repro before fixing. Full gate green: `cargo build/clippy` clean, `cargo
+  test` 181/181, TUI suite 158/158. See [`roadmap-email.md`](./roadmap-email.md)'s Slice 17,
+  `src/app/CLAUDE.md`'s `mail.rs` row, `src/nlp/CLAUDE.md`'s `ollama_client.rs`/`parser.rs` rows,
+  `src/tui/CLAUDE.md`'s key-binding table, `docs/TUI_FAKES.md`.
+- 2026-09-27 (folder discovery via IMAP LIST, Slice 16): Slice 13's folder browsing only ever
+  reached the two folders `EmailConfig` names (`imap_folder`, `archive_folder`) — a real mailbox's
+  "Sent", "Drafts", "Junk" or any custom folder was invisible no matter how much mail was in it.
+  New `MailSource::list_folders` (`src/email/client.rs`) sends RFC 3501 `LIST "" *` on a one-shot
+  connection (same shape as every other `MailSource` method) and drops any name flagged
+  `\Noselect` (a hierarchy-only node) — confirmed against the vendored `async-imap`/`imap-proto`
+  source that `\Noselect` is the server's literal wire token before writing the filter. New
+  `sync::sync_one_folder(pool, config, folder)` reuses the same fetch/parse/store/cursor pipeline
+  as `sync_account`'s per-folder pass, just for a folder neither `imap_folder` nor `archive_folder`
+  names. `App::open_folder_browser` (`B` in the email list) spawns a background LIST pass across
+  every configured account into a new popup (`folder_browser_open`, `discovered_folders`,
+  `render_folder_browser_popup`); `j`/`k`/Enter/Esc navigate, pick, sync (via
+  `App::browse_to_selected_folder`, spawned) and set the folder filter, or close without picking.
+  New scenario `imap_tui_folder_browse` (156 TUI scenarios, was 155) seeds an empty "Sent" folder
+  and a `\Noselect`-flagged "Hidden" one via a new `Mailbox.add_folder(name, noselect=False)` on
+  `tests/tui/fakeimap.py` (which also gained a real `LIST` dispatch arm — inserted before the
+  `not self.selected` gate, since real LIST needs no prior SELECT, unlike every other command that
+  fake server had implemented so far), and asserts Sent and INBOX both appear, Hidden does not, and
+  picking Sent both syncs it and narrows the view. No new Rust unit tests — `list_folders` only
+  ever talks to a real IMAP server, exercised at the TUI-scenario level like `sync_account` and
+  `idle_wait` before it. Full gate green throughout (`cargo build/clippy/test` unchanged at 180
+  tests; TUI suite 156/156). See [`roadmap-email.md`](./roadmap-email.md)'s Slice 16,
+  `src/email/CLAUDE.md`'s `client.rs`/`sync.rs` rows, `src/app/CLAUDE.md`'s `mail.rs` row,
+  `src/tui/CLAUDE.md`'s `keys.rs`/`ui.rs` rows, `tests/tui/CLAUDE.md`'s `fakeimap.py` row.
+- 2026-09-27 (IMAP IDLE / push-based mail sync, Slice 15): replaced `src/sync/mail.rs`'s shared
+  fixed-60s-interval poll loop with RFC 2177 `IDLE` per account — `mail_sync_worker` now spawns one
+  concurrent `account_sync_loop` per configured account (was one sequential loop for all accounts;
+  a single blocked IDLE call now occupies its own connection for up to `IDLE_TIMEOUT`, 300s, so
+  accounts can no longer share a loop without one delaying every other account's sync). New
+  `MailSource::idle_wait(folder, timeout) -> Result<IdleOutcome>` (`src/email/client.rs`, `IdleOutcome`
+  = `NewData`/`Timeout`) opens IDLE on a fresh connection, same one-shot-per-call shape as every
+  other `MailSource` method; either outcome (or an `idle_wait` error) triggers an ordinary
+  `sync_account` pass, since IDLE only proves *something* changed, never what.
+  Caught a real regression before shipping, via the TUI scenario suite (not `cargo test`, which
+  stayed green throughout): an open IDLE connection on `imap_folder` wakes the instant an archive
+  action removes a message from that folder — archiving *is* exactly the kind of INBOX change IDLE
+  watches for. Since `sync_account` had always swept `archive_folder` too (Slice 13), that wake's
+  resulting sync pass rediscovered the just-archived message as new-to-that-folder and silently
+  reinserted the row `archive_selected_email` had just deleted — `imap_tui_archive`,
+  `imap_tui_archive_popup`, `imap_tui_archive_no_move`, and `imap_tui_folder_filter` all failed with
+  a leftover `email_messages` row. Root-caused by reading the fake IMAP server's `commands.log` from
+  a captured failing run (confirmed the background loop's post-wake sync visiting `Archive` and
+  re-fetching the moved UID). Fixed by giving `sync_account` an `include_archive: bool` parameter:
+  `false` for the background worker (the only *ambient* caller — an IDLE wake or the backstop
+  timeout is never something the user asked for), `true` for every *explicit* caller (`s`, view
+  entry, `triptych email sync`) — so Slice 13's folder-browsing-a-just-archived-message-back-in stays
+  a deliberate act, not an unavoidable side effect of push-based sync. (An earlier fix attempt made
+  `archive_selected_email` advance the archive folder's own sync cursor at archive time instead —
+  correct for stopping ambient resurrection, but it also permanently blocked the *legitimate*
+  explicit resync `imap_tui_folder_filter` depends on, since cursor state is shared between ambient
+  and explicit callers with no way to tell them apart after the fact; reverted in favor of the
+  `include_archive` split, which distinguishes them at the call site instead.)
+  New scenario `imap_idle_push` (155 TUI scenarios, was 154) drives mail arriving while the TUI sits
+  untouched on the To-Do view and asserts it's picked up via a real blocked IDLE connection (checks
+  `commands.log` for `IDLE` then `DONE`), not a poll tick. `tests/tui/fakeimap.py` gained IDLE/DONE
+  protocol support (a side thread polls the mailbox file and pushes one unsolicited `* n EXISTS` on a
+  count change, while the main thread blocks on a plain `readline()` for `DONE` — a timed socket read
+  doesn't mix cleanly with repeated timeout-then-retry on a buffered socket file object in CPython,
+  worked around by never setting a read timeout at all). No new Rust unit tests — `idle_wait` is
+  exercised only at the TUI-scenario level, same as the rest of the background sync workers. See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 15, `src/email/CLAUDE.md`'s `client.rs`/`sync.rs`
+  rows, `src/sync/CLAUDE.md`'s `mail.rs` row and Pattern section, `tests/tui/CLAUDE.md`'s
+  `fakeimap.py` row.
+- 2026-09-27 (smart NLP extraction from email body, Slice 14): converting an email to a task (`c`
+  in the email list) used to parse the subject alone; `App::convert_selected_email_to_task`
+  (`src/app/mail.rs`) now folds `email.snippet` (the 200-char body preview, already loaded on every
+  list row, no extra DB fetch) in alongside the subject whenever it's non-empty, so a due date or
+  `!!`-style priority marker sitting only in the body reaches the same regex/LLM pipeline that
+  already understands "by tomorrow". Per `src/nlp/CLAUDE.md`, unresolved input becomes the task's
+  title verbatim, so blindly parsing subject+body risked garbled titles on any email with no
+  recognizable phrase. Fixed with a new `title_override: Option<String>` on `App::submit_task`
+  (threaded through `TaskParse`/`apply_task_parse`/`insert_parsed_task`, applied before
+  `classify_task` so category classification also sees the real title): when set, it replaces
+  whatever title the parse produced, right before insert. `convert_selected_email_to_task` passes
+  the bare subject as the override only when it actually folded a snippet in; an email with no
+  snippet skips the override entirely and keeps the parser's own cleaned-up title exactly as
+  before this slice (caught in self-review: an unconditional override would have regressed the
+  existing `email_convert_task` scenario, whose seeded emails always carry a non-empty default
+  snippet, by putting the raw, unstripped subject into every converted task's title instead of the
+  parser's cleaned version). `submit_task`'s other two call sites (`src/tui/keys.rs`'s general
+  non-email background add, an existing `tests/it/app.rs` test) pass `None`, unchanged. New
+  `tests/it/app.rs` case
+  `converting_an_email_extracts_a_deadline_from_the_body_but_keeps_the_subject_as_title` (a subject
+  with no date phrase, a snippet that has one) (180 in-process tests, was 179); new scenario
+  `email_convert_body_due` covers the same end-to-end (154 TUI scenarios, was 153). See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 14, `src/app/CLAUDE.md`'s `tasks.rs`/`mail.rs`
+  rows.
+- 2026-09-27 (folder browsing, Slice 13): mail archived out of INBOX (Slice 6) no longer vanishes
+  from Triptych. `sync_account` (`src/email/sync.rs`) now runs a second pass over
+  `config.archive_folder` after `imap_folder`, each with its own `email_sync_state` cursor (already
+  keyed `(account, folder)`, no migration needed) — the archive pass's error is caught and
+  `tracing::warn!`ed rather than propagated, so an account whose server has no such folder (or
+  nothing archived into it yet) still syncs INBOX exactly as before. `MailSource`'s four methods
+  (`fetch_new`/`delete`/`archive`/`fetch_attachments`) all take an explicit `folder: &str` now
+  instead of assuming `config.imap_folder`, since a loaded message's actual folder decides which
+  mailbox gets `SELECT`ed before acting on its UID — also a latent correctness fix, since any
+  non-INBOX message's delete/archive/attachment-fetch would previously have silently targeted the
+  wrong mailbox once such messages could be loaded at all. `App.folder_filter` +
+  `App::cycle_folder_filter` (`F` in the email list) mirror Slice 11's account filter exactly, over
+  new `email::store::distinct_folders`; `refresh_emails` retains on it right after the account
+  filter, before snooze visibility and the sort. The list tags any row whose folder isn't `"INBOX"`
+  with `[folder]`, and the title shows `· folder: {name}` while a filter is active. New
+  `tests/it/app.rs` cases cover the folder retain and the cycle-through-and-back-to-merged round
+  trip (179 in-process tests, was 177); new scenario `imap_tui_folder_filter` archives a message,
+  resyncs it back in from a real second `SELECT`ed mailbox, and drives `F` end-to-end (153 TUI
+  scenarios, was 152) — needed `tests/tui/fakeimap.py` to grow genuine (if minimal) multi-mailbox
+  `SELECT` support: a non-INBOX name now succeeds once a prior `MOVE`/`COPY` has tagged something
+  for it in `mailbox.json["archived"]`, and still fails `NO [NONEXISTENT]` otherwise, so every
+  account that never archives anything keeps its old single-cursor behavior (confirmed by rerunning
+  `imap_first_sync_cap`/`imap_incremental`/`imap_uidvalidity_reset`, which assert exactly one
+  `email_sync_state` row, and the 3 pre-existing archive scenarios). See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 13, `src/app/CLAUDE.md`'s `mail.rs` row,
+  `src/email/CLAUDE.md`'s `client.rs`/`sync.rs`/`store.rs` rows, `src/tui/CLAUDE.md`'s key-binding
+  table, `docs/TUI_FAKES.md`.
+- 2026-09-27 (snooze, Slice 12): `z` in the email list opens a spec prompt (new
+  `InputMode::EmailSnooze`, `render_snooze_box`); `10m`/`2h`/`3d` snooze relative to now,
+  `tomorrow`/`nextweek` land at 8am local (DST-safe via `resolve_local_datetime`) — parsed by the
+  pure `App::parse_snooze_spec(spec, now) -> Option<DateTime<Utc>>`. Enter (`App::commit_snooze`)
+  writes the result to a new `email_messages.snoozed_until` column (idempotent migration in
+  `src/migrations.rs`, `store::set_snooze`) and refreshes; an unparseable spec reports a status
+  message and changes nothing. `refresh_emails` hides a message with a future `snoozed_until` from
+  the normal list — same filter-at-source shape as Slice 11's account filter, applied right after
+  it and before the priority/date sort — and shows only those when `Z`
+  (`App::toggle_show_snoozed`) flips `App.show_snoozed`. `x` clears a snooze early
+  (`App::unsnooze_selected_email` / `store::clear_snooze`). A lapsed snooze needs no separate
+  clear: once `snoozed_until` is in the past, the same filter treats it as not-snoozed, so the
+  message just reappears next refresh — nothing writes `NULL` back on its own. The list title shows
+  `· snoozed view` while active, and a currently-snoozed row is tagged `[snoozed until Sat 08:00]`.
+  Folder browsing beyond the one-way archive destination was considered for this slice and deferred
+  instead: `EmailConfig` has one fixed `imap_folder` per account and every `ImapMailSource::select()`
+  call uses it directly, so a folder switcher is a larger, separate unit of work than snooze turned
+  out to be — done above, Slice 13. New `tests/it/app.rs` cases cover `parse_snooze_spec` (minutes/hours/days, the
+  `tomorrow`/`nextweek` keywords, rejecting zero/negative/garbage specs) and the
+  snooze/unsnooze/toggle round trip through `refresh_emails` (177 in-process tests, was 172); new
+  scenario `email_snooze_hide_show` drives `z`/`Z`/`x` end-to-end (152 TUI scenarios, was 151). See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 12, `src/app/CLAUDE.md`'s `mail.rs`/`model.rs`
+  rows, `src/email/CLAUDE.md`'s `store.rs` row, `src/tui/CLAUDE.md`'s key-binding table.
+- 2026-09-27 (per-account filter, Slice 11): `A` in the email list cycles `App.account_filter`
+  through `None` (merged, the default) and every account with >= 1 stored message, alphabetical
+  (new `email::store::distinct_accounts`), then back. `App::cycle_account_filter` picks the next
+  label and calls `refresh_emails`, which retains only that account's rows on `App.emails` itself
+  right after the `get_recent` load and before the priority/date sort — filter-at-source, the same
+  pattern `email_sort` already uses to reorder `App.emails` in place, so every action indexing into
+  `App.emails`/`selected_email` (open, delete, archive, star, convert-to-task, search) stays
+  correct with no parallel filtered view to keep in sync. The list title now shows
+  `sorted by {sort} · account: {label}` while a filter is active. New `tests/it/app.rs` cases cover
+  the filter-retain behavior and a full cycle through two accounts and back to merged (172
+  in-process tests, was 170); new scenario `email_account_filter` drives the `A` key across three
+  seeded emails spanning two accounts (151 TUI scenarios, was 150). See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 11, `src/app/CLAUDE.md`'s `mail.rs` row,
+  `src/email/CLAUDE.md`'s `store.rs` row, `src/tui/CLAUDE.md`'s key-binding table.
+- 2026-09-27 (KI-25, TUI cursor-label regex): the full suite failed 3 calendar scenarios
+  (`cal_cursor_moves`, `vim_cal_motions`, `vim_cal_input_literal`) with e.g. `got 'Mon ', want
+  'Mon 07am'` — but only when run at the wall-clock hour matching the row under test (confirmed via
+  `date`: `Sun Sep 27 07:16:54 EDT 2026`, hour 07, the exact row all three scenarios target).
+  Root-caused with a standalone debug script driving `tuidrive.Sandbox`/`Term` directly and dumping
+  the raw screen buffer: `src/tui/ui/calendar.rs` prefixes the current-hour row with `▸` (the "now"
+  accent, intentional, added 2026-09-17), and when that row also falls under an open popup's `│`
+  border, `tuidrive.py`'s `Term.cursor()` time-label regex (`r"\s*.?(\d\d[ap]m)"`) — which only
+  tolerated one leading non-digit decorator character — failed to match with two (`│` then `▸`)
+  stacked ahead of the digits, leaving the parsed label empty. Not a regression from Slice 10 (none
+  of that work touches calendar rendering or motion routing) and not flaky — reproduced
+  deterministically on every rerun at this hour. Fixed by widening the regex to `r"\s*.{0,2}?
+  (\d\d[ap]m)"` (lazy, tolerates 0-2 decorator characters before the digits); all 3 scenarios and
+  the full 150-scenario suite pass regardless of wall-clock time now.
+- 2026-09-27 (drafts, Slice 10): `Ctrl-D` in the compose/reply/forward popup saves the current form
+  to a new `email_drafts` table (`CREATE TABLE IF NOT EXISTS`, `src/migrations.rs`) instead of
+  sending, and closes the popup; `D` in the email list opens a drafts popup
+  (`render_drafts_popup`) listing every saved draft, most-recently-updated first
+  (`src/email/drafts.rs::list_drafts`) — `j`/`k`/arrows move, `Enter` resumes the selected draft back
+  into compose (`App::resume_selected_draft`), `d` deletes it (`App::delete_selected_draft`), `Esc`
+  closes, following the same "popup owns simple list navigation, motions disabled" pattern as
+  `CalendarInputMode::TaskPicker`. `ComposeState` gained `draft_id: Option<i64>`: resuming a draft
+  sets it so a later save overwrites the same row (`save_draft`'s upsert) instead of inserting a
+  duplicate, and `SendResult` now carries `draft_id` through the existing send-spawn-and-report
+  channel so `apply_send_result` can delete the stale draft row after a successful send — a draft
+  never survives past becoming a real sent message. New `tests/it/app.rs` cases: save-inserts,
+  save-overwrites-the-resumed-row, list-loads-most-recent-first, resume-reopens-and-closes-the-list,
+  delete-removes-from-db-and-the-open-list (170 in-process tests, was 165). New scenario
+  `email_drafts_lifecycle` drives save -> list -> resume -> send -> auto-delete -> delete-from-popup
+  end-to-end against the fake SMTP server (150 TUI scenarios, was 149; see KI-25 above for an
+  unrelated harness bug this same verification run surfaced and fixed). See
+  [`roadmap-email.md`](./roadmap-email.md)'s Slice 10, `src/app/CLAUDE.md`'s `mail.rs` row,
+  `src/email/CLAUDE.md`'s `drafts.rs` row, `src/tui/CLAUDE.md`'s key-binding table.
+- 2026-09-27 (full-text search over email body, Slice 9): `/` in the Email view previously only
+  matched the in-memory list rows' subject and sender, since `store::get_recent` deliberately never
+  loads `body_text` into them. New `email::store::search_body_matches(pool, needle)` runs one
+  `SELECT id FROM email_messages WHERE body_text LIKE ? ESCAPE '\'` (`%`/`_` escaped) and returns
+  the matching ids as a `HashSet`; `App::search_step` unions that against the existing subject/
+  sender check before walking the list with `motion::find_match` — only for the email view, the
+  todo list's search stays purely in-memory. `App::commit_search`/`search_step` are now `async` (the
+  one DB round-trip), so `keys.rs`'s three call sites (search prompt `Enter`, `n`/`N` in the todo
+  and email views) gained an `.await`, as did all eight existing search tests in `tests/it/app.rs`.
+  New `email_search_matches_body_text_via_db_query` test (165 in-process tests, was 164) and new
+  scenario `vim_email_search_body`, which searches a phrase present only in one seeded row's body
+  (149 TUI scenarios, was 148).
+
+- 2026-09-27 (`References`-header threading, Slice 7): `App::thread_count`
+  (`src/app/mail.rs`) now reconstructs real conversations instead of only grouping by subject.
+  New private `MsgIdForest` (a union-find keyed by bare `Message-ID` strings) unions every loaded
+  message's own id with each id in its `References` header (already stored per-message as
+  `references_header` since an earlier slice, unused for grouping until now) — an ancestor never
+  fetched into `App::emails` still links its children into one component, since the forest's
+  nodes are id strings, not indices, so two replies to the same unfetched parent land in one
+  thread even though that parent has no row. Falls back to the existing `normalize_subject`
+  grouping only when the target's own component comes back size 1 (no header info at all, or
+  every referenced id is likewise absent from what's loaded) — this covers the common case of a
+  first-in-thread message or a client that drops the header. `thread_count`'s signature and both
+  UI call sites (list `[N]` badge, detail popup's "N messages in this thread") are unchanged.
+  New `tests/it/email_thread.rs` cases: a header chain wins over an unrelated subject, two
+  siblings link through a shared unfetched ancestor id, and a header pointing at nothing loaded
+  still falls back to subject grouping (158 in-process tests, was 155). No TUI-scenario changes:
+  `fakeimap.py` never sets `references_header` on synced mail, so this is exercised at the unit
+  level only.
+
+- 2026-09-27 (attachments, Slice 8): metadata-only — bytes are never persisted. New
+  `email_attachments` table (`ON DELETE CASCADE`, `src/migrations.rs`), extracted at parse time by
+  `message.rs::parse_raw` via `mail-parser`'s `Message::attachments()` and written in the same
+  transaction as the message (`store::insert_new`, gated on `rows_affected() == 1` before trusting
+  `last_insert_rowid()`). `store::get_recent` gained `EmailMessage.has_attachments` via a cheap
+  indexed `EXISTS(...)` subquery. Saving re-fetches over IMAP on demand rather than reading a local
+  copy: new `MailSource::fetch_attachments(uid)` (one connect, all parts), `App::save_selected_attachments`
+  (`s` in the detail popup, spawned like delete/archive) writes each part under
+  `TRIPTYCH_ATTACHMENT_DIR/<email_id>/` (falls back to `$TMPDIR/triptych-attachments`), sanitizing
+  each `Content-Disposition: filename` first — `app::sanitize_filename` keeps only the final path
+  component, since that header is attacker-controlled wire data and a raw join risks
+  `../../etc/passwd`-style traversal. `App.email_attachments` caches metadata per email id for the
+  detail popup's "Attachments: ..." line and the list's `[attach]` tag, populated on open like
+  `email_summaries`. New `tests/it/email_attachments.rs`: `parse_raw` extraction (filename/
+  content-type/size, `header_only` skip, no-attachment case) and `sanitize_filename` (plain name,
+  traversal stripped to last component, empty/traversal-only rejected) (164 in-process tests, was
+  158). `fakeimap.py`'s `make_message(..., attachment=True)` builds a multipart PDF message; new
+  scenario `imap_tui_attachment_save` drives save-to-disk end-to-end (148 TUI scenarios, was 147).
+- 2026-09-27 (real IMAP archive/folder-move, Slice 6): `a` in the email list or detail popup
+  archives the selected message. `MailSource::archive(uid)` (`src/email/client.rs`, own
+  `ARCHIVE_TIMEOUT` 30s, same budget as delete's) tries RFC 6851 `UID MOVE` to
+  `EmailConfig::archive_folder` (new field, `IMAP_ARCHIVE_FOLDER[_<LABEL>]`, defaults
+  `"Archive"`) first. Read `async-imap-0.11.3`'s own source before writing this (per this
+  project's "don't guess a crate signature" rule): `uid_mv`/`uid_copy` both call
+  `run_command_and_check_ok` internally, which loops reading the tagged completion itself, so
+  unlike delete's `uid_store`/`expunge` they need no manual stream-draining. A server that
+  answers `Bad`/`No` (no `MOVE` capability) falls back to the classical `UID COPY` + `UID STORE
+  +FLAGS.SILENT (\Deleted)` + `EXPUNGE` sequence RFC 6851 defines MOVE as equivalent to — that
+  fallback's `uid_store`/`expunge` calls do still return streams and are drained exactly as
+  delete's are (`try_next` loop, then `try_collect`). `App::archive_selected_email` spawns the
+  call and reports over a new `archive_rx` channel (same spawn-and-report pattern as
+  delete/send/sync); the local row is only dropped (`store::delete_email`, reused as-is — an
+  archived row and a deleted row leave the same local state) after the server confirms.
+  `apply_archive_result` mirrors `apply_delete_result`'s cleanup exactly: closes the detail
+  popup on success, leaves it open with "Archive failed: ..." otherwise. Does not auto-create
+  the destination folder — a missing folder surfaces as that same failure message. No
+  confirmation prompt, same reasoning as delete (no confirm-dialog pattern anywhere in this
+  codebase). `tests/tui/fakeimap.py` gained `UID MOVE`/`UID COPY` support plus
+  `Mailbox.disable_move()` (forces a `BAD` response so the fallback path is actually exercised,
+  not just the happy path) — moved/copied messages land in a `mailbox.json["archived"]` list
+  rather than real multi-mailbox SELECT/LIST state, since the real client's MOVE/COPY target
+  never needs to be the currently-selected mailbox. Three new scenarios: `imap_tui_archive`,
+  `imap_tui_archive_popup`, `imap_tui_archive_no_move` (147 scenarios total, was 144). No new
+  Rust-level unit tests, same rationale as Slice 5: the interesting logic (the MOVE-then-
+  fallback branch) has no new pure/testable function, so it's covered end-to-end through the
+  fake IMAP server instead (155 in-process tests, unchanged).
+- 2026-09-27 (real IMAP delete, Slice 5): `d` in the email list or detail popup permanently
+  deletes the selected message. `MailSource::delete(uid)` (`src/email/client.rs`, own
+  `DELETE_TIMEOUT` 30s) does `UID STORE +FLAGS.SILENT (\Deleted)` then `EXPUNGE` against that
+  message's own account (`EmailConfig::for_account`, new); both returned `async-imap` streams are
+  fully drained (`try_collect`, not a bare unpolled drop or `.await` alone) rather than dropped,
+  since an unpolled stream leaves that command's responses unread on the wire and desyncs the next
+  command's parsing (the `expunge()` stream is not `Unpin`, so `try_collect` — takes `self`, no
+  `Unpin` bound — replaces the `try_next` loop used elsewhere in this file). `App::delete_selected_email`
+  spawns the call and reports over a new `delete_rx` channel (same
+  spawn-and-report pattern as send/sync); the local row (`store::delete_email`) is only dropped on
+  confirmed server success, so a network error never silently loses mail the server still has.
+  `apply_delete_result` closes the detail popup on success, leaves it open with "Delete failed:
+  ..." otherwise. No confirmation prompt: this codebase has no confirm-dialog pattern anywhere
+  (todo delete is immediate too), so email delete follows that convention. `tests/tui/fakeimap.py`
+  gained `UID STORE`/`EXPUNGE` support (RFC-correct sequence-number shifting on expunge); two new
+  scenarios, `imap_tui_delete`/`imap_tui_delete_popup` (144 scenarios total, was 142). No new
+  Rust-level unit tests: the feature has no pure logic beyond a `u32::try_from` guard, and is only
+  reachable end-to-end through a real or fake IMAP round-trip, so it is covered at the TUI-scenario
+  layer instead (155 in-process tests, unchanged).
+- 2026-09-27 (email starring/mark-unread, Slice 3): `email_messages.is_starred` (idempotent
+  `ALTER TABLE`, `src/migrations.rs`), `store::set_starred`/`mark_unread` mirroring `mark_read`'s
+  shape. `f` toggles the selected message's star (`App::toggle_selected_star`); `u` marks it unread
+  again (`App::mark_selected_email_unread`) — useful since opening the detail popup auto-marks
+  read. Both bound in the email list and the detail popup (`handle_email_detail_key` in
+  `src/tui/keys.rs` is now `async` to await the DB write), both re-run `refresh_emails`. Rendered as
+  a yellow `●` before the subject in the list and a "Starred" line in the detail popup — display
+  only, does not affect `urgency.rs`'s sort score. Tests: `tests/it/app.rs` gained 2 (star toggle,
+  mark-unread); the 4 pre-existing sites constructing `EmailMessage` by struct literal
+  (`tests/it/email_priority.rs`, `tests/it/email_compose.rs`) updated for the new field.
+- 2026-09-27 (email thread grouping, Slice 4): `App::normalize_subject`/`thread_count`
+  (`src/app/mail.rs`, pure) group the already-loaded merged inbox by subject with repeated
+  `Re:`/`Fwd:`/`Fw:` prefixes stripped and case ignored; a blank normalized subject never groups
+  (returns a thread size of 1, so subjectless mail is never bucketed together). Rendered as a
+  `[N]` badge before the subject in the list and an "N messages in this thread" line in the detail
+  popup, only when `N > 1`. Local, subject-based stand-in — not a `References`/`In-Reply-To`
+  conversation reconstruction, which the already-stored `references_header` column would need a
+  cross-message header query to build; still deferred (see
+  [`roadmap-email.md`](./roadmap-email.md)). New `tests/it/email_thread.rs` (4 tests). Considered
+  real IMAP delete/archive as this increment's slice instead; deferred it — `fakeimap.py` has no
+  `STORE`/`EXPUNGE` support yet, so it is untestable end-to-end without extending the fake server
+  first. Tests: 155 in-process (was 149).
+- 2026-09-27 (email send/reply/forward, Slice 2): hand-rolled RFC 5321 SMTP client
+  (`src/email/smtp.rs`), sharing TLS setup with the IMAP client via new `src/email/tls.rs`.
+  `SmtpConfig` (`src/email/config.rs`) mirrors `EmailConfig`'s multi-account env scheme, keyed by
+  the same account label, so `.env`'s previously-dead `SMTP_*` vars are now read. New
+  `InputMode::EmailCompose` and `App::email_compose: Option<ComposeState>` (`src/app/model.rs`)
+  back a compose/reply/forward popup (`src/tui/ui/email.rs`): `c` in the email list starts a
+  blank compose, `R`/`A`/`F` in the detail popup start reply/reply-all/forward (subject prefixed
+  once, quoted original appended below the editable body, RFC 5322 `References` chained from the
+  original's own header plus its `Message-ID`), Tab/BackTab cycle To/Cc/Subject/Body, Ctrl-S sends
+  in the background (`App::send_compose`, reported over a new `send_rx` channel, same
+  spawn-and-report pattern as mail sync and NLP parses), Esc cancels. Reply-all's Cc merges the
+  original's To+Cc, dropping the direct recipient and the sending account's own address. Pure
+  logic (`reply_subject`/`forward_subject`/`chain_references`/`quote_original`/
+  `merge_reply_all_cc`) is unit-tested directly (`tests/it/email_compose.rs`, 8 tests); the
+  compose-editing mechanics (push/backspace/field-cycling/newline) are tested through a real `App`
+  (`tests/it/app.rs`, 4 tests) — deliberately not testing `SmtpConfig::for_account`'s env-gated
+  path in-process, matching this project's existing convention of never mutating global env vars
+  inside the shared test binary (see `tests/it/email_config.rs`). Tests: 149 in-process (was 137).
+- 2026-09-27 (email send, TUI coverage): `tests/tui/fakesmtp.py`, a threaded STARTTLS SMTP server
+  reusing `fakeimap.py`'s throwaway CA, speaking exactly what `src/email/smtp.rs` sends (EHLO,
+  STARTTLS, second EHLO, `AUTH LOGIN`, `MAIL FROM`/`RCPT TO`/`DATA` with dot-stuffing, QUIT); a
+  mode file rejects `AUTH LOGIN` or every `RCPT TO` to exercise "Send failed: ...". Wired into
+  `tuidrive.py` (`start --smtp`, `smtp mode <mode>`, `smtp log`, `Sandbox.smtp()`/`smtp_log()`;
+  `Sandbox.env()` merges the IMAP and SMTP CAs into one `SSL_CERT_FILE` when both fakes run in one
+  sandbox). Six new `tui_suite.py` scenarios: `email_compose_send`, `email_compose_cancel`,
+  `email_reply_send` (asserts `In-Reply-To`/`References` against the recorded message),
+  `email_reply_all_cc` (Cc merge), `email_forward_send` (no threading headers), `email_send_auth_fail`
+  (status text and that the draft survives). Suite: 142 (was 136), 0 XFAIL, 0 regressions. No bug found
+  in `src/email/smtp.rs`; every protocol step and UI behaviour matched on the first automated run once
+  the scenarios were written. Docs: [`TUI_FAKES.md`](./TUI_FAKES.md) gained a "Fake SMTP" section.
 - 2026-09-23 (email features, vim motions): items 2-5 of [`future-features.md`](./future-features.md).
   Email: `s` spawns one sync and reports "N new" / "All emails gathered"; the three copies of the fetch
   pipeline are now `email::sync::sync_account`; the list sorts by a display-time priority score
@@ -424,14 +791,20 @@ since epoch 0 never occurs on real IMAP servers.
 
 None.
 
-Every finding (KI-1..KI-24) is fixed and covered by a passing test.
+Every finding (KI-1..KI-25) is fixed and covered by a passing test.
 
 ### Resolved
 
 Found in the 2026-09-19 audit, the todo-list test and the LLM baseline (KI-1..21), then in the 2026-09-23
-calendar and IMAP runs (KI-22..24); fixed the same day, each verified with its `tests/tui/tui_suite.py`
-scenario (named at the end of each entry).
+calendar and IMAP runs (KI-22..24), then in the 2026-09-27 Slice 10 verification run (KI-25); fixed the
+same day, each verified with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
 
+- **KI-25** (2026-09-27) `tests/tui/tuidrive.py`'s `Term.cursor()` misread the calendar time label
+  whenever the current-hour `▸` accent (`src/tui/ui/calendar.rs`) landed on a row also covered by an
+  open popup's `│` border — the regex only tolerated one leading decorator character before the
+  digits, not two stacked. Test-harness bug only, wall-clock-time-dependent, not a product bug; full
+  details and fix in the Changelog above. `cal_cursor_moves`, `vim_cal_motions`,
+  `vim_cal_input_literal`.
 - **KI-24** (2026-09-23) New mail never appeared while the Email view stayed open: `toggle_to_email`
   spawns the sync and reloads the list at once, and nothing reloaded it when the sync (or the 60s poller)
   finished, so it showed only after leaving and re-entering. `run_app` now has a 2s tick that calls

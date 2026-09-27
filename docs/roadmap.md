@@ -40,13 +40,15 @@ Full detail and phase breakdown in [`docs/roadmap-email.md`](./roadmap-email.md)
   across all configured accounts, no account switcher. Revisit the `accounts` table if
   per-account state needs to live in the DB (e.g. sync cursors, enable/disable toggles from the
   UI).
-- **Slice 5 (planned)**: SMTP send/reply, keyboard-driven triage (archive, snooze), enhanced
-  NLP parsing and auto-scheduling integration for email-derived tasks.
-- **Slice 6 (planned, not started)**: unified inbox with AI-driven importance triage. Rank/
-  surface the most important mail across all accounts using the existing Ollama integration
-  (`src/sync/ollama.rs`, `src/nlp/`) rather than a new LLM dependency. Distinct from Slice 5's
-  keyboard triage (archive/snooze are manual actions; this is automatic ranking). No design
-  work done yet — see `docs/roadmap-email.md`'s "Explicitly deferred" section.
+- **Slice 5 (partially done)**: SMTP send/reply/forward, real delete and archive/folder-move are
+  done (`roadmap-email.md`'s own Slice 2, Slice 5 and Slice 6 — that doc's slice numbers track a
+  separate, finer-grained sequence than this file's); snooze triage, enhanced NLP parsing and
+  auto-scheduling integration for email-derived tasks remain planned.
+- **Slice 6 (done)**: unified inbox with AI-driven triage. Shipped as a binary Focused/Other
+  split (Outlook's Focused Inbox) rather than a ranked score, using the existing Ollama
+  integration (`src/nlp/ollama_client.rs`'s `triage`) — no new LLM dependency. Distinct from
+  Slice 5's keyboard triage (archive/snooze are manual actions; this is automatic classification,
+  unrelated to either). See `docs/roadmap-email.md`'s Slice 17.
 
 Goal: Superhuman-like email productivity in the terminal, integrated with task/calendar
 workflows — not a standalone mail client bolted on.

@@ -1,6 +1,9 @@
-//! `/` search over the todo and email lists, with `n`/`N` to repeat it.
+//! `/` search over the todo list and email (subject, sender, body), with `n`/`N` to repeat it.
+
+use std::collections::HashSet;
 
 use super::{App, InputMode, ViewMode, motion::find_match};
+use crate::email::store::search_body_matches;
 
 impl App {
     /// Starts typing a search; `commit_search` or `cancel_search` ends it.
@@ -15,17 +18,19 @@ impl App {
     }
 
     /// Ends typing and jumps to the first match after the cursor. An empty query repeats the last one.
-    pub fn commit_search(&mut self) {
+    pub async fn commit_search(&mut self) {
         let typed = self.input_buffer.trim().to_string();
         self.cancel_search();
         if !typed.is_empty() {
             self.search_query = typed;
         }
-        self.search_step(true);
+        self.search_step(true).await;
     }
 
     /// Jumps to the next (`forward`) or previous match of the last query in the current list view.
-    pub fn search_step(&mut self, forward: bool) {
+    /// In the email view this also matches `body_text` via a DB query, since the list's in-memory
+    /// rows never carry it (see `email::store::get_recent`).
+    pub async fn search_step(&mut self, forward: bool) {
         if self.search_query.is_empty() {
             self.notify("No previous search");
             return;
@@ -41,6 +46,13 @@ impl App {
             return;
         }
         let todo = self.view_mode == ViewMode::TodoList;
+        let body_hits = if todo {
+            HashSet::new()
+        } else {
+            search_body_matches(&self.db_pool, &self.search_query)
+                .await
+                .unwrap_or_default()
+        };
         let hit = find_match(len, cur, forward, |i| {
             if todo {
                 self.tasks[i].description.to_lowercase().contains(&needle)
@@ -48,6 +60,7 @@ impl App {
                 let e = &self.emails[i];
                 let from = e.from_name.as_deref().unwrap_or(&e.from_addr);
                 format!("{} {from}", e.subject).to_lowercase().contains(&needle)
+                    || body_hits.contains(&e.id)
             }
         });
         let Some((idx, wrapped)) = hit else {

@@ -49,10 +49,21 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
             KeyOutcome::Continue
         }
         InputMode::Search if !ctrl => {
-            handle_search_key(app, key.code);
+            handle_search_key(app, key.code).await;
             KeyOutcome::Continue
         }
-        InputMode::Editing | InputMode::Search => KeyOutcome::Continue,
+        InputMode::EmailSnooze if !ctrl => {
+            handle_email_snooze_key(app, key.code).await;
+            KeyOutcome::Continue
+        }
+        InputMode::EmailRuleInput if !ctrl => {
+            handle_email_rule_input_key(app, key.code).await;
+            KeyOutcome::Continue
+        }
+        InputMode::EmailCompose => handle_email_compose_key(app, key).await,
+        InputMode::Editing | InputMode::Search | InputMode::EmailSnooze | InputMode::EmailRuleInput => {
+            KeyOutcome::Continue
+        }
     }
 }
 
@@ -71,8 +82,12 @@ const fn motion_key(key: KeyEvent) -> MotionKey {
 }
 
 /// Views whose cursor moves with vim motions: both lists, the email popup and the calendar grid (but
-/// not while one of its forms is open).
+/// not while one of its forms is open, and not while the drafts list popup is — that one owns `j`/`k`
+/// directly, same as `CalendarInputMode::TaskPicker`).
 fn motions_active(app: &App) -> bool {
+    if app.drafts_open || app.folder_browser_open || app.rules_open {
+        return false;
+    }
     app.view_mode != ViewMode::Calendar || app.calendar_input_mode == CalendarInputMode::Navigate
 }
 
@@ -152,8 +167,8 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             }
         }
         KeyCode::Char('/') => app.start_search(),
-        KeyCode::Char('n') => app.search_step(true),
-        KeyCode::Char('N') => app.search_step(false),
+        KeyCode::Char('n') => app.search_step(true).await,
+        KeyCode::Char('N') => app.search_step(false).await,
         _ => {}
     }
     KeyOutcome::Continue
@@ -351,8 +366,17 @@ fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
 }
 
 async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    if app.folder_browser_open {
+        return handle_folder_browser_key(app, code);
+    }
+    if app.drafts_open {
+        return handle_drafts_key(app, code).await;
+    }
+    if app.rules_open {
+        return handle_rules_key(app, code).await;
+    }
     if app.email_detail_open {
-        return handle_email_detail_key(app, code);
+        return handle_email_detail_key(app, code).await;
     }
 
     match code {
@@ -363,8 +387,8 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::Tab => app.cycle_view_next().await,
         KeyCode::BackTab => app.cycle_view_prev().await,
         KeyCode::Char('/') => app.start_search(),
-        KeyCode::Char('n') => app.search_step(true),
-        KeyCode::Char('N') => app.search_step(false),
+        KeyCode::Char('n') => app.search_step(true).await,
+        KeyCode::Char('N') => app.search_step(false).await,
         KeyCode::Char('v') => {
             if let Err(e) = app.open_selected_email().await {
                 set_error(app, e);
@@ -384,17 +408,190 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
+        KeyCode::Char('u') => {
+            if let Err(e) = app.mark_selected_email_unread().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('f') => {
+            if let Err(e) = app.toggle_selected_star().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('c') => app.start_compose_new(),
+        KeyCode::Char('d') => app.delete_selected_email(),
+        KeyCode::Char('a') => app.archive_selected_email(),
+        KeyCode::Char('D') => app.open_drafts_list().await,
+        KeyCode::Char('B') => app.open_folder_browser(),
+        KeyCode::Char('R') => app.open_rules_list().await,
+        KeyCode::Char('A') => {
+            if let Err(e) = app.cycle_account_filter().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('F') => {
+            if let Err(e) = app.cycle_folder_filter().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('I') => {
+            if let Err(e) = app.cycle_focus_filter().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('z') => app.start_snooze_prompt(),
+        KeyCode::Char('Z') => {
+            if let Err(e) = app.toggle_show_snoozed().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('x') => {
+            if let Err(e) = app.unsnooze_selected_email().await {
+                set_error(app, e);
+            }
+        }
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while typing a snooze spec (`z` in the email list), e.g. `10m`, `2h`, `3d`, `tomorrow`,
+/// `nextweek`. Enter parses and applies it (`App::commit_snooze`); an invalid spec reports a status
+/// message instead of applying anything. Esc cancels, matching `handle_search_key`.
+async fn handle_email_snooze_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Enter => app.commit_snooze().await,
+        KeyCode::Esc => app.cancel_snooze(),
+        KeyCode::Char(c) => app.input_buffer.push(c),
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        _ => {}
+    }
+}
+
+/// Keys while the drafts list popup (`D` in the email list) is open: `j`/`k`/arrows move the
+/// selection directly (not the vim-motion system — see `motions_active`), `Enter` reopens the
+/// selected draft in the compose form, `d` deletes it, `Esc` closes the popup.
+async fn handle_drafts_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc => app.close_drafts_list(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.selected_draft + 1 < app.drafts.len() {
+                app.selected_draft += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.selected_draft = app.selected_draft.saturating_sub(1),
+        KeyCode::Enter => app.resume_selected_draft(),
+        KeyCode::Char('d') => app.delete_selected_draft().await,
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while the rules popup (`R` in the email list) is open: `j`/`k`/arrows move the selection
+/// directly (not vim motions — see `motions_active`), `n` starts typing a new rule spec
+/// (`InputMode::EmailRuleInput`), `d` deletes the selected rule, `Esc` closes the popup.
+async fn handle_rules_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc => app.close_rules_list(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.selected_rule + 1 < app.rules.len() {
+                app.selected_rule += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.selected_rule = app.selected_rule.saturating_sub(1),
+        KeyCode::Char('n') => app.start_rule_input(),
+        KeyCode::Char('d') => app.delete_selected_rule().await,
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while typing a rule spec (`n` in the rules popup), e.g. `subject newsletter star`. Enter
+/// parses and saves it (`App::commit_rule_input`); an invalid spec reports a status message
+/// instead of adding anything. Esc cancels, matching `handle_email_snooze_key`.
+async fn handle_email_rule_input_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Enter => app.commit_rule_input().await,
+        KeyCode::Esc => app.cancel_rule_input(),
+        KeyCode::Char(c) => app.input_buffer.push(c),
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+        }
+        _ => {}
+    }
+}
+
+/// Keys while the folder-browser popup (`B` in the email list) is open: `j`/`k`/arrows move the
+/// selection directly (not vim motions — see `motions_active`), `Enter` picks the highlighted
+/// server folder and kicks off a one-shot sync of it (`App::browse_to_selected_folder`), `Esc`
+/// closes the popup without picking anything.
+fn handle_folder_browser_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc => app.close_folder_browser(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.selected_discovered_folder + 1 < app.discovered_folders.len() {
+                app.selected_discovered_folder += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.selected_discovered_folder = app.selected_discovered_folder.saturating_sub(1);
+        }
+        KeyCode::Enter => app.browse_to_selected_folder(),
         _ => {}
     }
     KeyOutcome::Continue
 }
 
 /// Keys while the email detail popup (`v`) is open: close it (scrolling is a motion, see
-/// `handle_motion`). Doesn't fall through to the list keys below it, same as how
-/// `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
-const fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
-    if matches!(code, KeyCode::Esc | KeyCode::Char('v')) {
-        app.close_email_detail();
+/// `handle_motion`), start a reply/reply-all/forward from the open message, or save its
+/// attachments to disk (`s`, no-ops if it has none). Doesn't fall through to the list keys below
+/// it, same as how `CalendarInputMode::BlockForm` shadows `Navigate`'s bindings.
+async fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc | KeyCode::Char('v') => app.close_email_detail(),
+        KeyCode::Char('R') => app.start_reply(false),
+        KeyCode::Char('A') => app.start_reply(true),
+        KeyCode::Char('F') => app.start_forward(),
+        KeyCode::Char('f') => {
+            if let Err(e) = app.toggle_selected_star().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('u') => {
+            if let Err(e) = app.mark_selected_email_unread().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('d') => app.delete_selected_email(),
+        KeyCode::Char('a') => app.archive_selected_email(),
+        KeyCode::Char('s') => app.save_selected_attachments(),
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while composing/replying/forwarding an email (`InputMode::EmailCompose`). `Ctrl-S` sends,
+/// `Ctrl-D` saves as a draft and closes the form; every other Ctrl chord is dropped (matching the
+/// top-level rule) so it never types into a field.
+async fn handle_email_compose_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('s') => app.send_compose(),
+            KeyCode::Char('d') => app.save_compose_as_draft().await,
+            _ => {}
+        }
+        return KeyOutcome::Continue;
+    }
+    match key.code {
+        KeyCode::Esc => app.cancel_compose(),
+        KeyCode::Tab => app.compose_next_field(),
+        KeyCode::BackTab => app.compose_prev_field(),
+        KeyCode::Enter => app.compose_newline(),
+        KeyCode::Char(c) => app.compose_push_char(c),
+        KeyCode::Backspace => app.compose_backspace(),
+        _ => {}
     }
     KeyOutcome::Continue
 }
@@ -404,7 +601,7 @@ fn handle_editing_key(app: &mut App, code: KeyCode) {
         KeyCode::Enter => {
             let description = app.input_buffer.trim().to_string();
             if !description.is_empty() {
-                app.submit_task(description, None);
+                app.submit_task(description, None, None);
             }
             app.input_mode = InputMode::Normal;
         }
@@ -421,9 +618,9 @@ fn handle_editing_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_search_key(app: &mut App, code: KeyCode) {
+async fn handle_search_key(app: &mut App, code: KeyCode) {
     match code {
-        KeyCode::Enter => app.commit_search(),
+        KeyCode::Enter => app.commit_search().await,
         KeyCode::Esc => app.cancel_search(),
         KeyCode::Char(c) => app.input_buffer.push(c),
         // Backspace on an empty prompt leaves it, as in vim.

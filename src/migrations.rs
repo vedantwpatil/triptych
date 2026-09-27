@@ -269,6 +269,133 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         tracing::info!("  ✓ Added last_uid column to email_sync_state");
     }
 
+    // Reply/reply-all/forward prefill and thread-chaining, extracted at parse time from the
+    // original message's own To/Cc/References headers (see `email/message.rs::parse_raw`).
+    if !column_exists(pool, "email_messages", "to_addrs").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN to_addrs TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added to_addrs column to email_messages");
+    }
+
+    if !column_exists(pool, "email_messages", "cc_addrs").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN cc_addrs TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added cc_addrs column to email_messages");
+    }
+
+    if !column_exists(pool, "email_messages", "references_header").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN references_header TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added references_header column to email_messages");
+    }
+
+    if !column_exists(pool, "email_messages", "is_starred").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added is_starred column to email_messages");
+    }
+
+    // `NULL` (never snoozed, or a snooze that already lapsed and was cleared) or a future UTC
+    // instant (RFC3339 text, same representation sqlx already uses for `date_utc`) hiding the
+    // message from the normal list until then. See `App::snooze_selected_email`.
+    if !column_exists(pool, "email_messages", "snoozed_until").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN snoozed_until TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added snoozed_until column to email_messages");
+    }
+
+    // `NULL` (not yet classified, or classification failed/unavailable), 1 (Focused: personal/work
+    // mail worth attention) or 0 (Other: bulk/automated) — Outlook's Focused Inbox split, computed
+    // once per message by `OllamaClient::triage` after sync. See `App::run_email_triage`.
+    if !column_exists(pool, "email_messages", "triage_focused").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN triage_focused INTEGER")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added triage_focused column to email_messages");
+    }
+
+    // Attachment metadata extracted at parse time (see `email/message.rs::parse_raw`); bytes are
+    // never persisted, only fetched on demand via `MailSource::fetch_attachments`. `ON DELETE
+    // CASCADE` is enforced: sqlx-sqlite's `SqliteConnectOptions` default is `PRAGMA foreign_keys =
+    // ON` (this project never overrides it — `App::build`/`import_schedule.rs` both call
+    // `SqlitePool::connect` with no options), so a row here is cleaned up automatically whenever
+    // its email is deleted, same as `task_block_allocations` -> `tasks` in the calendar migration.
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS email_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email_id INTEGER NOT NULL REFERENCES email_messages(id) ON DELETE CASCADE,
+            part_index INTEGER NOT NULL,
+            filename TEXT,
+            content_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL
+        )
+    ",
+    )
+    .execute(pool)
+    .await?;
+    tracing::debug!("  ✓ Email attachments table ready");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_email_attachments_email ON email_attachments(email_id)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Saved-but-unsent compose state. `to_addrs`/`cc_addrs` are comma-joined strings (matching how
+    // `ComposeState` already stores them, not a normalized address table) since drafts are never
+    // queried by recipient, only listed and resumed by id.
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS email_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account TEXT NOT NULL,
+            to_addrs TEXT NOT NULL DEFAULT '',
+            cc_addrs TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+    ",
+    )
+    .execute(pool)
+    .await?;
+    tracing::debug!("  ✓ Email drafts table ready");
+
+    // User-defined auto-actions (Slice 18): `match_field` is `"subject"` or `"from_addr"`,
+    // `pattern` a substring tested case-insensitively (see `app::mail::match_rule`), `action`
+    // `"star"` or `"read"`. No archive/delete action yet — those need an IMAP round-trip per
+    // match, deferred past v1 (see `docs/roadmap-email.md`'s Slice 18).
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS email_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_field TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            action TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ",
+    )
+    .execute(pool)
+    .await?;
+    tracing::debug!("  ✓ Email rules table ready");
+
+    // 0 (not yet checked against `email_rules`) or 1 (checked, regardless of whether any rule
+    // matched) — lets `App::run_email_rules` skip rows it already processed without re-running
+    // every rule against the whole table each pass. See `App::run_email_rules`.
+    if !column_exists(pool, "email_messages", "rule_applied").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN rule_applied INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added rule_applied column to email_messages");
+    }
+
     tracing::debug!("[Migration] Email schema ready ✓");
     Ok(())
 }

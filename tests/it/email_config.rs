@@ -28,6 +28,7 @@ fn debug_output_redacts_the_password() {
         imap_username: "me@example.com".into(),
         imap_password: "hunter2".into(),
         imap_folder: "INBOX".into(),
+        archive_folder: "Archive".into(),
     };
     let shown = format!("{config:?}");
     assert!(!shown.contains("hunter2"));

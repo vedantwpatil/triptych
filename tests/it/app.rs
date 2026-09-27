@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
 use sqlx::SqlitePool;
 use triptych::app::*;
 
@@ -679,7 +679,7 @@ async fn delete_selected_tasks_without_a_selection_deletes_only_the_cursor_row()
 #[tokio::test]
 async fn submit_task_inserts_only_when_the_parse_lands() {
     let (mut app, pool) = app_with_tasks(&[]).await;
-    app.submit_task("buy milk".to_string(), None);
+    app.submit_task("buy milk".to_string(), None, None);
     assert!(app.tasks.is_empty(), "submit_task must not insert inline");
 
     let parsed = app.task_rx.recv().await.expect("background parse result");
@@ -714,6 +714,29 @@ async fn converting_an_email_twice_before_the_parse_lands_makes_one_task() {
 
     assert_eq!(descriptions(&app), ["reply to advisor"]);
     assert_eq!(email_task_id(&pool, email_id).await, Some(app.tasks[0].id));
+}
+
+#[tokio::test]
+async fn converting_an_email_extracts_a_deadline_from_the_body_but_keeps_the_subject_as_title() {
+    let pool = test_pool().await;
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, snippet, date_utc) VALUES (1, 'm1', 'a@b.c', 'project update', 'please finish this by tomorrow', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert email");
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.convert_selected_email_to_task();
+    let parsed = app.task_rx.recv().await.expect("background parse result");
+    app.apply_task_parse(parsed).await.expect("apply parse");
+
+    assert_eq!(descriptions(&app), ["project update"]);
+    assert!(
+        app.tasks[0].deadline.is_some(),
+        "the body's date phrase should still set a deadline"
+    );
 }
 
 #[tokio::test]
@@ -809,6 +832,194 @@ async fn toggling_the_sort_keeps_the_cursor_on_its_message() {
 }
 
 #[tokio::test]
+async fn marking_unread_after_viewing_flips_is_read_back_to_false() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    app.mark_selected_email_read().await.expect("read");
+    assert!(app.emails[app.selected_email].is_read);
+
+    app.mark_selected_email_unread().await.expect("unread");
+
+    assert!(!app.emails[app.selected_email].is_read);
+}
+
+#[tokio::test]
+async fn toggling_star_flips_the_flag_and_toggling_again_clears_it() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert!(!app.emails[app.selected_email].is_starred);
+
+    app.toggle_selected_star().await.expect("star");
+    assert!(app.emails[app.selected_email].is_starred);
+
+    app.toggle_selected_star().await.expect("unstar");
+    assert!(!app.emails[app.selected_email].is_starred);
+}
+
+async fn insert_email_for_account(pool: &SqlitePool, uid: i64, subject: &str, account: &str) {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, account, from_addr, subject, date_utc) VALUES (?, ?, ?, 'a@b.c', ?, '2026-01-01T00:00:00Z')",
+    )
+    .bind(uid)
+    .bind(format!("m{uid}"))
+    .bind(account)
+    .bind(subject)
+    .execute(pool)
+    .await
+    .expect("insert email");
+}
+
+#[tokio::test]
+async fn refresh_emails_only_loads_the_active_account_filter() {
+    let pool = test_pool().await;
+    insert_email_for_account(&pool, 1, "work memo", "work").await;
+    insert_email_for_account(&pool, 2, "personal note", "personal").await;
+    let mut app = App::new(pool).await;
+    app.account_filter = Some("work".to_string());
+
+    app.refresh_emails().await.expect("load emails");
+
+    assert_eq!(subjects(&app), ["work memo"]);
+}
+
+#[tokio::test]
+async fn cycle_account_filter_walks_every_account_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_account(&pool, 1, "work memo", "personal").await;
+    insert_email_for_account(&pool, 2, "personal note", "work").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.account_filter, None);
+
+    app.cycle_account_filter().await.expect("cycle");
+    assert_eq!(app.account_filter.as_deref(), Some("personal"));
+    assert_eq!(subjects(&app), ["work memo"]);
+
+    app.cycle_account_filter().await.expect("cycle");
+    assert_eq!(app.account_filter.as_deref(), Some("work"));
+    assert_eq!(subjects(&app), ["personal note"]);
+
+    app.cycle_account_filter().await.expect("cycle");
+    assert_eq!(app.account_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+async fn insert_email_for_folder(pool: &SqlitePool, uid: i64, subject: &str, folder: &str) {
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, folder, from_addr, subject, date_utc) VALUES (?, ?, ?, 'a@b.c', ?, '2026-01-01T00:00:00Z')",
+    )
+    .bind(uid)
+    .bind(format!("m{uid}"))
+    .bind(folder)
+    .bind(subject)
+    .execute(pool)
+    .await
+    .expect("insert email");
+}
+
+#[tokio::test]
+async fn refresh_emails_only_loads_the_active_folder_filter() {
+    let pool = test_pool().await;
+    insert_email_for_folder(&pool, 1, "inbox memo", "INBOX").await;
+    insert_email_for_folder(&pool, 2, "archived note", "Archive").await;
+    let mut app = App::new(pool).await;
+    app.folder_filter = Some("Archive".to_string());
+
+    app.refresh_emails().await.expect("load emails");
+
+    assert_eq!(subjects(&app), ["archived note"]);
+}
+
+#[tokio::test]
+async fn cycle_folder_filter_walks_every_folder_then_back_to_merged() {
+    let pool = test_pool().await;
+    insert_email_for_folder(&pool, 1, "archived note", "Archive").await;
+    insert_email_for_folder(&pool, 2, "inbox memo", "INBOX").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+    assert_eq!(app.folder_filter, None);
+
+    app.cycle_folder_filter().await.expect("cycle");
+    assert_eq!(app.folder_filter.as_deref(), Some("Archive"));
+    assert_eq!(subjects(&app), ["archived note"]);
+
+    app.cycle_folder_filter().await.expect("cycle");
+    assert_eq!(app.folder_filter.as_deref(), Some("INBOX"));
+    assert_eq!(subjects(&app), ["inbox memo"]);
+
+    app.cycle_folder_filter().await.expect("cycle");
+    assert_eq!(app.folder_filter, None);
+    assert_eq!(app.emails.len(), 2);
+}
+
+#[test]
+fn parse_snooze_spec_reads_minutes_hours_and_days() {
+    let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+    assert_eq!(parse_snooze_spec("10m", now), Some(now + Duration::minutes(10)));
+    assert_eq!(parse_snooze_spec("2h", now), Some(now + Duration::hours(2)));
+    assert_eq!(parse_snooze_spec("3d", now), Some(now + Duration::days(3)));
+}
+
+#[test]
+fn parse_snooze_spec_rejects_zero_negative_and_garbage() {
+    let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+    assert_eq!(parse_snooze_spec("0m", now), None);
+    assert_eq!(parse_snooze_spec("-1h", now), None);
+    assert_eq!(parse_snooze_spec("m", now), None);
+    assert_eq!(parse_snooze_spec("", now), None);
+    assert_eq!(parse_snooze_spec("10x", now), None);
+    assert_eq!(parse_snooze_spec("soon", now), None);
+}
+
+#[test]
+fn parse_snooze_spec_keywords_land_at_eight_am_local() {
+    let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+    let tomorrow = parse_snooze_spec("tomorrow", now).expect("parses");
+    let next_week = parse_snooze_spec("nextweek", now).expect("parses");
+    assert_eq!(tomorrow.with_timezone(&chrono::Local).format("%H:%M").to_string(), "08:00");
+    assert_eq!(next_week.with_timezone(&chrono::Local).format("%H:%M").to_string(), "08:00");
+    assert_eq!((next_week - tomorrow).num_days(), 6);
+}
+
+#[tokio::test]
+async fn snoozing_an_email_hides_it_until_unsnoozed_or_it_lapses() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.input_buffer = "1h".to_string();
+    app.commit_snooze().await;
+    assert!(subjects(&app).is_empty(), "snoozed email still in normal view");
+
+    app.toggle_show_snoozed().await.expect("toggle");
+    assert_eq!(subjects(&app), ["notes"]);
+
+    app.unsnooze_selected_email().await.expect("unsnooze");
+    assert!(subjects(&app).is_empty(), "unsnoozed email still in snoozed view");
+
+    app.toggle_show_snoozed().await.expect("toggle back");
+    assert_eq!(subjects(&app), ["notes"]);
+}
+
+#[tokio::test]
+async fn commit_snooze_with_an_invalid_spec_leaves_the_email_visible() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.input_buffer = "whenever".to_string();
+    app.commit_snooze().await;
+
+    assert_eq!(subjects(&app), ["notes"]);
+}
+
+#[tokio::test]
 async fn opening_an_email_shows_its_cached_summary_without_asking_the_model() {
     let pool = test_pool().await;
     insert_email(&pool, 1, "notes", "2026-01-01T00:00:00Z").await;
@@ -851,13 +1062,13 @@ async fn search_jumps_to_the_next_match_case_insensitively_and_n_repeats_it() {
 
     app.start_search();
     app.input_buffer = "BETA".to_string();
-    app.commit_search();
+    app.commit_search().await;
     assert_eq!(app.selected, 1);
     assert!(matches!(app.input_mode, InputMode::Normal));
 
-    app.search_step(true);
+    app.search_step(true).await;
     assert_eq!(app.selected, 3);
-    app.search_step(false);
+    app.search_step(false).await;
     assert_eq!(app.selected, 1);
 }
 
@@ -867,7 +1078,7 @@ async fn search_wraps_and_says_so() {
     app.selected = 2;
     app.search_query = "beta".to_string();
 
-    app.search_step(true);
+    app.search_step(true).await;
 
     assert_eq!(app.selected, 0);
     assert_eq!(
@@ -882,7 +1093,7 @@ async fn search_reports_a_missing_pattern_and_keeps_the_cursor() {
     app.selected = 1;
     app.search_query = "zzz".to_string();
 
-    app.search_step(true);
+    app.search_step(true).await;
 
     assert_eq!(app.selected, 1);
     assert_eq!(
@@ -896,7 +1107,7 @@ async fn an_empty_search_repeats_the_last_query_or_complains_when_there_is_none(
     let (mut app, _pool) = app_with_tasks(&["a1", "b", "a2"]).await;
 
     app.start_search();
-    app.commit_search();
+    app.commit_search().await;
     assert_eq!(
         app.status_message.as_ref().map(|(m, _)| m.as_str()),
         Some("No previous search")
@@ -904,7 +1115,7 @@ async fn an_empty_search_repeats_the_last_query_or_complains_when_there_is_none(
 
     app.search_query = "a".to_string();
     app.start_search();
-    app.commit_search();
+    app.commit_search().await;
     assert_eq!(app.search_query, "a");
     assert_eq!(app.selected, 2);
 }
@@ -940,10 +1151,30 @@ async fn email_search_matches_subject_or_sender() {
     app.view_mode = ViewMode::Email;
     app.search_query = "lunch".to_string();
 
-    app.search_step(true);
+    app.search_step(true).await;
     assert_eq!(subjects(&app)[app.selected_email], "lunch");
-    app.search_step(true);
+    app.search_step(true).await;
     assert_eq!(subjects(&app)[app.selected_email], "hello");
+}
+
+#[tokio::test]
+async fn email_search_matches_body_text_via_db_query() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "no match here", "2026-01-01T00:00:00Z").await;
+    insert_email(&pool, 2, "also no match", "2026-01-02T00:00:00Z").await;
+    sqlx::query("UPDATE email_messages SET body_text = 'the quarterly forecast is attached' WHERE uid = 2")
+        .execute(&pool)
+        .await
+        .expect("set body");
+    let mut app = App::new(pool).await;
+    app.email_sort = triptych::email::EmailSort::Date;
+    app.refresh_emails().await.expect("load emails");
+    app.view_mode = ViewMode::Email;
+    app.search_query = "forecast".to_string();
+
+    app.search_step(true).await;
+
+    assert_eq!(subjects(&app)[app.selected_email], "also no match");
 }
 
 #[tokio::test]
@@ -964,4 +1195,176 @@ async fn calendar_motions_move_the_cursor_and_clamp_to_the_grid() {
     assert_eq!(app.selected_day, 0);
     app.calendar_apply_motion(Motion::Top, Some(4));
     assert_eq!(app.selected_time_slot, 3);
+}
+
+#[tokio::test]
+async fn compose_editing_appends_and_removes_chars_in_the_active_field() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    app.email_compose = Some(ComposeState::blank("default".to_string()));
+
+    app.compose_push_char('a');
+    app.compose_push_char('b');
+    assert_eq!(app.email_compose.as_ref().expect("compose open").to, "ab");
+
+    app.compose_backspace();
+    assert_eq!(app.email_compose.as_ref().expect("compose open").to, "a");
+
+    app.compose_next_field();
+    app.compose_push_char('x');
+    assert_eq!(app.email_compose.as_ref().expect("compose open").cc, "x");
+    assert_eq!(app.email_compose.as_ref().expect("compose open").to, "a");
+}
+
+#[tokio::test]
+async fn compose_newline_only_inserts_into_the_body_field() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    app.email_compose = Some(ComposeState::blank("default".to_string()));
+
+    app.compose_newline();
+    assert_eq!(app.email_compose.as_ref().expect("compose open").to, "");
+
+    for _ in 0..3 {
+        app.compose_next_field();
+    }
+    assert_eq!(
+        app.email_compose.as_ref().expect("compose open").active_field,
+        ComposeField::Body
+    );
+    app.compose_newline();
+    assert_eq!(app.email_compose.as_ref().expect("compose open").body, "\n");
+}
+
+#[tokio::test]
+async fn cancel_compose_closes_the_form_and_returns_to_normal_mode() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    app.email_compose = Some(ComposeState::blank("default".to_string()));
+    app.input_mode = InputMode::EmailCompose;
+
+    app.cancel_compose();
+
+    assert!(app.email_compose.is_none());
+    assert!(matches!(app.input_mode, InputMode::Normal));
+}
+
+#[tokio::test]
+async fn start_reply_without_smtp_config_leaves_no_compose_open() {
+    // No `TRIPTYCH_EMAIL_ENABLED`/`SMTP_*` env vars are set in the test process, so
+    // `SmtpConfig::for_account` is empty and the guard clause should no-op rather than panic
+    // or open a form with nowhere to send.
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "hi", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.start_reply(false);
+
+    assert!(app.email_compose.is_none());
+}
+
+async fn draft_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM email_drafts")
+        .fetch_one(pool)
+        .await
+        .expect("count drafts")
+}
+
+#[tokio::test]
+async fn save_compose_as_draft_inserts_a_row_and_closes_the_form() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool.clone()).await;
+    let mut compose = ComposeState::blank("default".to_string());
+    compose.to = "a@b.c".to_string();
+    compose.subject = "hello".to_string();
+    app.email_compose = Some(compose);
+    app.input_mode = InputMode::EmailCompose;
+
+    app.save_compose_as_draft().await;
+
+    assert!(app.email_compose.is_none());
+    assert!(matches!(app.input_mode, InputMode::Normal));
+    assert_eq!(draft_count(&pool).await, 1);
+}
+
+#[tokio::test]
+async fn save_compose_as_draft_overwrites_the_row_it_was_resumed_from() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool.clone()).await;
+    let mut compose = ComposeState::blank("default".to_string());
+    compose.subject = "first".to_string();
+    app.email_compose = Some(compose);
+    app.save_compose_as_draft().await;
+    assert_eq!(draft_count(&pool).await, 1);
+
+    app.open_drafts_list().await;
+    app.resume_selected_draft();
+    app.email_compose.as_mut().expect("compose reopened").subject = "second".to_string();
+    app.save_compose_as_draft().await;
+
+    assert_eq!(draft_count(&pool).await, 1, "resumed save should overwrite, not insert");
+    app.open_drafts_list().await;
+    assert_eq!(app.drafts[0].subject, "second");
+}
+
+#[tokio::test]
+async fn open_drafts_list_loads_saved_drafts_most_recent_first() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool.clone()).await;
+    for subject in ["one", "two"] {
+        let mut compose = ComposeState::blank("default".to_string());
+        compose.subject = subject.to_string();
+        app.email_compose = Some(compose);
+        app.save_compose_as_draft().await;
+    }
+
+    app.open_drafts_list().await;
+
+    assert!(app.drafts_open);
+    assert_eq!(app.drafts.len(), 2);
+    assert_eq!(app.drafts[0].subject, "two", "most recently saved comes first");
+}
+
+#[tokio::test]
+async fn resume_selected_draft_reopens_it_in_compose_and_closes_the_list() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool).await;
+    let mut compose = ComposeState::blank("default".to_string());
+    compose.to = "a@b.c".to_string();
+    compose.subject = "hello".to_string();
+    app.email_compose = Some(compose);
+    app.save_compose_as_draft().await;
+    app.open_drafts_list().await;
+    let draft_id = app.drafts[0].id;
+
+    app.resume_selected_draft();
+
+    assert!(!app.drafts_open);
+    assert!(matches!(app.input_mode, InputMode::EmailCompose));
+    let resumed = app.email_compose.as_ref().expect("compose reopened");
+    assert_eq!(resumed.draft_id, Some(draft_id));
+    assert_eq!(resumed.subject, "hello");
+    assert_eq!(resumed.active_field, ComposeField::Body);
+}
+
+#[tokio::test]
+async fn delete_selected_draft_removes_it_from_db_and_the_open_list() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool.clone()).await;
+    for subject in ["one", "two"] {
+        let mut compose = ComposeState::blank("default".to_string());
+        compose.subject = subject.to_string();
+        app.email_compose = Some(compose);
+        app.save_compose_as_draft().await;
+    }
+    app.open_drafts_list().await;
+    assert_eq!(app.drafts.len(), 2);
+    app.selected_draft = 1;
+
+    app.delete_selected_draft().await;
+
+    assert_eq!(app.drafts.len(), 1);
+    assert_eq!(draft_count(&pool).await, 1);
+    assert_eq!(app.selected_draft, 0, "selection clamps back into range");
 }

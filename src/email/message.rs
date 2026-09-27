@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
 use sqlx::FromRow;
 
 /// A stored email, mirrors the `email_messages` table.
@@ -19,6 +19,63 @@ pub struct EmailMessage {
     pub is_read: bool,
     pub task_id: Option<i64>,
     pub body_text: Option<String>,
+    /// Comma-separated `To` addresses, for reply-all and forward-prefill.
+    pub to_addrs: Option<String>,
+    /// Comma-separated `Cc` addresses, for reply-all.
+    pub cc_addrs: Option<String>,
+    /// This message's raw `References` header, space-joined, if it had one. A reply chains onto
+    /// it by appending this message's own `message_id` (RFC 5322 §3.6.4); done by the composer,
+    /// not here, since `parse_raw` only extracts what's already on the wire.
+    pub references_header: Option<String>,
+    pub is_starred: bool,
+    /// `EXISTS(...)` over `email_attachments`, computed by `store::get_recent`'s query rather than
+    /// stored — always in sync with the real rows, no separate write path to forget.
+    pub has_attachments: bool,
+    /// `Some(t)` while `t` is still in the future hides this message from the normal list
+    /// (`App::refresh_emails`'s snooze-visibility filter); once `t` passes it reappears on its
+    /// own, no separate clear needed. Set by `App::commit_snooze`, cleared early by
+    /// `App::unsnooze_selected_email`.
+    pub snoozed_until: Option<DateTime<Utc>>,
+    /// `None` until `App::run_email_triage` classifies it; `Some(true)` is Focused (personal/work
+    /// mail worth attention), `Some(false)` is Other (bulk/automated) — Outlook's Focused Inbox
+    /// split. Set by `email::store::set_triage`.
+    pub triage_focused: Option<bool>,
+}
+
+/// One MIME attachment's metadata, mirrors the `email_attachments` table. Bytes are never stored
+/// here or in the DB — see `MailSource::fetch_attachments`.
+#[derive(Debug, Clone, FromRow)]
+pub struct EmailAttachment {
+    pub id: i64,
+    pub email_id: i64,
+    /// Position among the message's MIME parts, in `mail_parser::Message::attachments()` order —
+    /// the same order `MailSource::fetch_attachments` re-parses the message in, so this index
+    /// always lines up with a re-fetch even though the bytes themselves aren't persisted.
+    pub part_index: i64,
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub size_bytes: i64,
+}
+
+/// A user-defined auto-action, mirrors the `email_rules` table (Slice 18). `match_field` is
+/// `"subject"` or `"from_addr"`, `action` is `"star"` or `"read"` — see `app::mail::match_rule`
+/// for how `pattern` is tested.
+#[derive(Debug, Clone, FromRow)]
+pub struct EmailRule {
+    pub id: i64,
+    pub match_field: String,
+    pub pattern: String,
+    pub action: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One attachment's metadata extracted from a raw message, ready to insert (no `id` yet).
+#[derive(Debug, Clone)]
+pub struct NewAttachment {
+    pub part_index: i64,
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub size_bytes: i64,
 }
 
 /// Fields extracted from a raw RFC822 message, ready to insert (no `id` yet).
@@ -34,6 +91,23 @@ pub struct NewEmail {
     pub date_utc: DateTime<Utc>,
     pub snippet: Option<String>,
     pub body_text: Option<String>,
+    pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
+    pub references_header: Option<String>,
+    pub attachments: Vec<NewAttachment>,
+}
+
+/// Comma-joins every address in a `To`/`Cc` header, dropping addresses with no
+/// address part (group syntax's own name-only entries). `None` if the header was
+/// absent or had no usable address.
+fn join_addrs(addr: Option<&mail_parser::Address<'_>>) -> Option<String> {
+    let joined = addr?
+        .iter()
+        .filter_map(mail_parser::Addr::address)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    (!joined.is_empty()).then_some(joined)
 }
 
 /// Parse a raw RFC822 message fetched over IMAP into a `NewEmail`.
@@ -69,6 +143,14 @@ pub fn parse_raw(
 
     let subject = message.subject().unwrap_or("(no subject)").to_string();
 
+    let to_addrs = join_addrs(message.to());
+    let cc_addrs = join_addrs(message.cc());
+    let references_header = message
+        .references()
+        .as_text_list()
+        .filter(|refs| !refs.is_empty())
+        .map(|refs| refs.join(" "));
+
     let date_utc = message.date().map_or_else(Utc::now, |d| {
         Utc.timestamp_opt(d.to_timestamp(), 0)
             .single()
@@ -87,6 +169,14 @@ pub fn parse_raw(
         )
     };
 
+    // A `header_only` fetch (see `client.rs`'s `LARGE_MESSAGE_BYTES`) has no body, so the MIME
+    // part structure genuinely can't be known — an empty list here, not a guess.
+    let attachments = if header_only {
+        Vec::new()
+    } else {
+        extract_attachments(&message)
+    };
+
     Ok(NewEmail {
         uid: i64::from(uid),
         message_id,
@@ -98,7 +188,37 @@ pub fn parse_raw(
         date_utc,
         snippet,
         body_text,
+        to_addrs,
+        cc_addrs,
+        references_header,
+        attachments,
     })
+}
+
+/// Reads every attachment's filename/content-type/size off an already-parsed message. Never
+/// touches an attachment's bytes — those are fetched on demand later (`MailSource::fetch_attachments`),
+/// not persisted.
+fn extract_attachments(message: &mail_parser::Message<'_>) -> Vec<NewAttachment> {
+    message
+        .attachments()
+        .enumerate()
+        .map(|(index, part)| {
+            let content_type = part.content_type().map_or_else(
+                || "application/octet-stream".to_string(),
+                |ct| {
+                    ct.c_subtype
+                        .as_ref()
+                        .map_or_else(|| ct.c_type.to_string(), |sub| format!("{}/{sub}", ct.c_type))
+                },
+            );
+            NewAttachment {
+                part_index: i64::try_from(index).unwrap_or(i64::MAX),
+                filename: part.attachment_name().map(str::to_string),
+                content_type,
+                size_bytes: i64::try_from(part.len()).unwrap_or(i64::MAX),
+            }
+        })
+        .collect()
 }
 
 /// Marketers pad hidden preheader/body text with zero-width characters to

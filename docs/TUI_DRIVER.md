@@ -37,7 +37,7 @@ characters; `--marks` also lists highlighted spans (the calendar cursor cell is 
 
 ## tui_suite.py: scenario suite
 
-136 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+158 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
@@ -51,8 +51,8 @@ python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-
 | `sched_*` | 9     | schedule import/export/show/clear/reallocate, overlaps, bad input             |
 | `todo_*`  | 20    | add/cancel/toggle/delete, `v` visual delete, linked-email delete, badges, persist, `s`, view cycle |
 | `cal_*`   | 24    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking    |
-| `email_*` | 20    | list, popup, mark read, convert, `s` sync, priority order, AI summaries       |
-| `imap_*`  | 14    | real `email sync` and TUI sync against the fake IMAP server           |
+| `email_*` | 26    | list, popup, mark read, convert, compose/reply/forward/send, `s` sync, priority order, AI summaries |
+| `imap_*`  | 19    | real `email sync` and TUI sync/delete/archive (incl. no-`MOVE` fallback) against the fake IMAP server |
 | `vim_*`   | 16    | counts, `gg`/`G`, `C-d`/`C-u`, `0`/`$`, `/` search, visual counts, Ctrl chords |
 
 Statuses: `PASS`, `FAIL` (regression, exit 1), `XFAIL` (known bug still failing), `XPASS` (fixed; `--strict`
@@ -61,9 +61,9 @@ fails on it). None open today. For a new bug, write a scenario asserting the cor
 
 ## Fake servers
 
-Scenarios never touch a real mail account or model: `Sandbox` starts local fakes on demand, `c.imap()` and
-`c.sb.ollama()`, and only then puts their address in the binary's environment. Details, CLI flags and
-scenario helpers: [`TUI_FAKES.md`](./TUI_FAKES.md).
+Scenarios never touch a real mail account or model: `Sandbox` starts local fakes on demand, `c.imap()`,
+`c.smtp()` and `c.sb.ollama()`, and only then puts their address in the binary's environment. Details, CLI
+flags and scenario helpers: [`TUI_FAKES.md`](./TUI_FAKES.md).
 
 ## Adding a scenario
 
@@ -78,5 +78,6 @@ the xterm hex, e.g. `ff0000` = slot 9). Assert on DB rows and screen text, not o
 
 - Without `c.sb.ollama()`, NLP scenarios use the local Ollama (`localhost:11434`); most inputs return
   from the regex fast path first. The fake replies with canned text, so it proves plumbing, not quality.
-- IMAP is a fake: it proves protocol use, TLS trust and cursor logic, not real provider quirks (OAuth, IDLE).
+- IMAP and SMTP are fakes: they prove protocol use, TLS trust and cursor/threading logic, not real
+  provider quirks (OAuth, IDLE, greylisting).
 - `pyte` renders text and colour, not pixels; wide/emoji glyphs may misalign columns.
