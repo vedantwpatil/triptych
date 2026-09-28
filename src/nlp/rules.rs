@@ -541,7 +541,13 @@ fn parse_date_phrase(
     move |input| {
         let (rest, date) = alt((
             map_res(parse_chrono_candidate, move |s| {
-                parse_date_string(s, now, Dialect::Us)
+                // `Dialect::Uk`, not `Us`, is deliberate: it only changes how chrono-english
+                // resolves an *explicit* "next <weekday>" - Uk skips to next week's occurrence,
+                // Us treats it the same as a bare weekday (the very next one). Users expect the
+                // former ("next monday" said on a Sunday means the Monday after tomorrow, not
+                // tomorrow). This has no effect on numeric dates ("9/11"): those never reach
+                // chrono-english, `parse_numeric_date` below handles them in fixed MM/DD order.
+                parse_date_string(s, now, Dialect::Uk)
                     .map(|dt| dt.date_naive())
                     .map_err(|_| "chrono parse failed")
             }),

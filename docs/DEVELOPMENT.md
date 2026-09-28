@@ -21,6 +21,36 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-27 (next-weekday date bug): "math homework due next monday" said on a Sunday resolved to
+  tomorrow instead of the Monday 8 days out. Root cause: `rules.rs`'s `parse_date_phrase` handed any
+  `next <weekday>` match to `chrono_english::parse_date_string` with `Dialect::Us`, and that crate's
+  US dialect treats an explicit "next friday" the same as bare "friday" (the very next occurrence) —
+  only `Dialect::Uk` adds the extra week an explicit "next" implies. Confirmed by reading the
+  installed crate source (`chrono-english-0.1.8/src/types.rs`): only `Direction::Next`'s branch
+  checks the dialect flag, so `last`/`this`/bare weekdays are unaffected, and numeric dates (`12/25`)
+  never reach `chrono_english` at all (`parse_numeric_date` handles those separately) — a one-word
+  fix, `Dialect::Us` -> `Dialect::Uk`, with no other call site touched. New `tests/it/nlp_rules.rs`
+  case `deadline_by_next_weekday_skips_the_immediate_occurrence` computes tomorrow's weekday name at
+  runtime and asserts the resolved deadline lands 7 days past it, so the regression can't drift with
+  the calendar. All pre-existing "next weekday" tests only asserted the resolved weekday name, never
+  a date offset, so none needed changes. Full gate green: `cargo build`/`cargo clippy --all-targets`
+  clean, `cargo test --test it` 228 passed (was 227), full TUI suite 168/168. See
+  `src/nlp/CLAUDE.md`'s Weekdays gotcha.
+- 2026-09-27 (full-body deadline fallback): `App::convert_selected_email_to_task` used to only look
+  at an email's subject + snippet for a deadline; a date stated further down the body (past what the
+  list view shows) was silently dropped. It's now `async`: when the subject+snippet parse finds no
+  deadline, it fetches the full body via `email::store::get_body`, cleans it with the new
+  `email::message::clean_body_for_deadline_scan` (strips quoted-reply chains and signature blocks,
+  since a bare date in either is far likelier to be someone else's older message or footer noise than
+  the sender's own ask), and runs the result through the new `nlp::rules::extract_deadline_only`
+  (reuses `parse_segments` but keeps only a trigger-word-anchored `Segment::Deadline` — "by"/"due"/
+  "before" + date — discarding every bare `Segment::Date`). The result feeds `submit_task`'s new
+  `body_deadline` param, which `insert_parsed_task` applies via `.or()` only when the parse's own
+  `deadline` is `None` — this fallback can only ever supply a `deadline`, never a title or `due_date`.
+  New scenarios `email_convert_body_deep_due` (date only in body prose, title still stays the subject)
+  and `email_convert_quote_skip` (deadline-shaped phrase inside a quoted reply must not leak through)
+  bring the TUI suite to 168 scenarios (was 166). See `src/app/CLAUDE.md`'s `mail.rs`/`tasks.rs` rows,
+  `src/email/CLAUDE.md`'s `message.rs` row, `src/nlp/CLAUDE.md`'s `rules.rs` row.
 - 2026-09-27 (sender-domain filter, Slice 25): `@` in the email list cycles `App.domain_filter`
   (`Option<String>`) through `None` (merged) and every sender domain with a stored message,
   alphabetical, then back — same dynamic-list cycle shape as `cycle_account_filter`/

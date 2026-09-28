@@ -38,6 +38,36 @@ fn deadline_by_next_weekday_sets_end_of_day_for_every_day() {
 }
 
 #[test]
+fn deadline_by_next_weekday_skips_the_immediate_occurrence() {
+    // "next <weekday>" must mean the weekday of next week, not just the next occurrence -
+    // regression: chrono-english's US dialect treats an explicit "next friday" the same as
+    // bare "friday" (the very next one). If today is a Sunday, "next monday" used to resolve
+    // to tomorrow instead of the Monday a full week after that.
+    fn weekday_name(day: chrono::Weekday) -> &'static str {
+        match day {
+            chrono::Weekday::Mon => "monday",
+            chrono::Weekday::Tue => "tuesday",
+            chrono::Weekday::Wed => "wednesday",
+            chrono::Weekday::Thu => "thursday",
+            chrono::Weekday::Fri => "friday",
+            chrono::Weekday::Sat => "saturday",
+            chrono::Weekday::Sun => "sunday",
+        }
+    }
+
+    let tomorrow = Local::now().date_naive() + Duration::days(1);
+    let name = weekday_name(tomorrow.weekday());
+    let task = parse_task(&format!("math homework due next {name}"));
+    let deadline = task.deadline.expect("deadline should be set");
+    let local_date = deadline.with_timezone(&Local).date_naive();
+    assert_eq!(
+        local_date,
+        tomorrow + Duration::days(7),
+        "'next {name}' (tomorrow's weekday) must land a full week past the immediate occurrence"
+    );
+}
+
+#[test]
 fn deadline_by_specific_month_day_sets_end_of_day() {
     let task = parse_task("finish taxes due dec 25");
     let deadline = task.deadline.expect("deadline should be set");
