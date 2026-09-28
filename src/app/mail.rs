@@ -9,7 +9,7 @@ use super::{App, ComposeField, ComposeState, InputMode, ViewMode};
 use super::time::resolve_local_datetime;
 use crate::email::{
     EmailConfig, EmailMessage, EmailRule, EmailSort, ImapMailSource, MailSource, SmtpConfig, drafts,
-    priority, smtp,
+    message, priority, smtp,
     store as email_store,
     sync::{sync_account, sync_one_folder},
 };
@@ -808,7 +808,16 @@ impl App {
     /// fallback is the entire unparsed input verbatim and body prose would otherwise leak into it.
     /// A subject with no snippet skips the override and keeps the parser's own cleaned-up title
     /// (e.g. a trailing "tomorrow" stripped out into the deadline field), unchanged from before.
-    pub fn convert_selected_email_to_task(&mut self) {
+    ///
+    /// Separately fetches the full body (on demand, like `open_selected_email` — list rows never
+    /// carry it) and runs it through `message::clean_body_for_deadline_scan` +
+    /// `nlp::rules::extract_deadline_only`, so a deadline stated only deep in the body (past the
+    /// 200-char snippet) is still found. That result is passed as `submit_task`'s `body_deadline`
+    /// fallback rather than folded into `description`: `extract_deadline_only` only ever returns a
+    /// trigger-word-anchored deadline (never a bare date), and it only applies if the subject+
+    /// snippet parse found no deadline of its own — a deliberately narrow path so body prose can
+    /// promote a *deadline* but can never hijack the title or the scheduled `due_date`.
+    pub async fn convert_selected_email_to_task(&mut self) {
         let Some(email) = self.emails.get(self.selected_email) else {
             return;
         };
@@ -820,11 +829,22 @@ impl App {
             return;
         }
         let (email_id, subject) = (email.id, email.subject.clone());
-        let snippet = email.snippet.as_deref().filter(|s| !s.is_empty());
-        let description =
-            snippet.map_or_else(|| subject.clone(), |snippet| format!("{subject}. {snippet}"));
+        let snippet = email.snippet.clone().filter(|s| !s.is_empty());
+        let description = snippet
+            .as_deref()
+            .map_or_else(|| subject.clone(), |snippet| format!("{subject}. {snippet}"));
         let title_override = snippet.is_some().then(|| subject.clone());
-        self.submit_task(description, Some(email_id), title_override);
+
+        let body_deadline = email_store::get_body(&self.db_pool, email_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|body| {
+                let cleaned = message::clean_body_for_deadline_scan(&body);
+                crate::nlp::rules::extract_deadline_only(&cleaned)
+            });
+
+        self.submit_task(description, Some(email_id), title_override, body_deadline);
     }
 
     /// Links the task made from an email, marks the email read and reloads the list.

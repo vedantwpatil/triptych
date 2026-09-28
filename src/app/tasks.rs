@@ -19,6 +19,9 @@ pub struct TaskParse {
     /// body snippet folded into `description` for date/priority/tag extraction never leaks into the
     /// task's name (see `App::convert_selected_email_to_task`).
     title_override: Option<String>,
+    /// A deadline extracted from the email's full body (see `nlp::rules::extract_deadline_only`),
+    /// applied only as a fallback when `item`'s own parse found no deadline (see `insert_parsed_task`).
+    body_deadline: Option<DateTime<Utc>>,
     item: Result<ParsedItem, String>,
 }
 
@@ -147,7 +150,7 @@ impl App {
             .parse(description)
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {e}")))?;
-        self.insert_parsed_task(description, parse_result.item, None)
+        self.insert_parsed_task(description, parse_result.item, None, None)
             .await
     }
 
@@ -156,11 +159,13 @@ impl App {
     /// `task_rx` and `apply_task_parse` inserts it. `title_override`, when set, replaces the parsed
     /// item's title before insert — used to fold extra text (an email body snippet) into
     /// `description` for date/priority/tag extraction without letting it become the task's name.
+    /// `body_deadline`, when set, is used only if `description`'s own parse finds no deadline.
     pub fn submit_task(
         &mut self,
         description: String,
         email_id: Option<i64>,
         title_override: Option<String>,
+        body_deadline: Option<DateTime<Utc>>,
     ) {
         self.status_message = Some(("Adding task...".to_string(), std::time::Instant::now()));
         let parser = Arc::clone(&self.nlp_parser);
@@ -175,6 +180,7 @@ impl App {
                 description,
                 email_id,
                 title_override,
+                body_deadline,
                 item,
             });
         });
@@ -191,6 +197,7 @@ impl App {
             description,
             email_id,
             title_override,
+            body_deadline,
             item,
         } = parsed;
         let item = item.map_err(sqlx::Error::Protocol)?;
@@ -209,7 +216,7 @@ impl App {
         }
 
         let task_id = self
-            .insert_parsed_task(&description, item, title_override.as_deref())
+            .insert_parsed_task(&description, item, title_override.as_deref(), body_deadline)
             .await?;
         self.status_message = None;
         match email_id {
@@ -223,9 +230,11 @@ impl App {
         description: &str,
         item: ParsedItem,
         title_override: Option<&str>,
+        body_deadline: Option<DateTime<Utc>>,
     ) -> Result<i64, sqlx::Error> {
         let (parsed_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
             extract_task_fields(item);
+        let deadline = deadline.or(body_deadline);
         let task_title = title_override.map_or(parsed_title, ToString::to_string);
 
         let new_order: i64 = if self.tasks.is_empty() {

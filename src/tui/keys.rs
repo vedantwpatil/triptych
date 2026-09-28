@@ -395,7 +395,7 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             }
         }
         KeyCode::Enter => {
-            app.convert_selected_email_to_task();
+            app.convert_selected_email_to_task().await;
         }
         KeyCode::Char('s') => app.start_email_sync(true),
         KeyCode::Char('o') => {
@@ -628,7 +628,7 @@ fn handle_editing_key(app: &mut App, code: KeyCode) {
         KeyCode::Enter => {
             let description = app.input_buffer.trim().to_string();
             if !description.is_empty() {
-                app.submit_task(description, None, None);
+                app.submit_task(description, None, None, None);
             }
             app.input_mode = InputMode::Normal;
         }

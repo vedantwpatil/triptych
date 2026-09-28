@@ -78,6 +78,23 @@ pub fn has_unresolved_deadline_intent(input: &str, resolved_deadline: bool) -> b
         .any(|w| matches!(w.to_lowercase().as_str(), "by" | "due" | "before"))
 }
 
+/// Scans `text` for a trigger-word-anchored deadline ("by"/"due"/"before" + date) only.
+///
+/// Ignores every other segment `parse_segments` can produce (bare dates, times, tags, priority,
+/// title text). Used to pull a deadline out of a full email body: a bare date there is far likelier
+/// to be a footer, signature or quoted-reply date than the sender's real deadline, so only an
+/// explicit deadline phrase is trustworthy enough to promote out of body prose. Callers should run
+/// `email::message::clean_body_for_deadline_scan` first to drop quoted/boilerplate text that could
+/// otherwise contain its own "by"/"due"/"before" phrase.
+#[must_use]
+pub fn extract_deadline_only(text: &str) -> Option<DateTime<Utc>> {
+    let (_, segments) = parse_segments(text).ok()?;
+    segments.into_iter().find_map(|segment| match segment {
+        Segment::Deadline(dt) => Some(dt),
+        _ => None,
+    })
+}
+
 impl RuleParser {
     #[must_use]
     pub fn try_parse(input: &str) -> Option<ParsedItem> {
@@ -227,50 +244,20 @@ fn parse_segments(input: &str) -> IResult<&str, Vec<Segment>> {
     ))(input)
 }
 
-/// Matches "by Friday", "due tomorrow", "before wed"
+/// Matches "by Friday", "due tomorrow", "before wed", "due next monday", "due jan 5"
 fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
     let now = Local::now();
     let (input, _) = alt((tag_no_case("by"), tag_no_case("due"), tag_no_case("before")))(input)?;
     let (input, _) = space1(input)?;
     map_res(
-        take_while1(|c: char| c.is_alphabetic()),
-        move |word: &str| -> Result<Segment, &'static str> {
-            let today = now.date_naive();
-            let target_date = match word.to_lowercase().as_str() {
-                "today" => today,
-                "tomorrow" => today + Duration::days(1),
-                _ => {
-                    let target_weekday =
-                        weekday_from_name(word).ok_or("not a recognized deadline target")?;
-                    let days_ahead = (i64::from(target_weekday.num_days_from_monday())
-                        - i64::from(today.weekday().num_days_from_monday())
-                        + 7)
-                        % 7;
-                    today + Duration::days(days_ahead)
-                }
-            };
-
-            let end_of_day = target_date.and_hms_opt(23, 59, 59).ok_or("invalid time")?;
-
+        parse_date_phrase(now, false),
+        move |date: NaiveDate| -> Result<Segment, &'static str> {
+            let end_of_day = date.and_hms_opt(23, 59, 59).ok_or("invalid time")?;
             Ok(Segment::Deadline(crate::app::resolve_local_datetime(
                 end_of_day,
             )))
         },
     )(input)
-}
-
-fn weekday_from_name(name: &str) -> Option<chrono::Weekday> {
-    use chrono::Weekday::{Fri, Mon, Sat, Sun, Thu, Tue, Wed};
-    Some(match name.to_lowercase().as_str() {
-        "monday" | "mon" => Mon,
-        "tuesday" | "tue" | "tues" => Tue,
-        "wednesday" | "wed" => Wed,
-        "thursday" | "thu" | "thurs" => Thu,
-        "friday" | "fri" => Fri,
-        "saturday" | "sat" => Sat,
-        "sunday" | "sun" => Sun,
-        _ => return None,
-    })
 }
 
 /// Matches bare durations with an optional "for" prefix: "2h", "90m", "3 hours", "for 30m"
@@ -538,16 +525,32 @@ fn parse_relative_duration(
 fn parse_date_segment(now: DateTime<Local>) -> impl FnMut(&str) -> IResult<&str, Segment> {
     move |input| {
         let (rest, on) = opt(pair(tag_no_case("on"), space1))(input)?;
+        let (rest, date) = parse_date_phrase(now, on.is_some())(rest)?;
+        let midnight = require(date.and_hms_opt(0, 0, 0), rest)?;
+        Ok((rest, Segment::Date(resolve_local_datetime(midnight))))
+    }
+}
+
+/// A plain calendar date - shared target parser for `Date` and `Deadline` segments.
+/// Covers "tomorrow"/"next monday"/"jan 5" (`chrono_english`) and "12/25" (`parse_numeric_date`);
+/// `has_on` governs whether a bare `3/4` needs a leading "on" (see `parse_numeric_date`).
+fn parse_date_phrase(
+    now: DateTime<Local>,
+    has_on: bool,
+) -> impl FnMut(&str) -> IResult<&str, NaiveDate> {
+    move |input| {
         let (rest, date) = alt((
-            map_res(parse_chrono_candidate, |s| {
+            map_res(parse_chrono_candidate, move |s| {
                 parse_date_string(s, now, Dialect::Us)
-                    .map(|dt| dt.with_timezone(&Utc))
+                    .map(|dt| dt.date_naive())
                     .map_err(|_| "chrono parse failed")
             }),
-            parse_numeric_date(now, on.is_some()),
-        ))(rest)?;
+            map(parse_numeric_date(now, has_on), |dt| {
+                dt.with_timezone(&Local).date_naive()
+            }),
+        ))(input)?;
         let (rest, ()) = word_boundary(rest)?;
-        Ok((rest, Segment::Date(date)))
+        Ok((rest, date))
     }
 }
 

@@ -11,6 +11,68 @@ fn parse_task(input: &str) -> Task {
 }
 
 #[test]
+fn deadline_by_next_weekday_sets_end_of_day_for_every_day() {
+    let days = [
+        ("monday", chrono::Weekday::Mon),
+        ("tuesday", chrono::Weekday::Tue),
+        ("wednesday", chrono::Weekday::Wed),
+        ("thursday", chrono::Weekday::Thu),
+        ("friday", chrono::Weekday::Fri),
+        ("saturday", chrono::Weekday::Sat),
+        ("sunday", chrono::Weekday::Sun),
+    ];
+    for (name, expected) in days {
+        let task = parse_task(&format!("math homework due next {name}"));
+        let deadline = task
+            .deadline
+            .unwrap_or_else(|| panic!("no deadline resolved for 'due next {name}'"));
+        let local = deadline.with_timezone(&Local);
+        assert_eq!(local.weekday(), expected, "next {name}");
+        assert_eq!(
+            local.time(),
+            NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
+            "next {name}"
+        );
+        assert_eq!(task.title, "math homework", "next {name}");
+    }
+}
+
+#[test]
+fn deadline_by_specific_month_day_sets_end_of_day() {
+    let task = parse_task("finish taxes due dec 25");
+    let deadline = task.deadline.expect("deadline should be set");
+    let local = deadline.with_timezone(&Local);
+    assert_eq!((local.month(), local.day()), (12, 25));
+    assert_eq!(local.time(), NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+    assert_eq!(task.title, "finish taxes");
+}
+
+#[test]
+fn deadline_by_numeric_date_with_year_sets_end_of_day() {
+    let task = parse_task("submit report due 12/25/2026");
+    let deadline = task.deadline.expect("deadline should be set");
+    let local = deadline.with_timezone(&Local);
+    assert_eq!((local.year(), local.month(), local.day()), (2026, 12, 25));
+    assert_eq!(local.time(), NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+    assert_eq!(task.title, "submit report");
+}
+
+#[test]
+fn extract_deadline_only_finds_a_trigger_worded_deadline_in_prose() {
+    let text = "Hey team,\n\nJust a heads up this needs to be finished by next friday.\n\nThanks.";
+    let deadline = extract_deadline_only(text).expect("should find a deadline");
+    assert_eq!(deadline.with_timezone(&Local).weekday(), chrono::Weekday::Fri);
+}
+
+#[test]
+fn extract_deadline_only_ignores_a_bare_date_with_no_trigger_word() {
+    // "next friday" alone (no by/due/before) is a bare `Date`, not a `Deadline` -
+    // exactly the false-positive shape a footer/signature date would take.
+    let text = "Quick sync next friday to go over the notes.";
+    assert!(extract_deadline_only(text).is_none());
+}
+
+#[test]
 fn deadline_by_weekday_sets_end_of_day() {
     let task = parse_task("finish slides by friday");
     let deadline = task.deadline.expect("deadline should be set");

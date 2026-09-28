@@ -679,7 +679,7 @@ async fn delete_selected_tasks_without_a_selection_deletes_only_the_cursor_row()
 #[tokio::test]
 async fn submit_task_inserts_only_when_the_parse_lands() {
     let (mut app, pool) = app_with_tasks(&[]).await;
-    app.submit_task("buy milk".to_string(), None, None);
+    app.submit_task("buy milk".to_string(), None, None, None);
     assert!(app.tasks.is_empty(), "submit_task must not insert inline");
 
     let parsed = app.task_rx.recv().await.expect("background parse result");
@@ -705,8 +705,8 @@ async fn converting_an_email_twice_before_the_parse_lands_makes_one_task() {
     let mut app = App::new(pool.clone()).await;
     app.refresh_emails().await.expect("load emails");
 
-    app.convert_selected_email_to_task();
-    app.convert_selected_email_to_task();
+    app.convert_selected_email_to_task().await;
+    app.convert_selected_email_to_task().await;
     for _ in 0..2 {
         let parsed = app.task_rx.recv().await.expect("background parse result");
         app.apply_task_parse(parsed).await.expect("apply parse");
@@ -728,7 +728,7 @@ async fn converting_an_email_extracts_a_deadline_from_the_body_but_keeps_the_sub
     let mut app = App::new(pool.clone()).await;
     app.refresh_emails().await.expect("load emails");
 
-    app.convert_selected_email_to_task();
+    app.convert_selected_email_to_task().await;
     let parsed = app.task_rx.recv().await.expect("background parse result");
     app.apply_task_parse(parsed).await.expect("apply parse");
 
@@ -736,6 +736,52 @@ async fn converting_an_email_extracts_a_deadline_from_the_body_but_keeps_the_sub
     assert!(
         app.tasks[0].deadline.is_some(),
         "the body's date phrase should still set a deadline"
+    );
+}
+
+#[tokio::test]
+async fn converting_an_email_finds_a_deadline_deep_in_the_body_when_the_snippet_has_none() {
+    let pool = test_pool().await;
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, body_text, date_utc) VALUES (1, 'm1', 'a@b.c', 'quarterly report', 'Hey team,\n\nJust a heads up this needs to be finished by next friday.\n\nThanks.', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert email");
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.convert_selected_email_to_task().await;
+    let parsed = app.task_rx.recv().await.expect("background parse result");
+    app.apply_task_parse(parsed).await.expect("apply parse");
+
+    assert_eq!(descriptions(&app), ["quarterly report"]);
+    assert!(
+        app.tasks[0].deadline.is_some(),
+        "a deadline stated only in the full body (past the snippet) should still be found"
+    );
+}
+
+#[tokio::test]
+async fn converting_an_email_ignores_a_deadline_phrase_inside_a_quoted_reply() {
+    let pool = test_pool().await;
+    sqlx::query(
+        "INSERT INTO email_messages (uid, message_id, from_addr, subject, body_text, date_utc) VALUES (1, 'm1', 'a@b.c', 'quick question', 'Hey, just checking in on this - no urgency from me.\n\nOn Mon, Jan 5, 2026 at 3:00 PM Jane Doe <jane@example.com> wrote:\n> Please respond due tomorrow at the latest.\n> Thanks!', '2026-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert email");
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+
+    app.convert_selected_email_to_task().await;
+    let parsed = app.task_rx.recv().await.expect("background parse result");
+    app.apply_task_parse(parsed).await.expect("apply parse");
+
+    assert_eq!(descriptions(&app), ["quick question"]);
+    assert!(
+        app.tasks[0].deadline.is_none(),
+        "a deadline phrase inside a quoted-reply chain must not leak into the task"
     );
 }
 

@@ -330,3 +330,58 @@ pub fn clean_snippet(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// How much of a cleaned body `nlp::rules::extract_deadline_only` bothers scanning; matches
+/// `App`'s `SUMMARY_INPUT_CHARS` cap for the same reason (a real deadline phrase is always near
+/// the top of a message, never worth paying to scan megabytes of quoted history for).
+const DEADLINE_SCAN_CHARS: usize = 4000;
+
+/// Prepares an email body for a narrow deadline scan (see `nlp::rules::extract_deadline_only`).
+///
+/// Stops at the first quoted-reply chain, forwarded-message header or RFC 3676 `--` signature
+/// delimiter, and drops any line that looks like a legal/marketing footer. A bare "due"/"by" phrase
+/// surviving in a quoted older message or a footer is far likelier to be boilerplate than the
+/// sender's real deadline, so this runs before any date extraction rather than after.
+#[must_use]
+pub fn clean_body_for_deadline_scan(body: &str) -> String {
+    let mut kept = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed == "--" || is_quote_boundary(trimmed) || is_forward_header(trimmed) {
+            break;
+        }
+        if is_boilerplate_line(trimmed) {
+            break;
+        }
+        if !trimmed.starts_with('>') {
+            kept.push(line);
+        }
+    }
+    kept.join("\n").chars().take(DEADLINE_SCAN_CHARS).collect()
+}
+
+/// "On Mon, Jan 1, 2026 at 3:00 PM Jane Doe <jane@example.com> wrote:" (Gmail/Apple/Thunderbird)
+/// or an Outlook-style "-----Original Message-----" separator.
+fn is_quote_boundary(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    (lower.starts_with("on ") && lower.ends_with("wrote:")) || line.starts_with("-----Original Message-----")
+}
+
+/// The first line or two of an Outlook-style forwarded-message header block.
+fn is_forward_header(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("from:") || lower.starts_with("sent:") || lower.starts_with("forwarded message")
+}
+
+fn is_boilerplate_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    [
+        "unsubscribe",
+        "privacy policy",
+        "terms of service",
+        "all rights reserved",
+        "view this email in your browser",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
+}

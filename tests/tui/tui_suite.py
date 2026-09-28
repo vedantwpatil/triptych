@@ -1344,6 +1344,44 @@ def _(c: Ctx):
     c.check(t.has("[DUE"), "deadline from the body snippet not applied")
 
 
+@scenario("email_convert_body_deep_due")
+def _(c: Ctx):
+    """Neither subject nor snippet has a date; only text further down `body_text` does. Full-body
+    fallback extraction should still find it."""
+    c.seed_emails(
+        1,
+        subject="quarterly report",
+        snippet="hey team",
+        body_text="Hey team,\n\nJust a heads up this needs to be finished by next friday.\n\nThanks.",
+    )
+    t = c.tui()
+    t.press("m", "ENTER")
+    c.see("Email converted to task")
+    c.eq(c.descs(), ["quarterly report"], "title must stay the subject, not body prose")
+    t.press("m")
+    c.check(t.has("[DUE"), "deadline stated only deep in the body not applied")
+
+
+@scenario("email_convert_quote_skip")
+def _(c: Ctx):
+    """A deadline-shaped phrase inside a quoted-reply chain must not become the task's deadline -
+    it is almost certainly the other person's older message, not the sender's own ask."""
+    c.seed_emails(
+        1,
+        subject="quick question",
+        snippet="just checking in",
+        body_text="Hey, just checking in on this - no urgency from me.\n\n"
+        "On Mon, Jan 5, 2026 at 3:00 PM Jane Doe <jane@example.com> wrote:\n"
+        "> Please respond due tomorrow at the latest.\n> Thanks!",
+    )
+    t = c.tui()
+    t.press("m", "ENTER")
+    c.see("Email converted to task")
+    c.eq(c.descs(), ["quick question"], "title must stay the subject")
+    t.press("m")
+    c.check(not t.has("[DUE"), "deadline leaked from inside a quoted reply")
+
+
 @scenario("email_cli")
 def _(c: Ctx):
     c.check("No emails yet" in c.cli("email", "list").out, "empty list message")
