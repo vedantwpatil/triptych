@@ -23,11 +23,13 @@ A fast, keyboard-driven productivity TUI built in Rust. Manage tasks and schedul
 - 3-layer NLP parsing: cache → regex → local LLM (Ollama)
 - Zero input lag in TUI (<1ms response time)
 
+Full guides: [`docs/SETUP.md`](./docs/SETUP.md) (install and configuration) and [`docs/USAGE.md`](./docs/USAGE.md) (every feature and key).
+
 ## Installation
 
 **Prerequisites**
 
-- Rust 1.70+
+- Rust (2024 edition)
 - Ollama with Qwen2.5-7B model
 - SQLite 3.35+
 
@@ -77,6 +79,9 @@ triptych list
 triptych done 42
 triptych rm 42
 triptych clear
+
+# Canvas assignments (set CANVAS_ICS_URL to your Canvas calendar feed; also polled every 15 min in the TUI)
+triptych canvas sync
 
 # Schedule management
 triptych schedule show
@@ -163,7 +168,6 @@ The goal is to bring Superhuman-like email productivity to the terminal, fully i
 - CalDAV calendar sync
 - Recurring tasks
 - Full-text search
-- Desktop notifications
 - Task dependencies
 - Statistics dashboard
 

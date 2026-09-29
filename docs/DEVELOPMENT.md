@@ -21,6 +21,20 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-29 (alerts, canvas titles): desktop deadline alerts (`src/notify.rs`, `sync/notify.rs`; new
+  `tasks.notified_tier`, reset when a deadline moves). Canvas titles become `CS-472: Quiz 3`
+  (`canvas::tidy_title`; old untouched titles are rewritten on re-poll). Todo ties sort by soonest
+  deadline. New `docs/SETUP.md` and `docs/USAGE.md`. The suite sets `TRIPTYCH_NOTIFY_CMD=true` so no real
+  alerts fire; scenario `notify_deadline_alert` overrides it with a logger.
+- 2026-09-29 (todo order): completed tasks sort below open ones, and toggling completion keeps the
+  cursor on the same task (`toggle_completed` uses `reload_tasks_keep_selection`).
+- 2026-09-29 (canvas): Canvas assignment sync. `src/canvas.rs` parses the per-user iCal feed
+  (`CANVAS_ICS_URL`) and upserts VEVENTs as tasks keyed on new `tasks.external_id` (unique partial
+  index, added in `src/migrations.rs`). `sync/canvas.rs` polls every 15 min inside the TUI;
+  `triptych canvas sync` runs it once. TUI list now refreshes on the 2s tick. Tests: `tests/it/canvas.rs`,
+  two in `tests/it/cli.rs`, scenario `canvas_feed_syncs_into_todo`. Limits: assignments removed from
+  the feed are not deleted; a re-poll updates only `deadline` of open tasks; imported tasks are not
+  auto-allocated until `schedule reallocate`; all-day dates become 23:59 local.
 - 2026-09-29 (roadmap): recorded that Canvas assignment sync is not built (design in `future-features.md`)
   and that integrating the todo list into the calendar is planned but low priority.
 - 2026-09-29 (verification): `todo_add_cold_model` fails under `-j 4` on the pre-change commit too (3 of 3 runs),
