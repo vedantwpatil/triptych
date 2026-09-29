@@ -5,12 +5,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
-use super::{App, ComposeField, ComposeState, InputMode, ViewMode};
 use super::time::resolve_local_datetime;
+use super::{App, ComposeField, ComposeState, InputMode, ViewMode};
 use crate::email::{
-    EmailConfig, EmailMessage, EmailRule, EmailSort, ImapMailSource, MailSource, SmtpConfig, drafts,
-    message, priority, smtp,
-    store as email_store,
+    EmailConfig, EmailMessage, EmailRule, EmailSort, ImapMailSource, MailSource, SmtpConfig,
+    drafts, message, priority, smtp, store as email_store,
     sync::{sync_account, sync_one_folder},
 };
 
@@ -243,13 +242,16 @@ impl App {
             self.emails.retain(|e| e.is_starred == starred);
         }
         if let Some(domain) = &self.domain_filter {
-            self.emails.retain(|e| e.from_addr.rsplit('@').next() == Some(domain.as_str()));
+            self.emails
+                .retain(|e| e.from_addr.rsplit('@').next() == Some(domain.as_str()));
         }
         let now = Utc::now();
         if self.show_snoozed {
-            self.emails.retain(|e| e.snoozed_until.is_some_and(|t| t > now));
+            self.emails
+                .retain(|e| e.snoozed_until.is_some_and(|t| t > now));
         } else {
-            self.emails.retain(|e| e.snoozed_until.is_none_or(|t| t <= now));
+            self.emails
+                .retain(|e| e.snoozed_until.is_none_or(|t| t <= now));
         }
         if self.email_sort == EmailSort::Priority {
             // Stable, so the newest-first order from `get_recent` breaks ties.
@@ -285,7 +287,10 @@ impl App {
         self.account_filter = self.account_filter.as_ref().map_or_else(
             || Some(accounts[0].clone()),
             |current| {
-                let next = accounts.iter().position(|a| a == current).map_or(0, |i| i + 1);
+                let next = accounts
+                    .iter()
+                    .position(|a| a == current)
+                    .map_or(0, |i| i + 1);
                 accounts.get(next).cloned()
             },
         );
@@ -310,7 +315,10 @@ impl App {
         self.folder_filter = self.folder_filter.as_ref().map_or_else(
             || Some(folders[0].clone()),
             |current| {
-                let next = folders.iter().position(|f| f == current).map_or(0, |i| i + 1);
+                let next = folders
+                    .iter()
+                    .position(|f| f == current)
+                    .map_or(0, |i| i + 1);
                 folders.get(next).cloned()
             },
         );
@@ -407,7 +415,10 @@ impl App {
         self.domain_filter = self.domain_filter.as_ref().map_or_else(
             || Some(domains[0].clone()),
             |current| {
-                let next = domains.iter().position(|d| d == current).map_or(0, |i| i + 1);
+                let next = domains
+                    .iter()
+                    .position(|d| d == current)
+                    .map_or(0, |i| i + 1);
                 domains.get(next).cloned()
             },
         );
@@ -435,7 +446,9 @@ impl App {
                 let account = config.account.clone();
                 match ImapMailSource::new(config).list_folders().await {
                     Ok(folders) => {
-                        result.folders.extend(folders.into_iter().map(|f| (account.clone(), f)));
+                        result
+                            .folders
+                            .extend(folders.into_iter().map(|f| (account.clone(), f)));
                     }
                     Err(e) => {
                         tracing::warn!("[Mail] folder list failed for '{account}': {e}");
@@ -467,8 +480,10 @@ impl App {
     /// one-folder sync (`sync_one_folder`) so its mail actually loads instead of just narrowing
     /// the filter over whatever happened to sync before.
     pub fn browse_to_selected_folder(&mut self) {
-        let Some((account, folder)) =
-            self.discovered_folders.get(self.selected_discovered_folder).cloned()
+        let Some((account, folder)) = self
+            .discovered_folders
+            .get(self.selected_discovered_folder)
+            .cloned()
         else {
             return;
         };
@@ -705,7 +720,8 @@ impl App {
             return;
         }
         if let Ok(Some(cached)) = email_store::get_summary(&self.db_pool, email_id).await {
-            self.email_summaries.insert(email_id, Summary::Ready(cached));
+            self.email_summaries
+                .insert(email_id, Summary::Ready(cached));
             return;
         }
         let Some(email) = self.emails.iter().find(|e| e.id == email_id) else {
@@ -740,7 +756,8 @@ impl App {
     pub async fn apply_summary(&mut self, done: SummaryDone) {
         let state = match done.result {
             Ok(text) => {
-                if let Err(e) = email_store::set_summary(&self.db_pool, done.email_id, &text).await {
+                if let Err(e) = email_store::set_summary(&self.db_pool, done.email_id, &text).await
+                {
                     tracing::warn!("[Email] could not cache a summary: {e}");
                 }
                 Summary::Ready(text)
@@ -762,17 +779,24 @@ impl App {
         }
         self.triage_running = true;
 
-        let (db_pool, parser, tx) =
-            (self.db_pool.clone(), Arc::clone(&self.nlp_parser), self.triage_tx.clone());
+        let (db_pool, parser, tx) = (
+            self.db_pool.clone(),
+            Arc::clone(&self.nlp_parser),
+            self.triage_tx.clone(),
+        );
         tokio::spawn(async move {
             let mut done = TriageDone::default();
-            let pending =
-                email_store::pending_triage(&db_pool, TRIAGE_BATCH_LIMIT).await.unwrap_or_default();
+            let pending = email_store::pending_triage(&db_pool, TRIAGE_BATCH_LIMIT)
+                .await
+                .unwrap_or_default();
             for email in pending {
                 let snippet = email.snippet.as_deref().unwrap_or("");
                 match parser.triage(&email.subject, snippet).await {
                     Ok(focused) => {
-                        if email_store::set_triage(&db_pool, email.id, focused).await.is_ok() {
+                        if email_store::set_triage(&db_pool, email.id, focused)
+                            .await
+                            .is_ok()
+                        {
                             done.results.push((email.id, focused));
                         }
                     }
@@ -830,9 +854,10 @@ impl App {
         }
         let (email_id, subject) = (email.id, email.subject.clone());
         let snippet = email.snippet.clone().filter(|s| !s.is_empty());
-        let description = snippet
-            .as_deref()
-            .map_or_else(|| subject.clone(), |snippet| format!("{subject}. {snippet}"));
+        let description = snippet.as_deref().map_or_else(
+            || subject.clone(),
+            |snippet| format!("{subject}. {snippet}"),
+        );
         let title_override = snippet.is_some().then(|| subject.clone());
 
         let body_deadline = email_store::get_body(&self.db_pool, email_id)
@@ -1071,8 +1096,11 @@ impl App {
         }
 
         let draft_id = compose.draft_id;
-        let body =
-            compose_full_body(&compose.body, compose.signature.as_deref(), compose.quoted.as_deref());
+        let body = compose_full_body(
+            &compose.body,
+            compose.signature.as_deref(),
+            compose.quoted.as_deref(),
+        );
         let message = smtp::OutgoingMessage {
             to: compose.to,
             cc: compose.cc,
@@ -1085,7 +1113,9 @@ impl App {
         self.notify("Sending...");
         let tx = self.send_tx.clone();
         tokio::spawn(async move {
-            let result = smtp::send(&smtp_config, &message).await.map_err(|e| e.to_string());
+            let result = smtp::send(&smtp_config, &message)
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(SendResult { result, draft_id });
         });
     }
@@ -1270,7 +1300,9 @@ impl App {
     /// `delete` (Slice 21) are spawned by `apply_rule_action` itself and only reported back later
     /// over `archive_tx`/`delete_tx`, same as their manual (`a`/`d`) counterparts.
     pub async fn run_email_rules(&mut self) {
-        let rules = email_store::list_rules(&self.db_pool).await.unwrap_or_default();
+        let rules = email_store::list_rules(&self.db_pool)
+            .await
+            .unwrap_or_default();
         if rules.is_empty() {
             return;
         }
@@ -1278,7 +1310,10 @@ impl App {
             .await
             .unwrap_or_default();
         for email in pending {
-            for rule in rules.iter().filter(|r| match_rule(r, &email.subject, &email.from_addr)) {
+            for rule in rules
+                .iter()
+                .filter(|r| match_rule(r, &email.subject, &email.from_addr))
+            {
                 self.apply_rule_action(&email, &rule.action).await;
             }
             if let Err(e) = email_store::mark_rule_checked(&self.db_pool, email.id).await {
@@ -1299,14 +1334,18 @@ impl App {
     async fn apply_rule_action(&mut self, email: &EmailMessage, action: &str) {
         match action {
             "star" => {
-                if email_store::set_starred(&self.db_pool, email.id, true).await.is_ok()
+                if email_store::set_starred(&self.db_pool, email.id, true)
+                    .await
+                    .is_ok()
                     && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
                 {
                     e.is_starred = true;
                 }
             }
             "read" => {
-                if email_store::mark_read(&self.db_pool, email.id).await.is_ok()
+                if email_store::mark_read(&self.db_pool, email.id)
+                    .await
+                    .is_ok()
                     && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
                 {
                     e.is_read = true;
@@ -1501,7 +1540,10 @@ async fn save_attachments_to(
     dir: &std::path::Path,
 ) -> Result<(usize, String), String> {
     let source = ImapMailSource::new(config.clone());
-    let attachments = source.fetch_attachments(folder, uid).await.map_err(|e| e.to_string())?;
+    let attachments = source
+        .fetch_attachments(folder, uid)
+        .await
+        .map_err(|e| e.to_string())?;
     if attachments.is_empty() {
         return Ok((0, dir.display().to_string()));
     }
@@ -1519,7 +1561,10 @@ async fn save_attachments_to(
 
 #[must_use]
 pub fn reply_subject(subject: &str) -> String {
-    if subject.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("re:")) {
+    if subject
+        .get(..3)
+        .is_some_and(|s| s.eq_ignore_ascii_case("re:"))
+    {
         subject.to_string()
     } else {
         format!("Re: {subject}")
@@ -1528,7 +1573,10 @@ pub fn reply_subject(subject: &str) -> String {
 
 #[must_use]
 pub fn forward_subject(subject: &str) -> String {
-    if subject.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("fwd:")) {
+    if subject
+        .get(..4)
+        .is_some_and(|s| s.eq_ignore_ascii_case("fwd:"))
+    {
         subject.to_string()
     } else {
         format!("Fwd: {subject}")
@@ -1545,8 +1593,12 @@ pub const CATEGORY_ORDER: [&str; 6] = ["red", "orange", "yellow", "green", "blue
 /// The next category after `current` in [`CATEGORY_ORDER`], wrapping back to `None` after the last.
 #[must_use]
 pub fn next_category(current: Option<&str>) -> Option<String> {
-    let next = current
-        .map_or(0, |c| CATEGORY_ORDER.iter().position(|&x| x == c).map_or(0, |i| i + 1));
+    let next = current.map_or(0, |c| {
+        CATEGORY_ORDER
+            .iter()
+            .position(|&x| x == c)
+            .map_or(0, |i| i + 1)
+    });
     CATEGORY_ORDER.get(next).map(|&s| s.to_string())
 }
 
@@ -1603,7 +1655,9 @@ pub fn merge_reply_all_cc(email: &EmailMessage, to: &str, own_addr: &str) -> Str
     if let Some(orig_to) = &email.to_addrs {
         addrs.extend(orig_to.split(',').map(str::trim).map(str::to_string));
     }
-    addrs.retain(|a| !a.is_empty() && !a.eq_ignore_ascii_case(to) && !a.eq_ignore_ascii_case(own_addr));
+    addrs.retain(|a| {
+        !a.is_empty() && !a.eq_ignore_ascii_case(to) && !a.eq_ignore_ascii_case(own_addr)
+    });
     addrs.sort();
     addrs.dedup();
     addrs.join(", ")
@@ -1746,8 +1800,14 @@ fn snooze_to_local_morning(days_ahead: i64) -> Option<DateTime<Utc>> {
 /// (see `parse_rule_spec`).
 #[must_use]
 pub fn match_rule(rule: &EmailRule, subject: &str, from_addr: &str) -> bool {
-    let haystack = if rule.match_field == "from_addr" { from_addr } else { subject };
-    haystack.to_lowercase().contains(&rule.pattern.to_lowercase())
+    let haystack = if rule.match_field == "from_addr" {
+        from_addr
+    } else {
+        subject
+    };
+    haystack
+        .to_lowercase()
+        .contains(&rule.pattern.to_lowercase())
 }
 
 /// Parses a rule spec typed in the rules popup's `n` prompt: `<field> <pattern...> <action>`.
@@ -1781,5 +1841,9 @@ pub fn parse_rule_spec(spec: &str) -> Option<(String, String, String)> {
         _ => return None,
     };
 
-    Some((match_field.to_string(), pattern.to_string(), action.to_string()))
+    Some((
+        match_field.to_string(),
+        pattern.to_string(),
+        action.to_string(),
+    ))
 }

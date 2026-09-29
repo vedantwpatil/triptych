@@ -25,8 +25,5 @@ fn parse_recipients_strips_display_names() {
 #[test]
 fn parse_recipients_merges_to_and_cc() {
     let got = parse_recipients("a@example.com", "b@example.com; c@example.com");
-    assert_eq!(
-        got,
-        vec!["a@example.com", "b@example.com", "c@example.com"]
-    );
+    assert_eq!(got, vec!["a@example.com", "b@example.com", "c@example.com"]);
 }

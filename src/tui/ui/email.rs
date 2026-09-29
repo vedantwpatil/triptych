@@ -29,7 +29,9 @@ fn category_color(name: &str) -> Color {
 /// Title-cases a category name (`"red"` -> `"Red"`) for the detail popup's "Category: " line.
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
-    chars.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + chars.as_str())
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + chars.as_str()
+    })
 }
 
 /// One row of the email list: account/date/sender, `[folder]` tag when not `INBOX` (Slice 13),
@@ -62,7 +64,10 @@ fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListIte
     // Focused is the common case once triage catches up; only tag the "Other" bulk mail so the
     // merged view stays clean, same reasoning as the folder tag above.
     if email.triage_focused == Some(false) {
-        spans.push(Span::styled("[other] ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "[other] ",
+            Style::default().fg(Color::DarkGray),
+        ));
     }
 
     let subject_style = if email.is_read {
@@ -237,10 +242,21 @@ fn render_drafts_popup(f: &mut Frame, app: &App) {
                 .with_timezone(&chrono::Local)
                 .format("%m/%d %H:%M")
                 .to_string();
-            let subject = if draft.subject.is_empty() { "(no subject)" } else { &draft.subject };
-            let to = if draft.to_addrs.is_empty() { "(no recipient)" } else { &draft.to_addrs };
+            let subject = if draft.subject.is_empty() {
+                "(no subject)"
+            } else {
+                &draft.subject
+            };
+            let to = if draft.to_addrs.is_empty() {
+                "(no recipient)"
+            } else {
+                &draft.to_addrs
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("({}) ", draft.account), Style::default().fg(Color::Magenta)),
+                Span::styled(
+                    format!("({}) ", draft.account),
+                    Style::default().fg(Color::Magenta),
+                ),
                 Span::styled(format!("[{updated}] "), Style::default().fg(Color::Green)),
                 Span::styled(format!("{to:20} "), Style::default().fg(Color::Cyan)),
                 Span::raw(subject.to_string()),
@@ -252,7 +268,11 @@ fn render_drafts_popup(f: &mut Frame, app: &App) {
         List::new(vec![ListItem::new("(no saved drafts)")])
     } else {
         List::new(items)
-            .highlight_style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("> ")
     };
     let list = list.block(
@@ -290,7 +310,11 @@ fn render_folder_browser_popup(f: &mut Frame, app: &App) {
         List::new(vec![ListItem::new("(no folders found)")])
     } else {
         List::new(items)
-            .highlight_style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("> ")
     };
     let list = list.block(
@@ -317,9 +341,18 @@ fn render_rules_popup(f: &mut Frame, app: &App) {
         .iter()
         .map(|rule| {
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{:10} ", rule.match_field), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{:20} ", rule.pattern), Style::default().fg(Color::White)),
-                Span::styled(format!("-> {}", rule.action), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:10} ", rule.match_field),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("{:20} ", rule.pattern),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("-> {}", rule.action),
+                    Style::default().fg(Color::Yellow),
+                ),
             ]))
         })
         .collect();
@@ -328,7 +361,11 @@ fn render_rules_popup(f: &mut Frame, app: &App) {
         List::new(vec![ListItem::new("(no saved rules)")])
     } else {
         List::new(items)
-            .highlight_style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("> ")
     };
     let list = list.block(
@@ -352,11 +389,16 @@ fn push_meeting_invite_lines<'a>(text: &mut Vec<Line<'a>>, email: &'a EmailMessa
         return;
     };
     let when = email.meeting_start.map_or_else(String::new, |start| {
-        start.with_timezone(&chrono::Local).format(" — %a %b %d, %l:%M %P").to_string()
+        start
+            .with_timezone(&chrono::Local)
+            .format(" — %a %b %d, %l:%M %P")
+            .to_string()
     });
     text.push(Line::from(Span::styled(
         format!("Meeting: {title}{when}"),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     )));
     if let Some(location) = &email.meeting_location {
         text.push(Line::from(vec![
@@ -407,7 +449,10 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
     if let Some(category) = &email.category {
         text.push(Line::from(vec![
             Span::styled("Category: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(capitalize(category), Style::default().fg(category_color(category))),
+            Span::styled(
+                capitalize(category),
+                Style::default().fg(category_color(category)),
+            ),
         ]));
     }
     let thread_size = thread_count(&app.emails, email.id);
@@ -427,7 +472,10 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             .collect::<Vec<_>>()
             .join(", ");
         text.push(Line::from(vec![
-            Span::styled("Attachments: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Attachments: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(names),
         ]));
     }
@@ -439,7 +487,10 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
     };
     if let Some((label, detail, colour)) = summary {
         text.push(Line::from(vec![
-            Span::styled(label, Style::default().fg(colour).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                label,
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(detail, Style::default().fg(colour)),
         ]));
     }
@@ -496,8 +547,20 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         )
         .split(area);
 
-    render_compose_field(f, chunks[0], "To", &compose.to, compose.active_field == ComposeField::To);
-    render_compose_field(f, chunks[1], "Cc", &compose.cc, compose.active_field == ComposeField::Cc);
+    render_compose_field(
+        f,
+        chunks[0],
+        "To",
+        &compose.to,
+        compose.active_field == ComposeField::To,
+    );
+    render_compose_field(
+        f,
+        chunks[1],
+        "Cc",
+        &compose.cc,
+        compose.active_field == ComposeField::Cc,
+    );
     render_compose_field(
         f,
         chunks[2],
@@ -506,8 +569,11 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         compose.active_field == ComposeField::Subject,
     );
 
-    let body_text =
-        compose_full_body(&compose.body, compose.signature.as_deref(), compose.quoted.as_deref());
+    let body_text = compose_full_body(
+        &compose.body,
+        compose.signature.as_deref(),
+        compose.quoted.as_deref(),
+    );
     let body_active = compose.active_field == ComposeField::Body;
     let body_style = if body_active {
         Style::default().fg(Color::Yellow)
@@ -538,9 +604,11 @@ fn render_compose_field(f: &mut Frame, area: Rect, label: &str, value: &str, act
     } else {
         Style::default()
     };
-    let field = Paragraph::new(value)
-        .style(style)
-        .block(Block::default().borders(Borders::ALL).title(label.to_string()));
+    let field = Paragraph::new(value).style(style).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(label.to_string()),
+    );
     f.render_widget(field, area);
     if active {
         f.set_cursor_position(ratatui::layout::Position {

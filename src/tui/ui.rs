@@ -75,7 +75,8 @@ fn render_snooze_box(f: &mut Frame, spec: &str, area: Rect) {
 /// The rule-spec prompt shown under the rules popup while `n` is being typed
 /// (`InputMode::EmailRuleInput`); see `App::parse_rule_spec`.
 fn render_rule_input_box(f: &mut Frame, spec: &str, area: Rect) {
-    let title = "New rule: field pattern action, e.g. subject newsletter star (Enter: save, Esc: cancel)";
+    let title =
+        "New rule: field pattern action, e.g. subject newsletter star (Enter: save, Esc: cancel)";
     let input = Paragraph::new(spec.to_string())
         .style(Style::default().fg(Color::Yellow))
         .block(Block::default().borders(Borders::ALL).title(title));

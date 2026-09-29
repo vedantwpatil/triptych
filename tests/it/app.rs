@@ -843,10 +843,16 @@ async fn emails_list_by_priority_then_date_and_the_toggle_restores_date_order() 
     let mut app = App::new(pool).await;
 
     app.refresh_emails().await.expect("load emails");
-    assert_eq!(subjects(&app), ["urgent: server", "assignment 2", "coffee", "lunch"]);
+    assert_eq!(
+        subjects(&app),
+        ["urgent: server", "assignment 2", "coffee", "lunch"]
+    );
 
     app.toggle_email_sort().await.expect("toggle");
-    assert_eq!(subjects(&app), ["coffee", "lunch", "assignment 2", "urgent: server"]);
+    assert_eq!(
+        subjects(&app),
+        ["coffee", "lunch", "assignment 2", "urgent: server"]
+    );
 }
 
 #[tokio::test]
@@ -927,7 +933,10 @@ async fn cycling_category_walks_the_fixed_palette_and_wraps_to_untagged() {
 
     for expected in triptych::app::CATEGORY_ORDER {
         app.cycle_selected_category().await.expect("cycle");
-        assert_eq!(app.emails[app.selected_email].category.as_deref(), Some(expected));
+        assert_eq!(
+            app.emails[app.selected_email].category.as_deref(),
+            Some(expected)
+        );
     }
 
     app.cycle_selected_category().await.expect("wrap");
@@ -1149,7 +1158,10 @@ async fn insert_email_for_from(pool: &SqlitePool, uid: i64, subject: &str, from_
 #[test]
 fn parse_snooze_spec_reads_minutes_hours_and_days() {
     let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
-    assert_eq!(parse_snooze_spec("10m", now), Some(now + Duration::minutes(10)));
+    assert_eq!(
+        parse_snooze_spec("10m", now),
+        Some(now + Duration::minutes(10))
+    );
     assert_eq!(parse_snooze_spec("2h", now), Some(now + Duration::hours(2)));
     assert_eq!(parse_snooze_spec("3d", now), Some(now + Duration::days(3)));
 }
@@ -1170,8 +1182,20 @@ fn parse_snooze_spec_keywords_land_at_eight_am_local() {
     let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
     let tomorrow = parse_snooze_spec("tomorrow", now).expect("parses");
     let next_week = parse_snooze_spec("nextweek", now).expect("parses");
-    assert_eq!(tomorrow.with_timezone(&chrono::Local).format("%H:%M").to_string(), "08:00");
-    assert_eq!(next_week.with_timezone(&chrono::Local).format("%H:%M").to_string(), "08:00");
+    assert_eq!(
+        tomorrow
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+        "08:00"
+    );
+    assert_eq!(
+        next_week
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+        "08:00"
+    );
     assert_eq!((next_week - tomorrow).num_days(), 6);
 }
 
@@ -1184,13 +1208,19 @@ async fn snoozing_an_email_hides_it_until_unsnoozed_or_it_lapses() {
 
     app.input_buffer = "1h".to_string();
     app.commit_snooze().await;
-    assert!(subjects(&app).is_empty(), "snoozed email still in normal view");
+    assert!(
+        subjects(&app).is_empty(),
+        "snoozed email still in normal view"
+    );
 
     app.toggle_show_snoozed().await.expect("toggle");
     assert_eq!(subjects(&app), ["notes"]);
 
     app.unsnooze_selected_email().await.expect("unsnooze");
-    assert!(subjects(&app).is_empty(), "unsnoozed email still in snoozed view");
+    assert!(
+        subjects(&app).is_empty(),
+        "unsnoozed email still in snoozed view"
+    );
 
     app.toggle_show_snoozed().await.expect("toggle back");
     assert_eq!(subjects(&app), ["notes"]);
@@ -1352,10 +1382,12 @@ async fn email_search_matches_body_text_via_db_query() {
     let pool = test_pool().await;
     insert_email(&pool, 1, "no match here", "2026-01-01T00:00:00Z").await;
     insert_email(&pool, 2, "also no match", "2026-01-02T00:00:00Z").await;
-    sqlx::query("UPDATE email_messages SET body_text = 'the quarterly forecast is attached' WHERE uid = 2")
-        .execute(&pool)
-        .await
-        .expect("set body");
+    sqlx::query(
+        "UPDATE email_messages SET body_text = 'the quarterly forecast is attached' WHERE uid = 2",
+    )
+    .execute(&pool)
+    .await
+    .expect("set body");
     let mut app = App::new(pool).await;
     app.email_sort = triptych::email::EmailSort::Date;
     app.refresh_emails().await.expect("load emails");
@@ -1375,7 +1407,10 @@ async fn calendar_motions_move_the_cursor_and_clamp_to_the_grid() {
     app.stack_index = 1;
 
     app.calendar_apply_motion(Motion::Down, Some(5));
-    assert_eq!((app.selected_time_slot, app.selected_day, app.stack_index), (7, 3, 0));
+    assert_eq!(
+        (app.selected_time_slot, app.selected_day, app.stack_index),
+        (7, 3, 0)
+    );
 
     app.calendar_apply_motion(Motion::Bottom, None);
     assert_eq!(app.selected_time_slot, 15);
@@ -1419,7 +1454,10 @@ async fn compose_newline_only_inserts_into_the_body_field() {
         app.compose_next_field();
     }
     assert_eq!(
-        app.email_compose.as_ref().expect("compose open").active_field,
+        app.email_compose
+            .as_ref()
+            .expect("compose open")
+            .active_field,
         ComposeField::Body
     );
     app.compose_newline();
@@ -1490,10 +1528,17 @@ async fn save_compose_as_draft_overwrites_the_row_it_was_resumed_from() {
 
     app.open_drafts_list().await;
     app.resume_selected_draft();
-    app.email_compose.as_mut().expect("compose reopened").subject = "second".to_string();
+    app.email_compose
+        .as_mut()
+        .expect("compose reopened")
+        .subject = "second".to_string();
     app.save_compose_as_draft().await;
 
-    assert_eq!(draft_count(&pool).await, 1, "resumed save should overwrite, not insert");
+    assert_eq!(
+        draft_count(&pool).await,
+        1,
+        "resumed save should overwrite, not insert"
+    );
     app.open_drafts_list().await;
     assert_eq!(app.drafts[0].subject, "second");
 }
@@ -1513,7 +1558,10 @@ async fn open_drafts_list_loads_saved_drafts_most_recent_first() {
 
     assert!(app.drafts_open);
     assert_eq!(app.drafts.len(), 2);
-    assert_eq!(app.drafts[0].subject, "two", "most recently saved comes first");
+    assert_eq!(
+        app.drafts[0].subject, "two",
+        "most recently saved comes first"
+    );
 }
 
 #[tokio::test]
@@ -1643,7 +1691,9 @@ async fn accept_meeting_invite_is_idempotent_once_already_converted() {
     app.refresh_emails().await.expect("load emails");
     app.accept_meeting_invite().await.expect("accept invite");
 
-    app.accept_meeting_invite().await.expect("second call no-ops");
+    app.accept_meeting_invite()
+        .await
+        .expect("second call no-ops");
 
     app.load_tasks().await.expect("load tasks");
     assert_eq!(app.tasks.len(), 1, "must not create a second task");
@@ -1699,7 +1749,12 @@ async fn run_email_rules_stars_only_the_matching_email() {
 
     app.run_email_rules().await;
 
-    let by_subject = |s: &str| app.emails.iter().find(|e| e.subject == s).expect("email present");
+    let by_subject = |s: &str| {
+        app.emails
+            .iter()
+            .find(|e| e.subject == s)
+            .expect("email present")
+    };
     assert!(by_subject("weekly newsletter").is_starred);
     assert!(!by_subject("team sync").is_starred);
     assert!(rule_applied(&pool, by_subject("weekly newsletter").id).await);
@@ -1746,8 +1801,17 @@ async fn run_email_rules_archive_and_delete_are_a_no_op_without_imap_config() {
 
     app.run_email_rules().await;
 
-    assert_eq!(app.emails.len(), 2, "no config to archive/delete against, both rows remain");
-    let by_subject = |s: &str| app.emails.iter().find(|e| e.subject == s).expect("email present");
+    assert_eq!(
+        app.emails.len(),
+        2,
+        "no config to archive/delete against, both rows remain"
+    );
+    let by_subject = |s: &str| {
+        app.emails
+            .iter()
+            .find(|e| e.subject == s)
+            .expect("email present")
+    };
     assert!(rule_applied(&pool, by_subject("please archive me").id).await);
     assert!(rule_applied(&pool, by_subject("please delete me").id).await);
 }
@@ -1769,4 +1833,52 @@ async fn delete_selected_rule_removes_it_and_clamps_selection() {
     assert_eq!(app.rules.len(), 1);
     assert_eq!(app.rules[0].pattern, "newsletter");
     assert_eq!(app.selected_rule, 0);
+}
+
+#[tokio::test]
+async fn load_tasks_orders_by_priority_then_item_order() {
+    let pool = test_pool().await;
+    for (desc, order, prio) in [
+        ("low", 0, 0),
+        ("urgent", 1, 3),
+        ("med a", 2, 1),
+        ("med b", 3, 1),
+    ] {
+        sqlx::query("INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, ?, ?)")
+            .bind(desc)
+            .bind(order)
+            .bind(prio)
+            .execute(&pool)
+            .await
+            .expect("insert");
+    }
+    let mut app = App::new(pool).await;
+    app.load_tasks().await.expect("load tasks");
+    let names: Vec<_> = app.tasks.iter().map(|t| t.description.as_str()).collect();
+    assert_eq!(names, ["urgent", "med a", "med b", "low"]);
+}
+
+#[tokio::test]
+async fn reword_task_updates_description_and_keeps_selection() {
+    let pool = test_pool().await;
+    for (desc, prio) in [("low", 0), ("high", 2)] {
+        sqlx::query(
+            "INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, 0, ?)",
+        )
+        .bind(desc)
+        .bind(prio)
+        .execute(&pool)
+        .await
+        .expect("insert");
+    }
+    let mut app = App::new(pool).await;
+    app.load_tasks().await.expect("load tasks");
+    app.selected = 1;
+    app.start_task_reword();
+    assert_eq!(app.input_buffer, "low");
+    let id = app.editing_task_id.expect("editing id");
+    app.input_buffer = "  reworded  ".to_string();
+    app.commit_task_reword(id).await.expect("reword");
+    assert_eq!(app.tasks[app.selected].description, "reworded");
+    assert_eq!(app.tasks[app.selected].priority, 0);
 }

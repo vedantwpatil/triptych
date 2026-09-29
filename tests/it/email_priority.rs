@@ -45,13 +45,19 @@ fn plain_mail_is_normal() {
 fn high_keywords_rank_high_case_insensitively_and_across_punctuation() {
     assert_eq!(level_of("URGENT: server down", "", "a@b.c"), Level::High);
     assert_eq!(level_of("Action-Required!", "", "a@b.c"), Level::High);
-    assert_eq!(level_of("hi", "your account expires soon", "a@b.c"), Level::High);
+    assert_eq!(
+        level_of("hi", "your account expires soon", "a@b.c"),
+        Level::High
+    );
 }
 
 #[test]
 fn medium_keywords_rank_medium() {
     assert_eq!(level_of("Assignment 3", "", "a@b.c"), Level::Medium);
-    assert_eq!(level_of("hi", "the invoice is attached", "a@b.c"), Level::Medium);
+    assert_eq!(
+        level_of("hi", "the invoice is attached", "a@b.c"),
+        Level::Medium
+    );
 }
 
 #[test]
@@ -62,9 +68,15 @@ fn keywords_match_whole_words_only() {
 
 #[test]
 fn bulk_mail_is_pushed_down() {
-    assert_eq!(level_of("Big sale, payment plans", "", "a@b.c"), Level::Normal);
+    assert_eq!(
+        level_of("Big sale, payment plans", "", "a@b.c"),
+        Level::Normal
+    );
     assert_eq!(level_of("Urgent", "", "noreply@shop.com"), Level::Medium);
-    assert_eq!(level_of("Urgent", "unsubscribe below", "no-reply@x.com"), Level::Normal);
+    assert_eq!(
+        level_of("Urgent", "unsubscribe below", "no-reply@x.com"),
+        Level::Normal
+    );
 }
 
 #[test]

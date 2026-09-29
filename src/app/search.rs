@@ -59,7 +59,9 @@ impl App {
             } else {
                 let e = &self.emails[i];
                 let from = e.from_name.as_deref().unwrap_or(&e.from_addr);
-                format!("{} {from}", e.subject).to_lowercase().contains(&needle)
+                format!("{} {from}", e.subject)
+                    .to_lowercase()
+                    .contains(&needle)
                     || body_hits.contains(&e.id)
             }
         });

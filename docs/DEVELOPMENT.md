@@ -21,6 +21,14 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-29 (todo reword): `e` in the todo list reopens the input prompt pre-filled with the selected
+  task; Enter saves it as the new description (no NLP re-parse, so date/priority/tags stay). Tests:
+  `reword_task_updates_description_and_keeps_selection`, TUI scenario `todo_reword`.
+- 2026-09-29 (formatting): added `rustfmt.toml` (edition 2024, width 100, stable options only) and ran
+  `cargo fmt` over the tree once; `cargo fmt --check` is now part of the pre-done checks.
+- 2026-09-29 (todo order): `App::load_tasks` now stable-sorts the list by `urgency::effective_priority`
+  (highest first, ties keep `item_order`), so date-raised tasks rise too. The DB `item_order` is
+  unchanged. `load_tasks_orders_by_priority_then_item_order`.
 - 2026-09-27 (next-weekday date bug): "math homework due next monday" said on a Sunday resolved to
   tomorrow instead of the Monday 8 days out. Root cause: `rules.rs`'s `parse_date_phrase` handed any
   `next <weekday>` match to `chrono_english::parse_date_string` with `Dialect::Us`, and that crate's

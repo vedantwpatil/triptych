@@ -390,9 +390,11 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
     // matched) — lets `App::run_email_rules` skip rows it already processed without re-running
     // every rule against the whole table each pass. See `App::run_email_rules`.
     if !column_exists(pool, "email_messages", "rule_applied").await? {
-        sqlx::query("ALTER TABLE email_messages ADD COLUMN rule_applied INTEGER NOT NULL DEFAULT 0")
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "ALTER TABLE email_messages ADD COLUMN rule_applied INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await?;
         tracing::info!("  ✓ Added rule_applied column to email_messages");
     }
 

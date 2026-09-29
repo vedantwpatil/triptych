@@ -37,7 +37,10 @@ fn debug_output_redacts_the_password() {
 
 #[test]
 fn normalize_signature_converts_escaped_newlines_to_real_ones() {
-    assert_eq!(normalize_signature("Best,\\nAlex"), Some("Best,\nAlex".to_string()));
+    assert_eq!(
+        normalize_signature("Best,\\nAlex"),
+        Some("Best,\nAlex".to_string())
+    );
 }
 
 #[test]

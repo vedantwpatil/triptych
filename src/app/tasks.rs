@@ -5,9 +5,12 @@ use std::sync::Arc;
 
 use super::{
     App,
-    model::{EnhancedTaskInfo, TASK_COLUMNS, Task},
+    model::{EnhancedTaskInfo, InputMode, TASK_COLUMNS, Task},
 };
-use crate::nlp::{ParsedItem, Priority};
+use crate::{
+    nlp::{ParsedItem, Priority},
+    urgency::effective_priority,
+};
 
 /// Outcome of a background task parse (see `App::submit_task`).
 #[derive(Debug)]
@@ -127,6 +130,10 @@ impl App {
         self.tasks = sqlx::query_as::<_, Task>(&query)
             .fetch_all(&self.db_pool)
             .await?;
+        // Stable sort: ties keep `item_order`. Completed tasks keep their own priority.
+        let now = Utc::now();
+        self.tasks
+            .sort_by_key(|t| std::cmp::Reverse(effective_priority(t, now)));
 
         if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len().saturating_sub(1);
@@ -394,6 +401,41 @@ impl App {
         self.load_tasks().await?;
         self.on_task_changed().await?;
         Ok(())
+    }
+
+    /// Opens the todo prompt pre-filled with the selected task's text, to reword it.
+    pub fn start_task_reword(&mut self) {
+        let Some(task) = self.tasks.get(self.selected) else {
+            return;
+        };
+        self.input_buffer.clone_from(&task.description);
+        self.editing_task_id = Some(task.id);
+        self.input_mode = InputMode::Editing;
+    }
+
+    /// Saves the prompt text as the task's new description (plain text, no NLP parse; date,
+    /// priority and tags stay as they were) and keeps the selection on that task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn commit_task_reword(&mut self, id: i64) -> Result<(), sqlx::Error> {
+        let description = self.input_buffer.trim().to_string();
+        if description.is_empty() {
+            return Ok(());
+        }
+        let category = classify_task(&description).to_string();
+        sqlx::query("UPDATE tasks SET description = ?, task_category = ? WHERE id = ?")
+            .bind(&description)
+            .bind(category)
+            .bind(id)
+            .execute(&self.db_pool)
+            .await?;
+        self.load_tasks().await?;
+        if let Some(pos) = self.tasks.iter().position(|t| t.id == id) {
+            self.selected = pos;
+        }
+        self.on_task_changed().await
     }
 
     /// Reloads the todo list and returns each task with its decoded tags.

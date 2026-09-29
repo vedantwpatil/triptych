@@ -210,7 +210,10 @@ pub async fn distinct_accounts(pool: &SqlitePool) -> Result<Vec<String>> {
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(|row| row.get::<String, _>("account")).collect())
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("account"))
+        .collect())
 }
 
 /// Every distinct folder name with at least one stored message, alphabetical — backs the
@@ -220,7 +223,10 @@ pub async fn distinct_folders(pool: &SqlitePool) -> Result<Vec<String>> {
         .fetch_all(pool)
         .await?;
 
-    Ok(rows.iter().map(|row| row.get::<String, _>("folder")).collect())
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("folder"))
+        .collect())
 }
 
 /// Every distinct sender-domain with at least one stored message, alphabetical — backs the
@@ -236,7 +242,10 @@ pub async fn distinct_domains(pool: &SqlitePool) -> Result<Vec<String>> {
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.iter().map(|row| row.get::<String, _>("domain")).collect())
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("domain"))
+        .collect())
 }
 
 /// The cached AI summary for one email, if one was generated.

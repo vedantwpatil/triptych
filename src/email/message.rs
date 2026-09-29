@@ -193,7 +193,10 @@ pub fn parse_raw(
     let (attachments, invite) = if header_only {
         (Vec::new(), None)
     } else {
-        (extract_attachments(&message), extract_meeting_invite(&message))
+        (
+            extract_attachments(&message),
+            extract_meeting_invite(&message),
+        )
     };
 
     Ok(NewEmail {
@@ -250,7 +253,10 @@ fn extract_meeting_invite(message: &mail_parser::Message<'_>) -> Option<MeetingI
     let ics_part = message.attachments().find(|part| {
         part.content_type().is_some_and(|ct| {
             ct.c_type.eq_ignore_ascii_case("text")
-                && ct.c_subtype.as_deref().is_some_and(|sub| sub.eq_ignore_ascii_case("calendar"))
+                && ct
+                    .c_subtype
+                    .as_deref()
+                    .is_some_and(|sub| sub.eq_ignore_ascii_case("calendar"))
         })
     })?;
     let text = match &ics_part.body {
@@ -264,7 +270,9 @@ fn extract_meeting_invite(message: &mail_parser::Message<'_>) -> Option<MeetingI
     let calendar = Calendar::from_str(&text).ok()?;
     let event = calendar.events().next()?;
     let start = date_perhaps_time_to_utc(&event.get_start()?)?;
-    let end = event.get_end().and_then(|dpt| date_perhaps_time_to_utc(&dpt));
+    let end = event
+        .get_end()
+        .and_then(|dpt| date_perhaps_time_to_utc(&dpt));
 
     Some(MeetingInvite {
         title: event.get_summary().unwrap_or("(no title)").to_string(),
@@ -285,9 +293,10 @@ fn extract_attachments(message: &mail_parser::Message<'_>) -> Vec<NewAttachment>
             let content_type = part.content_type().map_or_else(
                 || "application/octet-stream".to_string(),
                 |ct| {
-                    ct.c_subtype
-                        .as_ref()
-                        .map_or_else(|| ct.c_type.to_string(), |sub| format!("{}/{sub}", ct.c_type))
+                    ct.c_subtype.as_ref().map_or_else(
+                        || ct.c_type.to_string(),
+                        |sub| format!("{}/{sub}", ct.c_type),
+                    )
                 },
             );
             NewAttachment {
@@ -364,13 +373,16 @@ pub fn clean_body_for_deadline_scan(body: &str) -> String {
 /// or an Outlook-style "-----Original Message-----" separator.
 fn is_quote_boundary(line: &str) -> bool {
     let lower = line.to_lowercase();
-    (lower.starts_with("on ") && lower.ends_with("wrote:")) || line.starts_with("-----Original Message-----")
+    (lower.starts_with("on ") && lower.ends_with("wrote:"))
+        || line.starts_with("-----Original Message-----")
 }
 
 /// The first line or two of an Outlook-style forwarded-message header block.
 fn is_forward_header(line: &str) -> bool {
     let lower = line.to_lowercase();
-    lower.starts_with("from:") || lower.starts_with("sent:") || lower.starts_with("forwarded message")
+    lower.starts_with("from:")
+        || lower.starts_with("sent:")
+        || lower.starts_with("forwarded message")
 }
 
 fn is_boilerplate_line(line: &str) -> bool {

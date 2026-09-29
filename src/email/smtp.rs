@@ -81,8 +81,8 @@ async fn send_inner(config: &SmtpConfig, message: &OutgoingMessage) -> Result<()
         .with_root_certificates(root_store)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(tls_config));
-    let domain = ServerName::try_from(config.smtp_server.clone())
-        .context("invalid SMTP server hostname")?;
+    let domain =
+        ServerName::try_from(config.smtp_server.clone()).context("invalid SMTP server hostname")?;
 
     // Implicit TLS (port 465, RFC 8314) wraps the connection immediately, greeting included.
     // Everything else assumes STARTTLS (RFC 3207) over a plaintext connection - the greeting and
@@ -119,7 +119,10 @@ async fn send_inner(config: &SmtpConfig, message: &OutgoingMessage) -> Result<()
     send_line(&mut stream, "EHLO triptych").await?;
     expect(&mut stream, "EHLO").await?;
 
-    tracing::debug!("[SMTP:{account}] authenticating as {}", config.smtp_username);
+    tracing::debug!(
+        "[SMTP:{account}] authenticating as {}",
+        config.smtp_username
+    );
     send_line(&mut stream, "AUTH LOGIN").await?;
     expect(&mut stream, "AUTH LOGIN").await?;
 
@@ -315,9 +318,7 @@ pub fn base64_encode(data: &[u8]) -> String {
         out.push(b1.map_or('=', |b1| {
             BASE64_ALPHABET[(((b1 & 0x0F) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char
         }));
-        out.push(
-            b2.map_or('=', |b2| BASE64_ALPHABET[(b2 & 0x3F) as usize] as char),
-        );
+        out.push(b2.map_or('=', |b2| BASE64_ALPHABET[(b2 & 0x3F) as usize] as char));
     }
     out
 }

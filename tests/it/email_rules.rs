@@ -16,7 +16,11 @@ fn rule(match_field: &str, pattern: &str) -> EmailRule {
 fn parse_rule_spec_reads_subject_field() {
     assert_eq!(
         parse_rule_spec("subject newsletter star"),
-        Some(("subject".to_string(), "newsletter".to_string(), "star".to_string()))
+        Some((
+            "subject".to_string(),
+            "newsletter".to_string(),
+            "star".to_string()
+        ))
     );
 }
 
@@ -24,11 +28,19 @@ fn parse_rule_spec_reads_subject_field() {
 fn parse_rule_spec_maps_from_and_sender_to_from_addr() {
     assert_eq!(
         parse_rule_spec("from noreply read"),
-        Some(("from_addr".to_string(), "noreply".to_string(), "read".to_string()))
+        Some((
+            "from_addr".to_string(),
+            "noreply".to_string(),
+            "read".to_string()
+        ))
     );
     assert_eq!(
         parse_rule_spec("sender boss@work.com star"),
-        Some(("from_addr".to_string(), "boss@work.com".to_string(), "star".to_string()))
+        Some((
+            "from_addr".to_string(),
+            "boss@work.com".to_string(),
+            "star".to_string()
+        ))
     );
 }
 
@@ -58,11 +70,19 @@ fn parse_rule_spec_rejects_an_unknown_action() {
 fn parse_rule_spec_reads_archive_and_delete_actions() {
     assert_eq!(
         parse_rule_spec("subject newsletter archive"),
-        Some(("subject".to_string(), "newsletter".to_string(), "archive".to_string()))
+        Some((
+            "subject".to_string(),
+            "newsletter".to_string(),
+            "archive".to_string()
+        ))
     );
     assert_eq!(
         parse_rule_spec("from spam@example.com delete"),
-        Some(("from_addr".to_string(), "spam@example.com".to_string(), "delete".to_string()))
+        Some((
+            "from_addr".to_string(),
+            "spam@example.com".to_string(),
+            "delete".to_string()
+        ))
     );
 }
 
@@ -84,5 +104,9 @@ fn match_rule_tests_subject_case_insensitively() {
 fn match_rule_tests_from_addr_not_subject() {
     let r = rule("from_addr", "noreply");
     assert!(match_rule(&r, "Newsletter", "NoReply@example.com"));
-    assert!(!match_rule(&r, "noreply mentioned in subject", "boss@example.com"));
+    assert!(!match_rule(
+        &r,
+        "noreply mentioned in subject",
+        "boss@example.com"
+    ));
 }

@@ -115,7 +115,9 @@ impl EmailConfig {
     /// stored message's own account when acting on it, e.g. deleting it).
     #[must_use]
     pub fn for_account(account: &str) -> Option<Self> {
-        Self::all_from_env().into_iter().find(|c| c.account == account)
+        Self::all_from_env()
+            .into_iter()
+            .find(|c| c.account == account)
     }
 }
 
@@ -186,7 +188,11 @@ impl std::fmt::Debug for SmtpConfig {
 #[must_use]
 pub fn normalize_signature(raw: &str) -> Option<String> {
     let sig = raw.replace("\\n", "\n");
-    if sig.trim().is_empty() { None } else { Some(sig) }
+    if sig.trim().is_empty() {
+        None
+    } else {
+        Some(sig)
+    }
 }
 
 impl SmtpConfig {
@@ -218,7 +224,9 @@ impl SmtpConfig {
     /// specific mailbox).
     #[must_use]
     pub fn for_account(account: &str) -> Option<Self> {
-        Self::all_from_env().into_iter().find(|c| c.account == account)
+        Self::all_from_env()
+            .into_iter()
+            .find(|c| c.account == account)
     }
 
     fn from_legacy_env() -> Option<Self> {
@@ -230,7 +238,10 @@ impl SmtpConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(587);
 
-        let signature = env::var("EMAIL_SIGNATURE").ok().as_deref().and_then(normalize_signature);
+        let signature = env::var("EMAIL_SIGNATURE")
+            .ok()
+            .as_deref()
+            .and_then(normalize_signature);
 
         Some(Self {
             account: "default".to_string(),
@@ -252,8 +263,10 @@ impl SmtpConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(587);
-        let signature =
-            env::var(format!("EMAIL_SIGNATURE{suffix}")).ok().as_deref().and_then(normalize_signature);
+        let signature = env::var(format!("EMAIL_SIGNATURE{suffix}"))
+            .ok()
+            .as_deref()
+            .and_then(normalize_signature);
 
         Some(Self {
             account: label.to_string(),

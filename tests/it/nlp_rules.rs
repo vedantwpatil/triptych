@@ -91,7 +91,10 @@ fn deadline_by_numeric_date_with_year_sets_end_of_day() {
 fn extract_deadline_only_finds_a_trigger_worded_deadline_in_prose() {
     let text = "Hey team,\n\nJust a heads up this needs to be finished by next friday.\n\nThanks.";
     let deadline = extract_deadline_only(text).expect("should find a deadline");
-    assert_eq!(deadline.with_timezone(&Local).weekday(), chrono::Weekday::Fri);
+    assert_eq!(
+        deadline.with_timezone(&Local).weekday(),
+        chrono::Weekday::Fri
+    );
 }
 
 #[test]

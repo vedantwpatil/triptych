@@ -1,7 +1,10 @@
 use triptych::app::{Feed, KeyPrefix, Motion, MotionKey, find_match, grid_target, list_target};
 
 fn keys(prefix: &mut KeyPrefix, typed: &str) -> Vec<Feed> {
-    typed.chars().map(|c| prefix.feed(MotionKey::Char(c))).collect()
+    typed
+        .chars()
+        .map(|c| prefix.feed(MotionKey::Char(c)))
+        .collect()
 }
 
 const fn motion(motion: Motion, count: Option<usize>) -> Feed {
@@ -18,7 +21,14 @@ fn a_bare_motion_key_has_no_count() {
 #[test]
 fn digits_build_a_count_and_the_next_motion_uses_it() {
     let mut p = KeyPrefix::default();
-    assert_eq!(keys(&mut p, "12j"), [Feed::Consumed, Feed::Consumed, motion(Motion::Down, Some(12))]);
+    assert_eq!(
+        keys(&mut p, "12j"),
+        [
+            Feed::Consumed,
+            Feed::Consumed,
+            motion(Motion::Down, Some(12))
+        ]
+    );
     assert!(!p.is_pending());
 }
 
@@ -26,14 +36,23 @@ fn digits_build_a_count_and_the_next_motion_uses_it() {
 fn zero_is_line_start_alone_and_a_digit_after_a_count() {
     let mut p = KeyPrefix::default();
     assert_eq!(keys(&mut p, "0"), [motion(Motion::LineStart, None)]);
-    assert_eq!(keys(&mut p, "10k"), [Feed::Consumed, Feed::Consumed, motion(Motion::Up, Some(10))]);
+    assert_eq!(
+        keys(&mut p, "10k"),
+        [Feed::Consumed, Feed::Consumed, motion(Motion::Up, Some(10))]
+    );
 }
 
 #[test]
 fn gg_goes_to_the_top_and_a_count_picks_the_row() {
     let mut p = KeyPrefix::default();
-    assert_eq!(keys(&mut p, "gg"), [Feed::Consumed, motion(Motion::Top, None)]);
-    assert_eq!(keys(&mut p, "3gg"), [Feed::Consumed, Feed::Consumed, motion(Motion::Top, Some(3))]);
+    assert_eq!(
+        keys(&mut p, "gg"),
+        [Feed::Consumed, motion(Motion::Top, None)]
+    );
+    assert_eq!(
+        keys(&mut p, "3gg"),
+        [Feed::Consumed, Feed::Consumed, motion(Motion::Top, Some(3))]
+    );
 }
 
 #[test]
@@ -77,7 +96,10 @@ fn a_huge_count_is_clamped_instead_of_overflowing() {
     let mut p = KeyPrefix::default();
     let typed = "9".repeat(40);
     keys(&mut p, &typed);
-    assert_eq!(p.feed(MotionKey::Char('j')), motion(Motion::Down, Some(100_000)));
+    assert_eq!(
+        p.feed(MotionKey::Char('j')),
+        motion(Motion::Down, Some(100_000))
+    );
 }
 
 #[test]
@@ -109,7 +131,12 @@ fn list_target_half_page_is_half_the_visible_rows_and_at_least_one() {
 fn list_target_is_none_for_empty_lists_and_sideways_motions() {
     assert_eq!(list_target(0, 0, 10, Motion::Down, None), None);
     assert_eq!(list_target(0, 0, 10, Motion::Bottom, None), None);
-    for m in [Motion::Left, Motion::Right, Motion::LineStart, Motion::LineEnd] {
+    for m in [
+        Motion::Left,
+        Motion::Right,
+        Motion::LineStart,
+        Motion::LineEnd,
+    ] {
         assert_eq!(list_target(3, 10, 10, m, None), None);
     }
 }

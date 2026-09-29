@@ -186,7 +186,11 @@ impl OllamaClient {
         .map_err(OllamaError::Request)?;
         let reply: OllamaResponse = response.json().await.map_err(OllamaError::Request)?;
 
-        let one_line = reply.response.split_whitespace().collect::<Vec<_>>().join(" ");
+        let one_line = reply
+            .response
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if one_line.is_empty() {
             return Err(OllamaError::ParseError("empty summary".to_string()));
         }

@@ -74,6 +74,8 @@ pub struct App {
     pub block_form: BlockFormState,
     pub task_picker_selected: usize,
     pub input_buffer: String,
+    /// Task being reworded by the todo `e` prompt; `None` when the prompt adds a new task.
+    pub editing_task_id: Option<i64>,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
     /// Manually scheduled tasks this week; minutes is `duration_minutes` (see `CellEntry`).
@@ -225,6 +227,7 @@ impl App {
             block_form: BlockFormState::new_at(0),
             task_picker_selected: 0,
             input_buffer: String::new(),
+            editing_task_id: None,
             nlp_parser,
             cached_schedule_blocks: Vec::new(),
             cached_scheduled_tasks: Vec::new(),

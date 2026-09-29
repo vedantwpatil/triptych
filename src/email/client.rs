@@ -470,7 +470,10 @@ impl ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        session.select(folder).await.context("failed to select IMAP folder")?;
+        session
+            .select(folder)
+            .await
+            .context("failed to select IMAP folder")?;
 
         tracing::debug!("[Mail:{account}] deleting UID {uid}");
         let mut store_stream = session
@@ -531,7 +534,10 @@ impl ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        session.select(folder).await.context("failed to select IMAP folder")?;
+        session
+            .select(folder)
+            .await
+            .context("failed to select IMAP folder")?;
 
         tracing::debug!("[Mail:{account}] archiving UID {uid} to '{dest}'");
         // RFC 6851 MOVE in one round trip when the server supports it; a server that doesn't
@@ -610,7 +616,10 @@ impl ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        session.select(folder).await.context("failed to select IMAP folder")?;
+        session
+            .select(folder)
+            .await
+            .context("failed to select IMAP folder")?;
 
         tracing::debug!("[Mail:{account}] fetching attachments for UID {uid}");
         let mut stream = session
@@ -638,7 +647,12 @@ impl ImapMailSource {
 
         Ok(message
             .attachments()
-            .map(|part| (part.attachment_name().map(str::to_string), part.contents().to_vec()))
+            .map(|part| {
+                (
+                    part.attachment_name().map(str::to_string),
+                    part.contents().to_vec(),
+                )
+            })
             .collect())
     }
 
@@ -674,7 +688,10 @@ impl ImapMailSource {
             .map_err(|(err, _client)| err)
             .context("IMAP login failed")?;
 
-        session.select(folder).await.context("failed to select IMAP folder")?;
+        session
+            .select(folder)
+            .await
+            .context("failed to select IMAP folder")?;
 
         tracing::debug!("[Mail:{account}] entering IDLE on {folder}");
         let mut handle = session.idle();
@@ -735,16 +752,24 @@ impl ImapMailSource {
             .context("IMAP login failed")?;
 
         tracing::debug!("[Mail:{account}] listing folders");
-        let names_stream = session.list(None, Some("*")).await.context("IMAP LIST failed")?;
+        let names_stream = session
+            .list(None, Some("*"))
+            .await
+            .context("IMAP LIST failed")?;
         // Must be drained, not just dropped — see the identical note on `expunge()` in
         // `delete_inner`; `Name` carries the same not-`Unpin` shape, so `try_collect` (takes
         // `self`) rather than `try_next` (needs `&mut self: Unpin`).
-        let names: Vec<async_imap::types::Name> =
-            names_stream.try_collect().await.context("error reading IMAP LIST response")?;
+        let names: Vec<async_imap::types::Name> = names_stream
+            .try_collect()
+            .await
+            .context("error reading IMAP LIST response")?;
 
         let mut folders: Vec<String> = names
             .iter()
-            .filter(|n| !n.attributes().contains(&async_imap::types::NameAttribute::NoSelect))
+            .filter(|n| {
+                !n.attributes()
+                    .contains(&async_imap::types::NameAttribute::NoSelect)
+            })
             .map(|n| n.name().to_string())
             .collect();
         folders.sort_unstable();

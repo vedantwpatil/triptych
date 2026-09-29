@@ -145,13 +145,14 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
 
     match app.input_mode {
         InputMode::Editing => {
+            let title = if app.editing_task_id.is_some() {
+                "Reword Task (Enter to save, Esc to cancel)"
+            } else {
+                "New Task (Enter to save, Esc to cancel) - Try: 'Submit report tomorrow #work urgent'"
+            };
             let input_box = Paragraph::new(app.input_buffer.as_str())
                 .style(Style::default().fg(Color::Yellow))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("New Task (Enter to save, Esc to cancel) - Try: 'Submit report tomorrow #work urgent'"),
-                );
+                .block(Block::default().borders(Borders::ALL).title(title));
             f.render_widget(input_box, chunks[1]);
 
             f.set_cursor_position(ratatui::layout::Position {

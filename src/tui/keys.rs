@@ -45,7 +45,7 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
             }
         }
         InputMode::Editing if !ctrl => {
-            handle_editing_key(app, key.code);
+            handle_editing_key(app, key.code).await;
             KeyOutcome::Continue
         }
         InputMode::Search if !ctrl => {
@@ -61,9 +61,10 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
             KeyOutcome::Continue
         }
         InputMode::EmailCompose => handle_email_compose_key(app, key).await,
-        InputMode::Editing | InputMode::Search | InputMode::EmailSnooze | InputMode::EmailRuleInput => {
-            KeyOutcome::Continue
-        }
+        InputMode::Editing
+        | InputMode::Search
+        | InputMode::EmailSnooze
+        | InputMode::EmailRuleInput => KeyOutcome::Continue,
     }
 }
 
@@ -124,7 +125,9 @@ fn apply_motion(app: &mut App, motion: Motion, count: Option<usize>) {
             }
         }
         ViewMode::Email => {
-            if let Some(row) = list_target(app.selected_email, app.emails.len(), rows, motion, count) {
+            if let Some(row) =
+                list_target(app.selected_email, app.emails.len(), rows, motion, count)
+            {
                 app.selected_email = row;
             }
         }
@@ -149,8 +152,10 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::BackTab => app.cycle_view_prev().await,
         KeyCode::Char('a') => {
             app.input_mode = InputMode::Editing;
+            app.editing_task_id = None;
             app.input_buffer.clear();
         }
+        KeyCode::Char('e') => app.start_task_reword(),
         KeyCode::Char('x' | 'd' | 'D') => {
             if let Err(e) = app.delete_selected_tasks().await {
                 set_error(app, e);
@@ -496,7 +501,9 @@ async fn handle_drafts_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 app.selected_draft += 1;
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => app.selected_draft = app.selected_draft.saturating_sub(1),
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.selected_draft = app.selected_draft.saturating_sub(1);
+        }
         KeyCode::Enter => app.resume_selected_draft(),
         KeyCode::Char('d') => app.delete_selected_draft().await,
         _ => {}
@@ -623,11 +630,15 @@ async fn handle_email_compose_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     KeyOutcome::Continue
 }
 
-fn handle_editing_key(app: &mut App, code: KeyCode) {
+async fn handle_editing_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => {
             let description = app.input_buffer.trim().to_string();
-            if !description.is_empty() {
+            if let Some(id) = app.editing_task_id.take() {
+                if let Err(e) = app.commit_task_reword(id).await {
+                    set_error(app, e);
+                }
+            } else if !description.is_empty() {
                 app.submit_task(description, None, None, None);
             }
             app.input_mode = InputMode::Normal;
@@ -639,6 +650,7 @@ fn handle_editing_key(app: &mut App, code: KeyCode) {
             app.input_buffer.pop();
         }
         KeyCode::Esc => {
+            app.editing_task_id = None;
             app.input_mode = InputMode::Normal;
         }
         _ => {}

@@ -57,15 +57,41 @@ const HIGH: i32 = 4;
 const MEDIUM: i32 = 2;
 
 const HIGH_WORDS: &[&str] = &[
-    "urgent", "asap", "action required", "final notice", "immediately", "deadline", "overdue",
-    "expires", "expiring", "past due", "important",
+    "urgent",
+    "asap",
+    "action required",
+    "final notice",
+    "immediately",
+    "deadline",
+    "overdue",
+    "expires",
+    "expiring",
+    "past due",
+    "important",
 ];
 const MEDIUM_WORDS: &[&str] = &[
-    "due", "reminder", "assignment", "exam", "interview", "invoice", "payment", "meeting",
-    "schedule", "rsvp", "reply", "confirm",
+    "due",
+    "reminder",
+    "assignment",
+    "exam",
+    "interview",
+    "invoice",
+    "payment",
+    "meeting",
+    "schedule",
+    "rsvp",
+    "reply",
+    "confirm",
 ];
 const BULK_WORDS: &[&str] = &[
-    "newsletter", "sale", "unsubscribe", "digest", "deals", "discount", "webinar", "promo",
+    "newsletter",
+    "sale",
+    "unsubscribe",
+    "digest",
+    "deals",
+    "discount",
+    "webinar",
+    "promo",
     "promotion",
 ];
 const BULK_SENDERS: &[&str] = &["noreply", "no-reply", "donotreply", "do-not-reply"];

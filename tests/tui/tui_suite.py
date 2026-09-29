@@ -634,6 +634,25 @@ def _(c: Ctx):
     c.eq(c.descs(), ["hello world"], "db after add")
 
 
+@scenario("todo_reword")
+def _(c: Ctx):
+    c.cli("add", "alpha")
+    t = c.tui()
+    t.press("e")
+    c.see("Reword Task")
+    c.check(t.has("alpha"), "prompt not pre-filled with task text")
+    t.press("BS")
+    t.type("z")
+    t.press("ESC")
+    c.eq(c.descs(), ["alpha"], "Esc changed the task")
+    t.press("e")
+    t.press("BS")
+    t.type("z")
+    t.press("ENTER", settle=0.5)
+    c.see("Reword Task", gone=True, msg="popup still open after Enter")
+    c.eq(c.descs(), ["alphz"], "db after reword")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):
@@ -738,12 +757,15 @@ def _(c: Ctx):
 
 @scenario("todo_urgency_colors")
 def _(c: Ctx):
-    c.cli("add", "selected row")  # the highlighted first row overrides badge colours
     c.cli("add", "water plants priority:low")
     c.cli("add", "read a book")
     c.cli("add", "pay bill on 12/25/2099 !!")
     c.cli("add", "gym priority:low in 2 hours")
+    # The list sorts by priority and ties keep insertion order (newest first), so this URGENT row
+    # comes first; the highlighted row overrides badge colours, so move the highlight off it.
+    c.cli("add", "selected row in 1 hour")
     t = c.tui()
+    t.press("j")
     # Only ANSI palette slots 0-15 (the terminal theme picks the shades). pyte reports them as the
     # xterm default hex: slot 8 = 7f7f7f, 7 = e5e5e5, 1 = cd0000, 9 = ff0000.
     want = {

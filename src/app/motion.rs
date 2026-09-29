@@ -42,7 +42,10 @@ pub enum MotionKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feed {
     /// A complete motion; `count` is `None` when the user typed none.
-    Motion { motion: Motion, count: Option<usize> },
+    Motion {
+        motion: Motion,
+        count: Option<usize>,
+    },
     /// The key was part of a prefix (a digit, the first `g`) or cancelled one: nothing else should see it.
     Consumed,
     /// Not a motion key and no prefix was pending: the view handles it.

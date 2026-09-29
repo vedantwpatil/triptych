@@ -31,7 +31,11 @@ pub async fn mail_sync_worker(
     let tasks: Vec<_> = configs
         .into_iter()
         .map(|config| {
-            tokio::spawn(account_sync_loop(db.clone(), config, shutdown_rx.resubscribe()))
+            tokio::spawn(account_sync_loop(
+                db.clone(),
+                config,
+                shutdown_rx.resubscribe(),
+            ))
         })
         .collect();
 
