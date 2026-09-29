@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod app;
+mod canvas;
 mod cli;
 mod email_attachments;
 mod email_compose;
@@ -16,5 +17,6 @@ mod email_thread;
 mod motion;
 mod nlp_llm;
 mod nlp_rules;
+mod notify;
 mod ui;
 mod urgency;

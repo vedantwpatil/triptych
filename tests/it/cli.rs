@@ -61,6 +61,7 @@ impl Sandbox {
                 format!("sqlite:{}", self.db_path().display()),
             )
             .env("TRIPTYCH_SOCKET_PATH", self.socket_path())
+            .env_remove("CANVAS_ICS_URL")
             .env_remove("TRIPTYCH_EMAIL_ENABLED")
             .env_remove("IMAP_ACCOUNTS")
             .env_remove("IMAP_SERVER")
@@ -701,4 +702,63 @@ fn email_sync_fails_gracefully_against_unreachable_server() {
         "unexpected error: {}",
         stderr(&sync)
     );
+}
+
+#[test]
+fn canvas_sync_requires_a_feed_url() {
+    let sb = Sandbox::new();
+    let out = sb.run(&["canvas", "sync"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("Canvas not configured"),
+        "unexpected error: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn canvas_sync_imports_assignments_once() {
+    use std::io::{Read, Write};
+    let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a1\r\nSUMMARY:Essay 2\r\n\
+DTSTART:20991015T235900Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/feed.ics", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = conn.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/calendar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{feed}",
+                feed.len()
+            );
+            conn.write_all(resp.as_bytes()).unwrap();
+        }
+    });
+
+    let sb = Sandbox::new();
+    let run = |sb: &Sandbox| {
+        sb.cmd(&["canvas", "sync"])
+            .env("CANVAS_ICS_URL", &url)
+            .output()
+            .expect("spawn triptych")
+    };
+    let first = run(&sb);
+    assert!(first.status.success(), "sync failed: {}", stderr(&first));
+    assert!(
+        stdout(&first).contains("1 added, 0 updated"),
+        "{}",
+        stdout(&first)
+    );
+    let second = run(&sb);
+    assert!(
+        stdout(&second).contains("0 added, 0 updated"),
+        "{}",
+        stdout(&second)
+    );
+    server.join().unwrap();
+
+    let list = sb.run(&["list"]);
+    assert!(stdout(&list).contains("Essay 2"), "{}", stdout(&list));
+    assert_eq!(stdout(&list).matches("Essay 2").count(), 1);
 }

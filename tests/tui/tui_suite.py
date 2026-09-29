@@ -653,6 +653,78 @@ def _(c: Ctx):
     c.eq(c.descs(), ["alphz"], "db after reword")
 
 
+def _serve_feed(body: str):
+    """Serve `body` as a Canvas feed on localhost; returns (url, stop)."""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/calendar")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_port}/feed.ics", srv.shutdown
+
+
+@scenario("canvas_feed_syncs_into_todo")
+def _(c: Ctx):
+    feed = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:a1\r\nSUMMARY:Essay 2 canvas\r\n"
+            "DTSTART:20991015T235900Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+    url, stop = _serve_feed(feed)
+    try:
+        c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"CANVAS_ICS_URL": url}), 42, 130)
+        c.t.spawn()
+        c.check(c.t.wait_for("To-Do", 10), "TUI did not start")
+        c.check(c.t.wait_for("Essay 2 canvas", 8), "polled assignment never appeared in the todo list")
+        c.eq(c.descs(), ["Essay 2 canvas"], "db after background sync")
+        c.check(c.db("select external_id from tasks") == [("a1",)], "external_id not stored")
+        c.t.press("q")
+        c.t = None
+        r = c.cli("canvas", "sync", env={"CANVAS_ICS_URL": url})
+        c.check("0 added, 0 updated" in r.out, f"re-sync duplicated or changed rows: {r.out!r}")
+        c.eq(c.descs(), ["Essay 2 canvas"], "db after re-sync")
+    finally:
+        stop()
+
+
+@scenario("notify_deadline_alert")
+def _(c: Ctx):
+    c.tui()  # creates the schema
+    c.t.press("q")
+    log = c.sb.dir / "alerts.log"
+    script = c.sb.dir / "alert.sh"
+    script.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> "' + str(log) + '"\n')
+    script.chmod(0o755)
+    def at(mod: str) -> str:  # same text shape sqlx writes, so string comparison in SQL is valid
+        return f"strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '{mod}')"
+
+    soon = at("+30 minutes")
+    c.db(f"insert into tasks(description, completed, item_order, priority, deadline) values ('Essay due soon', 0, 0, 1, {soon})")
+    c.db("insert into tasks(description, completed, item_order, priority, deadline) values ('Far away', 0, 1, 1, " + at("+5 days") + ")")
+    c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"TRIPTYCH_NOTIFY_CMD": str(script)}), 42, 130)
+    c.t.spawn()
+    end = time.time() + 10
+    while time.time() < end and not log.exists():
+        c.t.pump(0.3)
+    text = log.read_text() if log.exists() else ""
+    c.check("Due within 1 hour|Essay due soon" in text, f"no alert for the near deadline: {text!r}")
+    c.check("Far away" not in text, f"alerted for a far deadline: {text!r}")
+    c.t.press("q")
+    c.t = None
+    c.tui()  # restart: the alert must not repeat
+    c.t.pump(2)
+    c.eq(log.read_text().count("\n"), 1, "alerts after restart")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):

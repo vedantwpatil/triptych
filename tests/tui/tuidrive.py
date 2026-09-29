@@ -121,7 +121,7 @@ class Sandbox:
         return (self.dir / "ctl.sock").exists() and request(self.name, {"op": "status"}, quiet=True) is not None
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_")) and k != "TRIPTYCH_OLLAMA_URL"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_")) and k not in ("TRIPTYCH_OLLAMA_URL", "CANVAS_ICS_URL")}
         env.update(
             DATABASE_URL=f"sqlite:{self.db_path}",
             TRIPTYCH_SOCKET_PATH=str(self.sock_path),
@@ -129,6 +129,7 @@ class Sandbox:
             TRIPTYCH_EMAIL_ENABLED="false",
             TRIPTYCH_ATTACHMENT_DIR=str(self.attachment_dir),
             TERM="xterm-256color",
+            TRIPTYCH_NOTIFY_CMD="true",  # no real desktop alerts from the suite; scenarios override with a logger
         )
         if (self.imap_dir / "port").exists():  # only ever the local fake server, never an inherited real account
             env.update(fakeimap.env_for(self.imap_dir))

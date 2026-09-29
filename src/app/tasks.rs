@@ -130,10 +130,17 @@ impl App {
         self.tasks = sqlx::query_as::<_, Task>(&query)
             .fetch_all(&self.db_pool)
             .await?;
-        // Stable sort: ties keep `item_order`. Completed tasks keep their own priority.
+        // Open tasks first, then by priority, then soonest deadline (none last). Stable: further
+        // ties keep `item_order`.
         let now = Utc::now();
-        self.tasks
-            .sort_by_key(|t| std::cmp::Reverse(effective_priority(t, now)));
+        self.tasks.sort_by_key(|t| {
+            (
+                t.completed,
+                std::cmp::Reverse(effective_priority(t, now)),
+                t.deadline.is_none(),
+                t.deadline,
+            )
+        });
 
         if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len().saturating_sub(1);
@@ -398,8 +405,23 @@ impl App {
             .execute(&self.db_pool)
             .await?;
 
-        self.load_tasks().await?;
+        self.reload_tasks_keep_selection().await?;
         self.on_task_changed().await?;
+        Ok(())
+    }
+
+    /// Reloads the list (as `load_tasks`) and keeps the cursor on the same task, so rows a
+    /// background sync adds above it do not shift the selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn reload_tasks_keep_selection(&mut self) -> Result<(), sqlx::Error> {
+        let selected_id = self.tasks.get(self.selected).map(|t| t.id);
+        self.load_tasks().await?;
+        if let Some(pos) = selected_id.and_then(|id| self.tasks.iter().position(|t| t.id == id)) {
+            self.selected = pos;
+        }
         Ok(())
     }
 

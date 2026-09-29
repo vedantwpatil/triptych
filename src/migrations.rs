@@ -1,6 +1,34 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+/// Feed UID of a task imported by `canvas::sync`; the upsert key that stops re-polls duplicating.
+async fn add_external_id(pool: &SqlitePool) -> Result<()> {
+    if !column_exists(pool, "tasks", "external_id").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN external_id TEXT")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_external_id ON tasks(external_id) \
+             WHERE external_id IS NOT NULL",
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("  ✓ Added external_id to tasks");
+    }
+    Ok(())
+}
+
+/// Highest deadline-alert tier already sent for a task (`notify.rs`); reset when the deadline moves.
+async fn add_notified_tier(pool: &SqlitePool) -> Result<()> {
+    if !column_exists(pool, "tasks", "notified_tier").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN notified_tier INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added notified_tier to tasks");
+    }
+    Ok(())
+}
+
 /// Adds the calendar columns and tables if they are missing. Safe to run on every start.
 ///
 /// # Errors
@@ -18,6 +46,9 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
         .await?;
         tracing::info!("  ✓ Added scheduled_event_id to tasks");
     }
+
+    add_external_id(pool).await?;
+    add_notified_tier(pool).await?;
 
     if !column_exists(pool, "tasks", "task_category").await? {
         sqlx::query("ALTER TABLE tasks ADD COLUMN task_category TEXT DEFAULT 'general'")

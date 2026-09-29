@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use super::config::SyncConfig;
-use super::{cache, calendar, mail, ollama};
+use super::{cache, calendar, canvas, mail, notify, ollama};
 
 /// Handle for managing the background sync daemon
 pub struct SyncDaemon {
@@ -50,6 +50,28 @@ impl SyncDaemon {
 
             tasks.push(tokio::spawn(async move {
                 calendar::calendar_sync_worker(db_clone, shutdown_rx).await
+            }));
+        }
+
+        // Canvas assignment feed
+        if config.canvas_sync_enabled
+            && let Some(url) = crate::canvas::feed_url_from_env()
+        {
+            let shutdown_rx = shutdown_tx.subscribe();
+            let db_clone = db.clone();
+
+            tasks.push(tokio::spawn(async move {
+                canvas::canvas_sync_worker(db_clone, url, shutdown_rx).await
+            }));
+        }
+
+        // Deadline alerts
+        if config.notify_enabled {
+            let shutdown_rx = shutdown_tx.subscribe();
+            let db_clone = db.clone();
+
+            tasks.push(tokio::spawn(async move {
+                notify::notify_worker(db_clone, shutdown_rx).await
             }));
         }
 

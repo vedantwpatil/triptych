@@ -4,11 +4,13 @@
 //! integration tests in `tests/` can exercise it.
 
 pub mod app;
+pub mod canvas;
 mod cli;
 pub mod email;
 pub mod logging;
 pub mod migrations;
 pub mod nlp;
+pub mod notify;
 mod sync;
 mod tui;
 pub mod urgency;

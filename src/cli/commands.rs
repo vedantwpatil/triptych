@@ -2,7 +2,8 @@
 
 use super::daemon::{self, DaemonRequest, DaemonResponse};
 use crate::app::App;
-use crate::cli::{Commands, EmailCommands, ScheduleCommands};
+use crate::canvas;
+use crate::cli::{CanvasCommands, Commands, EmailCommands, ScheduleCommands};
 use crate::email::{EmailConfig, store, sync::sync_account};
 use crate::urgency;
 
@@ -234,6 +235,22 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             },
         },
 
+        Commands::Canvas(CanvasCommands::Sync) => {
+            let Some(url) = canvas::feed_url_from_env() else {
+                eprintln!(
+                    "✗ Canvas not configured (set {} in .env)",
+                    canvas::FEED_URL_ENV
+                );
+                std::process::exit(1);
+            };
+            match canvas::sync(&app.db_pool, &url).await {
+                Ok(r) => println!("✓ Canvas: {} added, {} updated", r.added, r.updated),
+                Err(e) => {
+                    eprintln!("✗ Canvas sync failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Email(email_cmd) => match email_cmd {
             EmailCommands::Sync => {
                 let configs = EmailConfig::all_from_env();

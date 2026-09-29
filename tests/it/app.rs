@@ -1859,6 +1859,29 @@ async fn load_tasks_orders_by_priority_then_item_order() {
 }
 
 #[tokio::test]
+async fn completing_a_task_sinks_it_and_the_cursor_follows() {
+    let pool = test_pool().await;
+    for (desc, order, prio) in [("a", 0, 3), ("b", 1, 2), ("c", 2, 1)] {
+        sqlx::query("INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, ?, ?)")
+            .bind(desc)
+            .bind(order)
+            .bind(prio)
+            .execute(&pool)
+            .await
+            .expect("insert");
+    }
+    let mut app = App::new(pool).await;
+    app.load_tasks().await.expect("load tasks");
+    app.toggle_completed().await.expect("complete a");
+    let names: Vec<_> = app.tasks.iter().map(|t| t.description.as_str()).collect();
+    assert_eq!(names, ["b", "c", "a"]);
+    assert_eq!(app.tasks[app.selected].description, "a");
+    app.toggle_completed().await.expect("reopen a");
+    assert_eq!(app.tasks[0].description, "a");
+    assert_eq!(app.tasks[app.selected].description, "a");
+}
+
+#[tokio::test]
 async fn reword_task_updates_description_and_keeps_selection() {
     let pool = test_pool().await;
     for (desc, prio) in [("low", 0), ("high", 2)] {

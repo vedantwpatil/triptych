@@ -476,7 +476,7 @@ impl App {
             return Ok(());
         };
 
-        sqlx::query("UPDATE tasks SET deadline = ? WHERE id = ?")
+        sqlx::query("UPDATE tasks SET deadline = ?, notified_tier = 0 WHERE id = ?")
             .bind(deadline)
             .bind(task_id)
             .execute(&self.db_pool)

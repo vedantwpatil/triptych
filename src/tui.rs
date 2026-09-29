@@ -3,7 +3,7 @@
 mod keys;
 pub mod ui;
 
-use crate::app::{App, ViewMode};
+use crate::app::{App, InputMode, ViewMode};
 use crate::sync::{SyncConfig, SyncDaemon};
 use crossterm::{
     event::{Event, EventStream},
@@ -147,8 +147,13 @@ where
                 app.apply_triage(done);
             }
 
-            _ = mail_tick.tick(), if app.view_mode == ViewMode::Email && !app.email_detail_open => {
-                let _ = app.refresh_emails().await;
+            // Background syncs write mail and Canvas tasks straight to the DB; pick them up.
+            _ = mail_tick.tick(), if refresh_due(&app) => {
+                if app.view_mode == ViewMode::Email {
+                    let _ = app.refresh_emails().await;
+                } else {
+                    let _ = app.reload_tasks_keep_selection().await;
+                }
             }
 
             // Shutdown signal
@@ -159,4 +164,16 @@ where
     }
 
     Ok(())
+}
+
+/// Whether the periodic DB refresh may run now: the Email list unless its body popup is open (a
+/// reload would blank the popup), or the todo list unless the user is mid-input or selecting.
+const fn refresh_due(app: &App) -> bool {
+    match app.view_mode {
+        ViewMode::Email => !app.email_detail_open,
+        ViewMode::TodoList => {
+            matches!(app.input_mode, InputMode::Normal) && app.visual_anchor.is_none()
+        }
+        ViewMode::Calendar => false,
+    }
 }

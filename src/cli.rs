@@ -45,6 +45,16 @@ pub enum Commands {
     /// Email commands
     #[command(subcommand)]
     Email(EmailCommands),
+
+    /// Canvas assignment commands
+    #[command(subcommand)]
+    Canvas(CanvasCommands),
+}
+
+#[derive(Subcommand)]
+pub enum CanvasCommands {
+    /// One-shot fetch of the Canvas feed (`CANVAS_ICS_URL`) into the todo list
+    Sync,
 }
 
 #[derive(Subcommand)]

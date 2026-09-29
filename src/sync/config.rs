@@ -7,6 +7,10 @@ pub struct SyncConfig {
     pub cache_preload_enabled: bool,
     pub calendar_sync_enabled: bool,
     pub mail_sync_enabled: bool,
+    /// Canvas feed polling; on when `CANVAS_ICS_URL` is set.
+    pub canvas_sync_enabled: bool,
+    /// Desktop deadline alerts; on unless `TRIPTYCH_NOTIFY` is `0`/`false`/`off`/`no`.
+    pub notify_enabled: bool,
 }
 
 impl Default for SyncConfig {
@@ -16,6 +20,8 @@ impl Default for SyncConfig {
             cache_preload_enabled: true,
             calendar_sync_enabled: false,
             mail_sync_enabled: false,
+            canvas_sync_enabled: false,
+            notify_enabled: false,
         }
     }
 }
@@ -30,6 +36,8 @@ impl SyncConfig {
             cache_preload_enabled: true,
             calendar_sync_enabled: false,
             mail_sync_enabled,
+            canvas_sync_enabled: crate::canvas::feed_url_from_env().is_some(),
+            notify_enabled: crate::notify::enabled(),
         }
     }
 }
