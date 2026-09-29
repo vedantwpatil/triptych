@@ -1,6 +1,7 @@
 //! The todo list view.
 
 use crate::app::{App, InputMode};
+use crate::canvas::split_course;
 use crate::urgency;
 use chrono::NaiveTime;
 use ratatui::{
@@ -11,8 +12,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
-/// Todo badge style by effective priority: dim, neutral, red, then bold bright red as it gets more
-/// urgent. Only named ANSI colours, so the terminal's own palette decides the actual shades.
+/// Todo badge style by effective priority.
+///
+/// Dim, neutral, red, then bold bright red as it gets more urgent. Only named ANSI colours (never RGB or indexed), so the terminal's own colour scheme
+/// decides the actual shades; every colour in this file follows that rule.
 #[must_use]
 pub fn urgency_style(level: i32) -> Style {
     match level {
@@ -22,6 +25,30 @@ pub fn urgency_style(level: i32) -> Style {
         2 => Style::default().fg(Color::Red),
         1 => Style::default().fg(Color::Gray),
         _ => Style::default().fg(Color::DarkGray),
+    }
+}
+
+/// Course-code colour: the same course always gets the same slot, so a class reads at a glance.
+/// Cyan is left out because dates use it.
+fn course_color(code: &str) -> Color {
+    const PALETTE: [Color; 4] = [
+        Color::Magenta,
+        Color::Green,
+        Color::LightBlue,
+        Color::Yellow,
+    ];
+    let hash = code.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(usize::from(b))
+    });
+    PALETTE[hash % PALETTE.len()]
+}
+
+/// Date and deadline badge style: red family when close, calm cyan otherwise.
+fn date_style(level: i32) -> Style {
+    if level >= 2 {
+        urgency_style(level)
+    } else {
+        Style::default().fg(Color::Cyan)
     }
 }
 
@@ -52,13 +79,18 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             });
 
             // Build the display line with colors and indicators
-            let mut spans = vec![Span::raw(format!("{status} "))];
+            let status_style = if task.completed {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let mut spans = vec![Span::styled(format!("{status} "), status_style)];
 
             // Priority, date and deadline badges share one urgency style
             let level = urgency::effective_priority(task, chrono::Utc::now());
-            let badge_style = urgency_style(level);
+            let badge_style = date_style(level);
             if let Some((_, badge)) = urgency::priority_badge(task, chrono::Utc::now()) {
-                spans.push(Span::styled(format!("{badge} "), badge_style));
+                spans.push(Span::styled(format!("{badge} "), urgency_style(level)));
             }
 
             // Add schedule indicator with date and time info
@@ -92,23 +124,40 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             }
 
             // Add description with category color
-            let category_color = match task.task_category.as_deref() {
-                Some("deepwork") => Color::Blue,
-                Some("admin") => Color::Yellow,
-                Some("learning") => Color::Cyan,
-                Some("fitness") => Color::Red,
-                _ => Color::White,
+            // Red is reserved for priority; uncategorised text keeps the terminal's own foreground.
+            let text_style = if task.completed {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::CROSSED_OUT)
+            } else {
+                match task.task_category.as_deref() {
+                    Some("deepwork") => Style::default().fg(Color::LightBlue),
+                    Some("admin") => Style::default().fg(Color::Yellow),
+                    Some("learning") => Style::default().fg(Color::Cyan),
+                    Some("fitness") => Style::default().fg(Color::Green),
+                    _ => Style::default(),
+                }
             };
-            spans.push(Span::styled(
-                task.description.as_str(),
-                Style::default().fg(category_color),
-            ));
+            match split_course(&task.description) {
+                Some((code, title)) => {
+                    let code_style = if task.completed {
+                        text_style
+                    } else {
+                        Style::default()
+                            .fg(course_color(code))
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled(format!("{code} "), code_style));
+                    spans.push(Span::styled(title, text_style));
+                }
+                None => spans.push(Span::styled(task.description.as_str(), text_style)),
+            }
 
             // Add tags
             if !tags.is_empty() {
                 spans.push(Span::styled(
                     format!(" #{}", tags.join(" #")),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(Color::Magenta),
                 ));
             }
 
@@ -134,11 +183,8 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
     };
     let tasks_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        // Bold only: a fg colour here would repaint the row's priority and course colours.
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
 
     f.render_stateful_widget(tasks_list, chunks[0], &mut app.todo_list_state);

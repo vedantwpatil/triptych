@@ -42,6 +42,19 @@ pub fn tidy_title(raw: &str) -> String {
     format!("{dept}-{number}: {name}")
 }
 
+/// Splits a tidied title into its course code and the rest: `CS-472: Quiz 3` gives
+/// `("CS-472", "Quiz 3")`. `None` for any other text.
+#[must_use]
+pub fn split_course(title: &str) -> Option<(&str, &str)> {
+    let (code, rest) = title.split_once(": ")?;
+    let (dept, number) = code.split_once('-')?;
+    let valid = !dept.is_empty()
+        && dept.chars().all(|c| c.is_ascii_alphabetic())
+        && number.starts_with(|c: char| c.is_ascii_digit())
+        && number.chars().all(|c| c.is_ascii_alphanumeric());
+    valid.then_some((code, rest))
+}
+
 /// One feed event, reduced to what a task needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assignment {

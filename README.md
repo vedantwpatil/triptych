@@ -52,20 +52,20 @@ cargo run
 
 **Keybindings**
 
-| Key     | Action                        |
-| ------- | ----------------------------- |
-| `j/k`   | Navigate tasks (`5j`, `gg`, `G`, `Ctrl-d/u`) |
-| `/`     | Search (`n`/`N` next/previous) |
-| `a`     | Add new task                  |
-| `e`     | Reword selected task          |
-| `Enter` | Toggle completion             |
-| `x`/`d` | Delete task (or selection)    |
-| `v`/`V` | Select rows (`j/k` extend, `Esc` cancels) |
-| `s`     | Auto-schedule task            |
-| `c`     | Switch to calendar view       |
+| Key     | Action                                              |
+| ------- | --------------------------------------------------- |
+| `j/k`   | Navigate tasks (`5j`, `gg`, `G`, `Ctrl-d/u`)        |
+| `/`     | Search (`n`/`N` next/previous)                      |
+| `a`     | Add new task                                        |
+| `r`     | Reword selected task                                |
+| `Enter` | Toggle completion                                   |
+| `x`/`d` | Delete task (or selection)                          |
+| `v`/`V` | Select rows (`j/k` extend, `Esc` cancels)           |
+| `s`     | Auto-schedule task                                  |
+| `c`     | Switch to calendar view                             |
 | `m`     | Switch to email view (`s` sync, `o` sort, `v` open) |
-| `H/L`   | Previous/next week (calendar) |
-| `q`     | Quit                          |
+| `H/L`   | Previous/next week (calendar)                       |
+| `q`     | Quit                                                |
 
 ### CLI Mode
 

@@ -21,6 +21,10 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-29 (todo colours): MED has no badge (default level, `priority_badge` returns `None`). Row
+  colours: course-code prefix per course, green fitness (red is reserved for priority), magenta tags,
+  dim struck-through done rows, cyan far dates. All named ANSI colours so the user's theme applies.
+  New scenario `todo_row_colors`.
 - 2026-09-29 (alerts, canvas titles): desktop deadline alerts (`src/notify.rs`, `sync/notify.rs`; new
   `tasks.notified_tier`, reset when a deadline moves). Canvas titles become `CS-472: Quiz 3`
   (`canvas::tidy_title`; old untouched titles are rewritten on re-poll). Todo ties sort by soonest

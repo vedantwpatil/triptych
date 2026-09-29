@@ -67,6 +67,14 @@ fn badge_marks_only_automatic_raises() {
 }
 
 #[test]
+fn medium_has_no_badge_but_a_raised_medium_does() {
+    let (t, now) = task(1, None, None);
+    assert_eq!(priority_badge(&t, now), None);
+    let (t, now) = task(1, None, Some(Duration::days(2)));
+    assert_eq!(priority_badge(&t, now), Some((2, "[HIGH↑]".to_string())));
+}
+
+#[test]
 fn deadline_badge_names_the_day() {
     let now = Local.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap();
     let end_of = |d: u32| {

@@ -216,8 +216,9 @@ def _(c: Ctx):
     for txt in ("p none", "p med !", "p high !!", "p urgent !!!"):
         c.cli("add", txt)
     out = c.cli("list").out
-    for tag, word in (("[MED]", "p none"), ("[MED]", "p med"), ("[HIGH]", "p high"), ("[URGENT]", "p urgent")):
+    for tag, word in (("", "p none"), ("", "p med"), ("[HIGH]", "p high"), ("[URGENT]", "p urgent")):
         c.check(any(tag in l and word in l for l in out.splitlines()), f"{tag} missing for {word!r}: {out!r}")
+    c.check("[MED]" not in out, f"MED is the default and shows no badge: {out!r}")
 
 
 @scenario("cli_low_badge")
@@ -842,13 +843,27 @@ def _(c: Ctx):
     # xterm default hex: slot 8 = 7f7f7f, 7 = e5e5e5, 1 = cd0000, 9 = ff0000.
     want = {
         "[LOW] water": ("7f7f7f", False),
-        "[MED] read": ("e5e5e5", False),
         "[HIGH]": ("cd0000", False),
         "[URGENT↑]": ("ff0000", True),
     }
+    c.check(t.has("read a book") and not t.has("[MED]"), "MED must render without a badge")
     for badge, (fg, bold) in want.items():
         got = t.style_of(badge)
         c.check(got == {"fg": fg, "bold": bold}, f"{badge} style {got}, want fg={fg} bold={bold}")
+
+
+@scenario("todo_row_colors")
+def _(c: Ctx):
+    t = c.tui()
+    _seed_tasks(c, "top row", "CS-472: Quiz 3", "finished thing")
+    c.db("update tasks set completed = 1 where description = 'finished thing'")
+    c.check(t.wait_for("Quiz 3", 6), "seeded rows never appeared (2s refresh)")
+    # The cursor starts on the top row, which is not under test (the highlight overrides colours).
+    palette = {"cd00cd", "00cd00", "5c5cff", "cdcd00"}  # magenta green lightblue yellow (cyan is for dates)
+    code = t.style_of("CS-472")
+    c.check(code and code["bold"] and code["fg"] in palette, f"course code style {code}")
+    done = t.style_of("finished")
+    c.check(done == {"fg": "7f7f7f", "bold": False}, f"completed row style {done}")
 
 
 @scenario("todo_persist_restart")

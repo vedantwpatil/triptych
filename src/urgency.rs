@@ -32,13 +32,13 @@ pub fn effective_priority(task: &Task, now: DateTime<Utc>) -> i32 {
 }
 
 /// `(effective level, badge text)`, e.g. `(3, "[URGENT↑]")`; the arrow marks an automatic raise.
+/// MED is the default level, so it has no badge: a badge means the task differs from normal.
 #[must_use]
 pub fn priority_badge(task: &Task, now: DateTime<Utc>) -> Option<(i32, String)> {
     let level = effective_priority(task, now);
     let name = match level {
         3 => "URGENT",
         2 => "HIGH",
-        1 => "MED",
         0 => "LOW",
         _ => return None,
     };

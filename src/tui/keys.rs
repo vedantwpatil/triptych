@@ -155,7 +155,7 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             app.editing_task_id = None;
             app.input_buffer.clear();
         }
-        KeyCode::Char('e') => app.start_task_reword(),
+        KeyCode::Char('r') => app.start_task_reword(),
         KeyCode::Char('x' | 'd' | 'D') => {
             if let Err(e) = app.delete_selected_tasks().await {
                 set_error(app, e);

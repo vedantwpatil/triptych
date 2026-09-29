@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Local, TimeZone, Timelike, Utc};
 use sqlx::SqlitePool;
-use triptych::canvas::{Assignment, parse_feed, tidy_title, upsert};
+use triptych::canvas::{Assignment, parse_feed, split_course, tidy_title, upsert};
 
 const FEED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//canvas//EN\r\n\
 BEGIN:VEVENT\r\nUID:event-assignment-1\r\nSUMMARY:Essay 2 [ENG 101]\r\nDTSTART:20261015T235900Z\r\nEND:VEVENT\r\n\
@@ -147,4 +147,15 @@ async fn upsert_tidies_new_titles_and_old_raw_ones_but_not_rewords() {
         names,
         [("CS-472: Quiz 3".to_string(),), ("mine".to_string(),)]
     );
+}
+
+#[test]
+fn split_course_separates_the_code_from_tidy_titles_only() {
+    assert_eq!(split_course("CS-472: Quiz 3"), Some(("CS-472", "Quiz 3")));
+    assert_eq!(
+        split_course("LING-101: Essay: draft"),
+        Some(("LING-101", "Essay: draft"))
+    );
+    assert_eq!(split_course("Note: call mom"), None);
+    assert_eq!(split_course("no colon here"), None);
 }
