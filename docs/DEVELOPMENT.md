@@ -21,6 +21,11 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-29 (roadmap): recorded that Canvas assignment sync is not built (design in `future-features.md`)
+  and that integrating the todo list into the calendar is planned but low priority.
+- 2026-09-29 (verification): `todo_add_cold_model` fails under `-j 4` on the pre-change commit too (3 of 3 runs),
+  so it is not a regression from the sort/reword work. `todo_add_llm_nonblocking` failed once in 3 runs on
+  the new code (22.6s, real Ollama) and 0 of 3 on the old; unexplained, watch it.
 - 2026-09-29 (todo reword): `e` in the todo list reopens the input prompt pre-filled with the selected
   task; Enter saves it as the new description (no NLP re-parse, so date/priority/tags stay). Tests:
   `reword_task_updates_description_and_keeps_selection`, TUI scenario `todo_reword`.

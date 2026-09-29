@@ -7,7 +7,7 @@ motions and search, email sync (`s`), summaries, priority. Suggested order for t
 
 - Is there a possibility to sync with canvas calendars to be able to automatically have my assignments load in?
 
-  **Feasible, M.** Canvas exposes a per-user iCal feed (Calendar, "Calendar Feed") as a plain HTTPS
+  **Not built yet; assessed feasible, M.** Canvas exposes a per-user iCal feed (Calendar, "Calendar Feed") as a plain HTTPS
   `.ics` URL, so no OAuth (field details from memory; verify against your feed).
   - Already in the tree: `reqwest`, an optional `icalendar` dep behind the `calendar-sync` feature, a
     stub worker (`src/sync/calendar.rs`) and `SyncConfig::calendar_sync_enabled`. The stub says CalDAV;

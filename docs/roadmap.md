@@ -61,6 +61,10 @@ Carried over from the README roadmap; no implementation work started on any of t
   etc.) via CalDAV. Note: `icalendar` crate is already an optional dependency
   (`calendar-sync` feature) but unwired — check `src/sync/calendar.rs` before starting, it has
   a `calendar_sync_worker` stub marked "Not yet finished" in `src/sync/daemon.rs`.
+- **Canvas assignment sync** — not built. Poll Canvas's per-user iCal feed and upsert assignments as
+  todo tasks; design and risks in [`future-features.md`](./future-features.md) (first entry).
+- **Todo list in the calendar** — plan to integrate the todo list into the calendar view. Not a
+  priority right now; nothing started.
 - **Recurring tasks** — repeat rules for tasks (daily/weekly/custom), distinct from the
   existing recurring *schedule blocks* (TOML-defined).
 - **Full-text search** — search across task descriptions (and, once built, email bodies).
