@@ -1,8 +1,8 @@
 # Email Client — Slice 1 (IMAP fetch → store → view → convert-to-task)
 
 See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues and the changelog, and
-[`roadmap.md`](./roadmap.md) for the overall feature roadmap. The Outlook parity goal and its
-slice order live in [`roadmap-outlook.md`](./roadmap-outlook.md).
+[`roadmap.md`](./roadmap.md) for the overall feature roadmap. Further email ideas (not a
+goal) live in [`roadmap-outlook.md`](./roadmap-outlook.md).
 
 ## Context
 

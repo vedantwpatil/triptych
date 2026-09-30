@@ -1,8 +1,11 @@
-# Outlook parity plan
+# Email ideas backlog (Outlook parity)
 
-Goal (set 2026-09-30): the Email view should work and feel like Outlook. Triptych is keyboard-first,
-so parity means capability and layout, not the ribbon or the mouse. Built slices and their design are
-in [`roadmap-email.md`](./roadmap-email.md); day-to-day status in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+Status: backlog, not an active goal. The Outlook-parity goal set on 2026-09-30 was cleared the same
+day: the email view was absorbing most feature work while the todo list and calendar (the core of
+Triptych) stalled. Pick from here only for items that feed tasks or the calendar (6, 7, 10); see the
+focus order in [`roadmap.md`](./roadmap.md). Built slices and their design are in
+[`roadmap-email.md`](./roadmap-email.md); day-to-day status in [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+Triptych is keyboard-first, so parity means capability and layout, not the ribbon or the mouse.
 
 ## Already at parity
 
