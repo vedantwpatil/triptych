@@ -201,3 +201,73 @@ pub(super) fn render_deadline_input(f: &mut Frame, app: &App) {
         y: inner.y,
     });
 }
+
+/// Full details of every task in the selected calendar cell; `stack_index` is the cursor.
+pub(super) fn render_cell_detail(f: &mut Frame, app: &App) {
+    let area = centered_rect(60, 50, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Cell (j/k: select, m: move, u: unschedule, e: deadline, Esc: close)")
+        .style(Style::default().bg(Color::Black));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let now = chrono::Local::now();
+    let mut head: Vec<Line> = app
+        .selected_cell_block()
+        .into_iter()
+        .flat_map(|b| {
+            let desc = b.description.clone().filter(|d| !d.is_empty());
+            std::iter::once(Line::styled(
+                format!(
+                    "[{}] {}  {}-{}",
+                    b.block_type, b.title, b.start_time, b.end_time
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .chain(desc.map(Line::from))
+        })
+        .collect();
+    let lines: Vec<Line> = app
+        .selected_cell_tasks()
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, cell)| Some((idx, cell, app.tasks.iter().find(|t| t.id == cell.id)?)))
+        .flat_map(|(idx, cell, task)| {
+            let mut style = Style::default();
+            if idx == app.stack_index {
+                style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+            }
+            let kind = if cell.is_allocation { "auto" } else { "manual" };
+            let badges = crate::urgency::priority_badge(task, now.to_utc())
+                .map(|(_, badge)| badge)
+                .into_iter()
+                .chain(
+                    task.deadline
+                        .map(|d| crate::urgency::deadline_badge(d, now)),
+                )
+                .chain(task.tags.clone());
+            let meta = std::iter::once(format!("    {kind}"))
+                .chain(badges)
+                .collect::<Vec<_>>()
+                .join(", ");
+            [
+                Line::styled(
+                    format!(
+                        "{} {}",
+                        if idx == app.stack_index { ">" } else { " " },
+                        task.description
+                    ),
+                    style,
+                ),
+                Line::styled(meta, Style::default().fg(Color::Gray)),
+            ]
+        })
+        .collect();
+    if lines.is_empty() {
+        head.push(Line::styled("No tasks", Style::default().fg(Color::Gray)));
+    }
+    head.extend(lines);
+    f.render_widget(Paragraph::new(head), inner);
+}

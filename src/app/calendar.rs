@@ -216,6 +216,44 @@ impl App {
         self.stack_index = 0;
     }
 
+    /// Every task in the selected cell, in display order (see `cell_tasks`).
+    #[must_use]
+    pub fn selected_cell_tasks(&self) -> Vec<CellTask> {
+        cell_tasks(
+            &self.cached_scheduled_tasks,
+            &self.cached_task_allocations,
+            self.selected_cell_date(),
+            self.selected_cell_time().hour(),
+        )
+    }
+
+    /// The schedule block covering the selected cell, if any.
+    #[must_use]
+    pub fn selected_cell_block(&self) -> Option<&ScheduleBlock> {
+        let day = self.selected_cell_date();
+        let at = self.selected_cell_time();
+        self.cached_schedule_blocks
+            .iter()
+            .find(|(d, b)| {
+                *d == day
+                    && parse_time_string(&b.start_time).is_some_and(|s| s <= at)
+                    && parse_time_string(&b.end_time).is_some_and(|e| at < e)
+            })
+            .map(|(_, b)| b)
+    }
+
+    /// Open the cell detail popup; a cell with neither block nor task just reports it.
+    pub fn open_cell_detail(&mut self) {
+        if self.selected_cell_tasks().is_empty() && self.selected_cell_block().is_none() {
+            self.status_message = Some((
+                "Nothing in this cell".to_string(),
+                std::time::Instant::now(),
+            ));
+        } else {
+            self.calendar_input_mode = CalendarInputMode::CellDetail;
+        }
+    }
+
     /// Number of tasks (manual + allocation) occupying the selected cell -
     /// bounds `stack_index` when cycling with `[`/`]`.
     fn selected_cell_task_count(&self) -> usize {

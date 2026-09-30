@@ -1270,6 +1270,34 @@ def _(c: Ctx):
     c.check(a != b and a == d, f"stack cycle did not alternate: {a!r} {b!r} {d!r}")
 
 
+@scenario("cal_cell_detail")
+def _(c: Ctx):
+    c.cli("add", "one")
+    c.cli("add", "two")
+    t = c.tui()
+    c.cal()
+    for _ in range(2):
+        t.press("s", "ENTER")
+    t.press("ENTER")
+    c.check(t.has("Cell (j/k") and t.has("one") and t.has("two"), "cell detail popup lists both tasks")
+    t.press("j", "u")
+    c.check(len([r for r in c.tasks() if r["scheduled_at"]]) == 1, "u in popup unschedules the selected task")
+    t.press("ESC")
+    c.check(not t.has("Cell (j/k"), "Esc closes the popup")
+
+
+@scenario("cal_cell_detail_block")
+def _(c: Ctx):
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write('[[blocks]]\nday = "daily"\nstart = "09:00"\nend = "10:20"\ntype = "class"\ntitle = "Class: CS 457-A"\n')
+    c.cli("schedule", "import", f.name)
+    t = c.tui()
+    c.cal()
+    t.press("j", "j", "v")
+    c.check(t.has("Cell (j/k") and t.has("CS 457-A") and t.has("No tasks"), "v shows the block in the cell popup")
+
+
 @scenario("cal_toml_block_protected")
 def _(c: Ctx):
     import tempfile

@@ -2,7 +2,8 @@
 
 use super::grid::{CalendarGrid, TimeSlot, build_cell_view};
 use super::popups::{
-    render_block_form_popup, render_calendar_task_input, render_deadline_input, render_task_picker,
+    render_block_form_popup, render_calendar_task_input, render_cell_detail, render_deadline_input,
+    render_task_picker,
 };
 use crate::app::{App, CalendarInputMode};
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike};
@@ -168,6 +169,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         CalendarInputMode::TaskPicker => render_task_picker(f, app),
         CalendarInputMode::TaskInput => render_calendar_task_input(f, app),
         CalendarInputMode::DeadlineInput => render_deadline_input(f, app),
+        CalendarInputMode::CellDetail => render_cell_detail(f, app),
         CalendarInputMode::Navigate => {}
     }
 }

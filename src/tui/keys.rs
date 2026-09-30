@@ -186,6 +186,7 @@ async fn handle_calendar_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         CalendarInputMode::TaskPicker => handle_task_picker_key(app, code).await,
         CalendarInputMode::TaskInput => handle_task_input_key(app, code).await,
         CalendarInputMode::DeadlineInput => handle_deadline_input_key(app, code),
+        CalendarInputMode::CellDetail => handle_cell_detail_key(app, code).await,
     }
     KeyOutcome::Continue
 }
@@ -233,6 +234,7 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
             }
         }
         KeyCode::Char('e') => app.start_deadline_edit_at_selected_cell(),
+        KeyCode::Enter | KeyCode::Char('v') => app.open_cell_detail(),
         // Cycle which task in a stacked cell (see the "+N more" overflow
         // indicator) subsequent m/u/e presses act on.
         KeyCode::Char(']') => app.cycle_stack_next(),
@@ -247,6 +249,34 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
         _ => {}
     }
     KeyOutcome::Continue
+}
+
+/// Cell detail popup: `j`/`k` move `stack_index` directly (motions are off outside `Navigate`), and
+/// `m`/`u`/`e` act on that task exactly as they do from the grid.
+async fn handle_cell_detail_key(app: &mut App, code: KeyCode) {
+    let last = app.selected_cell_tasks().len().saturating_sub(1);
+    match code {
+        KeyCode::Esc | KeyCode::Enter => app.calendar_input_mode = CalendarInputMode::Navigate,
+        KeyCode::Char('j') | KeyCode::Down => app.stack_index = (app.stack_index + 1).min(last),
+        KeyCode::Char('k') | KeyCode::Up => app.stack_index = app.stack_index.saturating_sub(1),
+        KeyCode::Char('m') => {
+            app.calendar_input_mode = CalendarInputMode::Navigate;
+            app.pick_up_task_at_selected_cell();
+        }
+        KeyCode::Char('u') => {
+            if let Err(e) = app.unschedule_task_at_selected_cell().await {
+                set_error(app, e);
+            }
+            app.stack_index = app
+                .stack_index
+                .min(app.selected_cell_tasks().len().saturating_sub(1));
+            if app.selected_cell_tasks().is_empty() {
+                app.calendar_input_mode = CalendarInputMode::Navigate;
+            }
+        }
+        KeyCode::Char('e') => app.start_deadline_edit_at_selected_cell(),
+        _ => {}
+    }
 }
 
 async fn handle_block_form_key(app: &mut App, code: KeyCode) {

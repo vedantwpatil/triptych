@@ -115,6 +115,8 @@ pub enum CalendarInputMode {
     TaskPicker,
     TaskInput,
     DeadlineInput,
+    /// `Enter` on a cell: full list of its tasks, `stack_index` is the cursor.
+    CellDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
