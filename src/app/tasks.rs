@@ -119,6 +119,9 @@ pub fn extract_task_fields(item: ParsedItem) -> ExtractedTaskFields {
     }
 }
 
+/// Shown when a delete skips a Canvas-synced task (`external_id` set); the feed would re-add it.
+const CANVAS_PROTECTED: &str = "Canvas task: cannot delete";
+
 impl App {
     /// Reloads the todo list from the database in display order.
     ///
@@ -325,10 +328,15 @@ impl App {
 
         let task_id = self.tasks[self.selected].id;
 
-        sqlx::query("DELETE FROM tasks WHERE id = ?")
+        let deleted = sqlx::query("DELETE FROM tasks WHERE id = ? AND external_id IS NULL")
             .bind(task_id)
             .execute(&self.db_pool)
-            .await?;
+            .await?
+            .rows_affected();
+        if deleted == 0 {
+            self.status_message = Some((CANVAS_PROTECTED.to_string(), std::time::Instant::now()));
+            return Ok(());
+        }
         self.load_tasks().await?;
         self.on_task_changed().await?;
         Ok(())
@@ -368,21 +376,26 @@ impl App {
             .map(|t| t.id)
             .collect();
 
+        let mut deleted = 0;
         let mut tx = self.db_pool.begin().await?;
         for id in &ids {
-            sqlx::query("DELETE FROM tasks WHERE id = ?")
+            deleted += sqlx::query("DELETE FROM tasks WHERE id = ? AND external_id IS NULL")
                 .bind(id)
                 .execute(&mut *tx)
-                .await?;
+                .await?
+                .rows_affected();
         }
         tx.commit().await?;
 
         self.selected = *range.start();
         self.load_tasks().await?;
-        self.status_message = Some((
-            format!("Deleted {} task(s)", ids.len()),
-            std::time::Instant::now(),
-        ));
+        let kept = ids.len() as u64 - deleted;
+        let msg = if kept == 0 {
+            format!("Deleted {deleted} task(s)")
+        } else {
+            format!("Deleted {deleted} task(s), kept {kept} from Canvas")
+        };
+        self.status_message = Some((msg, std::time::Instant::now()));
         self.on_task_changed().await
     }
 
@@ -508,7 +521,7 @@ impl App {
     ///
     /// Returns an error if a database query fails.
     pub async fn remove_task_by_id(&mut self, id: i64) -> Result<bool, sqlx::Error> {
-        let rows_affected = sqlx::query("DELETE FROM tasks WHERE id = ?")
+        let rows_affected = sqlx::query("DELETE FROM tasks WHERE id = ? AND external_id IS NULL")
             .bind(id)
             .execute(&self.db_pool)
             .await?
@@ -516,8 +529,17 @@ impl App {
 
         if rows_affected > 0 {
             self.on_task_changed().await?;
+            return Ok(true);
         }
-        Ok(rows_affected > 0)
+        let synced: Option<(i64,)> =
+            sqlx::query_as("SELECT id FROM tasks WHERE id = ? AND external_id IS NOT NULL")
+                .bind(id)
+                .fetch_optional(&self.db_pool)
+                .await?;
+        if synced.is_some() {
+            return Err(sqlx::Error::Protocol(CANVAS_PROTECTED.into()));
+        }
+        Ok(false)
     }
 
     /// Deletes every completed task and returns how many were removed.
@@ -526,10 +548,11 @@ impl App {
     ///
     /// Returns an error if a database query fails.
     pub async fn clear_completed_tasks(&mut self) -> Result<u64, sqlx::Error> {
-        let rows_affected = sqlx::query("DELETE FROM tasks WHERE completed = true")
-            .execute(&self.db_pool)
-            .await?
-            .rows_affected();
+        let rows_affected =
+            sqlx::query("DELETE FROM tasks WHERE completed = true AND external_id IS NULL")
+                .execute(&self.db_pool)
+                .await?
+                .rows_affected();
 
         if rows_affected > 0 {
             self.on_task_changed().await?;

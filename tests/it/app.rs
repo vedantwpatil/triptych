@@ -1905,3 +1905,54 @@ async fn reword_task_updates_description_and_keeps_selection() {
     assert_eq!(app.tasks[app.selected].description, "reworded");
     assert_eq!(app.tasks[app.selected].priority, 0);
 }
+
+async fn mark_canvas(pool: &SqlitePool, id: i64) {
+    sqlx::query("UPDATE tasks SET external_id = ? WHERE id = ?")
+        .bind(format!("canvas-{id}"))
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("mark canvas");
+}
+
+async fn task_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+        .fetch_one(pool)
+        .await
+        .expect("count")
+}
+
+#[tokio::test]
+async fn canvas_tasks_survive_every_delete_path() {
+    let pool = test_pool().await;
+    let id = insert_task(&pool, "Essay").await;
+    mark_canvas(&pool, id).await;
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load");
+
+    app.delete_task().await.expect("delete_task");
+    app.delete_selected_tasks().await.expect("delete_selected");
+    assert!(app.remove_task_by_id(id).await.is_err());
+    sqlx::query("UPDATE tasks SET completed = true")
+        .execute(&pool)
+        .await
+        .expect("complete");
+    assert_eq!(app.clear_completed_tasks().await.expect("clear"), 0);
+
+    assert_eq!(task_count(&pool).await, 1);
+}
+
+#[tokio::test]
+async fn range_delete_keeps_canvas_rows_and_removes_the_rest() {
+    let pool = test_pool().await;
+    let canvas = insert_task(&pool, "Essay").await;
+    insert_task(&pool, "Manual").await;
+    mark_canvas(&pool, canvas).await;
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load");
+    app.toggle_visual();
+    app.selected = app.tasks.len() - 1;
+    app.delete_selected_tasks().await.expect("delete range");
+
+    assert_eq!(task_count(&pool).await, 1);
+}
