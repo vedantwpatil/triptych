@@ -1,7 +1,10 @@
 //! The email list view and its message popup.
 
 use super::centered_rect;
-use crate::app::{App, ComposeField, InputMode, Summary, compose_full_body, thread_count};
+use crate::app::{
+    App, ComposeField, InputMode, Summary, before_cursor, compose_full_body, cursor_col,
+    thread_count,
+};
 use crate::email::{EmailMessage, priority};
 use ratatui::{
     Frame,
@@ -197,11 +200,11 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
     f.render_stateful_widget(email_list, chunks[0], &mut app.email_list_state);
 
     if matches!(app.input_mode, InputMode::Search) {
-        super::render_search_box(f, &app.input_buffer, chunks[1]);
+        super::render_search_box(f, &app.input_buffer, app.edit_cursor, chunks[1]);
     } else if matches!(app.input_mode, InputMode::EmailSnooze) {
-        super::render_snooze_box(f, &app.input_buffer, chunks[1]);
+        super::render_snooze_box(f, &app.input_buffer, app.edit_cursor, chunks[1]);
     } else if matches!(app.input_mode, InputMode::EmailRuleInput) {
-        super::render_rule_input_box(f, &app.input_buffer, chunks[1]);
+        super::render_rule_input_box(f, &app.input_buffer, app.edit_cursor, chunks[1]);
     } else if let Some((msg, instant)) = &app.status_message
         && instant.elapsed() < std::time::Duration::from_secs(3)
     {
@@ -553,6 +556,7 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         "To",
         &compose.to,
         compose.active_field == ComposeField::To,
+        app.edit_cursor,
     );
     render_compose_field(
         f,
@@ -560,6 +564,7 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         "Cc",
         &compose.cc,
         compose.active_field == ComposeField::Cc,
+        app.edit_cursor,
     );
     render_compose_field(
         f,
@@ -567,6 +572,7 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
         "Subject",
         &compose.subject,
         compose.active_field == ComposeField::Subject,
+        app.edit_cursor,
     );
 
     let body_text = compose_full_body(
@@ -590,7 +596,7 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
     f.render_widget(body, chunks[3]);
 
     if body_active {
-        let (row, col) = cursor_position_in(&compose.body);
+        let (row, col) = cursor_position_in(before_cursor(&compose.body, app.edit_cursor));
         f.set_cursor_position(ratatui::layout::Position {
             x: chunks[3].x + 1 + u16::try_from(col).unwrap_or(u16::MAX),
             y: chunks[3].y + 1 + u16::try_from(row).unwrap_or(u16::MAX),
@@ -598,7 +604,14 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
     }
 }
 
-fn render_compose_field(f: &mut Frame, area: Rect, label: &str, value: &str, active: bool) {
+fn render_compose_field(
+    f: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    active: bool,
+    caret: Option<usize>,
+) {
     let style = if active {
         Style::default().fg(Color::Yellow)
     } else {
@@ -612,13 +625,13 @@ fn render_compose_field(f: &mut Frame, area: Rect, label: &str, value: &str, act
     f.render_widget(field, area);
     if active {
         f.set_cursor_position(ratatui::layout::Position {
-            x: area.x + 1 + u16::try_from(value.chars().count()).unwrap_or(u16::MAX),
+            x: area.x + 1 + u16::try_from(cursor_col(value, caret)).unwrap_or(u16::MAX),
             y: area.y + 1,
         });
     }
 }
 
-/// (row, col) of the end of `body`, for cursor placement — a plain newline count, not aware of
+/// (row, col) of the end of `body` (pass the text before the caret), for cursor placement — a plain newline count, not aware of
 /// line-wrapping (fields here are append/backspace-only, so exact-to-the-wrap placement isn't
 /// worth the complexity it'd add).
 fn cursor_position_in(body: &str) -> (usize, usize) {

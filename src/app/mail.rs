@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 
 use super::time::resolve_local_datetime;
-use super::{App, ComposeField, ComposeState, InputMode, ViewMode};
+use super::{App, ComposeField, ComposeState, Edit, InputMode, ViewMode, textedit};
 use crate::email::{
     EmailConfig, EmailMessage, EmailRule, EmailSort, ImapMailSource, MailSource, SmtpConfig,
     drafts, message, priority, smtp, store as email_store,
@@ -1028,36 +1028,27 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    /// Types `c` into the active compose field at the caret.
     pub fn compose_push_char(&mut self, c: char) {
-        let Some(compose) = self.email_compose.as_mut() else {
-            return;
-        };
-        match compose.active_field {
-            ComposeField::To => compose.to.push(c),
-            ComposeField::Cc => compose.cc.push(c),
-            ComposeField::Subject => compose.subject.push(c),
-            ComposeField::Body => compose.body.push(c),
-        }
+        self.compose_edit(Edit::Insert(c));
     }
 
     pub fn compose_backspace(&mut self) {
+        self.compose_edit(Edit::Backspace);
+    }
+
+    /// Applies a caret edit to the active compose field.
+    pub fn compose_edit(&mut self, edit: Edit) {
         let Some(compose) = self.email_compose.as_mut() else {
             return;
         };
-        match compose.active_field {
-            ComposeField::To => {
-                compose.to.pop();
-            }
-            ComposeField::Cc => {
-                compose.cc.pop();
-            }
-            ComposeField::Subject => {
-                compose.subject.pop();
-            }
-            ComposeField::Body => {
-                compose.body.pop();
-            }
-        }
+        let field = match compose.active_field {
+            ComposeField::To => &mut compose.to,
+            ComposeField::Cc => &mut compose.cc,
+            ComposeField::Subject => &mut compose.subject,
+            ComposeField::Body => &mut compose.body,
+        };
+        textedit::apply(field, &mut self.edit_cursor, edit);
     }
 
     /// Enter within the `Body` field inserts a newline; the single-line fields ignore it (`Tab`
@@ -1066,7 +1057,7 @@ impl App {
         if let Some(compose) = self.email_compose.as_mut()
             && compose.active_field == ComposeField::Body
         {
-            compose.body.push('\n');
+            textedit::apply(&mut compose.body, &mut self.edit_cursor, Edit::Insert('\n'));
         }
     }
 

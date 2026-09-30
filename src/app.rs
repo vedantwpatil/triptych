@@ -20,6 +20,7 @@ mod placement;
 mod schedule_io;
 mod search;
 mod tasks;
+mod textedit;
 mod time;
 
 pub use allocation::*;
@@ -34,6 +35,7 @@ pub use mail::{
 pub use model::*;
 pub use motion::*;
 pub use tasks::*;
+pub use textedit::{Edit, apply as apply_edit, before_cursor, cursor_col};
 pub use time::*;
 
 const DB_URL: &str = "sqlite:todo.db";
@@ -74,6 +76,8 @@ pub struct App {
     pub block_form: BlockFormState,
     pub task_picker_selected: usize,
     pub input_buffer: String,
+    /// Caret in whichever text is being typed (byte offset, `None` = end); see `app/textedit.rs`.
+    pub edit_cursor: Option<usize>,
     /// Task being reworded by the todo `r`/`R` prompt; `None` when the prompt adds a new task.
     pub editing_task_id: Option<i64>,
     nlp_parser: Arc<NLPParser>,
@@ -227,6 +231,7 @@ impl App {
             block_form: BlockFormState::new_at(0),
             task_picker_selected: 0,
             input_buffer: String::new(),
+            edit_cursor: None,
             editing_task_id: None,
             nlp_parser,
             cached_schedule_blocks: Vec::new(),

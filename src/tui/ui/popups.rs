@@ -1,7 +1,7 @@
 //! The calendar's overlay popups: block form, task picker and the two text inputs.
 
 use super::centered_rect;
-use crate::app::{App, BlockFormField};
+use crate::app::{App, BlockFormField, cursor_col};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -76,6 +76,20 @@ pub(super) fn render_block_form_popup(f: &mut Frame, app: &App) {
     };
     let ti_text = format!("Title: {}", form.title);
     f.render_widget(Paragraph::new(ti_text).style(ti_style), field_chunks[3]);
+
+    let (field, label) = match form.active_field {
+        BlockFormField::StartTime => (Some((&form.start_time, 1)), "Start: "),
+        BlockFormField::EndTime => (Some((&form.end_time, 2)), "End: "),
+        BlockFormField::Title => (Some((&form.title, 3)), "Title: "),
+        BlockFormField::BlockType => (None, ""),
+    };
+    if let Some((text, row)) = field {
+        let col = label.len() + cursor_col(text, app.edit_cursor);
+        f.set_cursor_position(ratatui::layout::Position {
+            x: field_chunks[row].x + u16::try_from(col).unwrap_or(u16::MAX),
+            y: field_chunks[row].y,
+        });
+    }
 
     // Rejection reasons (bad time, overlap) would otherwise be hidden behind this popup.
     if let Some((msg, instant)) = &app.status_message
@@ -175,7 +189,8 @@ pub(super) fn render_calendar_task_input(f: &mut Frame, app: &App) {
     f.render_widget(input_text, inner);
 
     f.set_cursor_position(ratatui::layout::Position {
-        x: inner.x + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX),
+        x: inner.x
+            + u16::try_from(cursor_col(&app.input_buffer, app.edit_cursor)).unwrap_or(u16::MAX),
         y: inner.y,
     });
 }
@@ -197,7 +212,8 @@ pub(super) fn render_deadline_input(f: &mut Frame, app: &App) {
     f.render_widget(input_text, inner);
 
     f.set_cursor_position(ratatui::layout::Position {
-        x: inner.x + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX),
+        x: inner.x
+            + u16::try_from(cursor_col(&app.input_buffer, app.edit_cursor)).unwrap_or(u16::MAX),
         y: inner.y,
     });
 }

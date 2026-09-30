@@ -6,8 +6,8 @@
 //! separate from "what does this key do in this mode".
 
 use crate::app::{
-    App, BlockFormField, BlockFormState, CalendarInputMode, Feed, InputMode, Motion, MotionKey,
-    ViewMode, list_target,
+    App, BlockFormField, BlockFormState, CalendarInputMode, Edit, Feed, InputMode, Motion,
+    MotionKey, ViewMode, apply_edit, list_target,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -28,6 +28,12 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && key.code == KeyCode::Char('c') {
         return KeyOutcome::Quit;
+    }
+    match edit_for(key) {
+        Some(edit) if type_into(app, edit) => return KeyOutcome::Continue,
+        Some(_) => {}
+        // Any other key ends the edit run, so the caret goes back to the end of the next text.
+        None => app.edit_cursor = None,
     }
     match app.input_mode {
         InputMode::Normal => {
@@ -66,6 +72,83 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
         | InputMode::EmailSnooze
         | InputMode::EmailRuleInput => KeyOutcome::Continue,
     }
+}
+
+/// Maps a key to a text edit: chars insert, arrows move, and Alt/Ctrl with a horizontal arrow (or
+/// Alt-`b`/`f`, which macOS terminals send for Option+arrow) move by word. `Ctrl-w`, Alt/Ctrl
+/// Backspace delete the word before the caret; `Ctrl-a`/`Ctrl-e` and Home/End go to the line ends.
+const fn edit_for(key: KeyEvent) -> Option<Edit> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let word = ctrl || alt;
+    match key.code {
+        KeyCode::Char('b') if alt && !ctrl => Some(Edit::WordLeft),
+        KeyCode::Char('f') if alt && !ctrl => Some(Edit::WordRight),
+        KeyCode::Char('a') if ctrl => Some(Edit::Home),
+        KeyCode::Char('e') if ctrl => Some(Edit::End),
+        KeyCode::Char('w') if ctrl => Some(Edit::DeleteWordBack),
+        KeyCode::Char(c) if !ctrl && !alt => Some(Edit::Insert(c)),
+        KeyCode::Backspace if word => Some(Edit::DeleteWordBack),
+        KeyCode::Backspace => Some(Edit::Backspace),
+        KeyCode::Delete => Some(Edit::Delete),
+        KeyCode::Left if word => Some(Edit::WordLeft),
+        KeyCode::Right if word => Some(Edit::WordRight),
+        KeyCode::Left => Some(Edit::Left),
+        KeyCode::Right => Some(Edit::Right),
+        KeyCode::Home => Some(Edit::Home),
+        KeyCode::End => Some(Edit::End),
+        _ => None,
+    }
+}
+
+/// Applies `edit` to the text currently being typed, if any: the shared prompt buffer, a compose
+/// field or a block-form text field. Returns false when nothing is being typed (or the key keeps
+/// another meaning: `j`/`k` on the block type, Backspace on an empty search prompt).
+fn type_into(app: &mut App, edit: Edit) -> bool {
+    if app.input_mode == InputMode::EmailCompose {
+        app.compose_edit(edit);
+        return true;
+    }
+    let App {
+        input_mode,
+        view_mode,
+        calendar_input_mode,
+        input_buffer,
+        edit_cursor,
+        block_form,
+        ..
+    } = app;
+    let text = match input_mode {
+        InputMode::Editing
+        | InputMode::Search
+        | InputMode::EmailSnooze
+        | InputMode::EmailRuleInput => input_buffer,
+        InputMode::Normal if *view_mode == ViewMode::Calendar => match calendar_input_mode {
+            CalendarInputMode::TaskInput | CalendarInputMode::DeadlineInput => input_buffer,
+            CalendarInputMode::BlockForm => {
+                let numeric = matches!(
+                    block_form.active_field,
+                    BlockFormField::StartTime | BlockFormField::EndTime
+                );
+                if matches!(edit, Edit::Insert(c) if numeric && !(c.is_ascii_digit() || c == ':')) {
+                    return true;
+                }
+                match block_form.active_field {
+                    BlockFormField::BlockType => return false,
+                    BlockFormField::StartTime => &mut block_form.start_time,
+                    BlockFormField::EndTime => &mut block_form.end_time,
+                    BlockFormField::Title => &mut block_form.title,
+                }
+            }
+            _ => return false,
+        },
+        InputMode::EmailCompose | InputMode::Normal => return false,
+    };
+    if *input_mode == InputMode::Search && edit == Edit::Backspace && text.is_empty() {
+        return false;
+    }
+    apply_edit(text, edit_cursor, edit);
+    true
 }
 
 const fn motion_key(key: KeyEvent) -> MotionKey {
@@ -293,40 +376,9 @@ async fn handle_block_form_key(app: &mut App, code: KeyCode) {
                 set_error(app, e);
             }
         }
-        KeyCode::Char(c) => match app.block_form.active_field {
-            BlockFormField::BlockType => {
-                if c == 'j' {
-                    app.block_form.cycle_block_type(true);
-                } else if c == 'k' {
-                    app.block_form.cycle_block_type(false);
-                }
-            }
-            BlockFormField::StartTime => {
-                if c.is_ascii_digit() || c == ':' {
-                    app.block_form.start_time.push(c);
-                }
-            }
-            BlockFormField::EndTime => {
-                if c.is_ascii_digit() || c == ':' {
-                    app.block_form.end_time.push(c);
-                }
-            }
-            BlockFormField::Title => {
-                app.block_form.title.push(c);
-            }
-        },
-        KeyCode::Backspace => match app.block_form.active_field {
-            BlockFormField::StartTime => {
-                app.block_form.start_time.pop();
-            }
-            BlockFormField::EndTime => {
-                app.block_form.end_time.pop();
-            }
-            BlockFormField::Title => {
-                app.block_form.title.pop();
-            }
-            BlockFormField::BlockType => {}
-        },
+        // Typing into the text fields is `type_into`; only the type selector reaches here.
+        KeyCode::Char('j') => app.block_form.cycle_block_type(true),
+        KeyCode::Char('k') => app.block_form.cycle_block_type(false),
         _ => {}
     }
 }
@@ -372,12 +424,6 @@ async fn handle_task_input_key(app: &mut App, code: KeyCode) {
             app.input_buffer.clear();
             app.calendar_input_mode = CalendarInputMode::Navigate;
         }
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
         _ => {}
     }
 }
@@ -390,12 +436,6 @@ fn handle_deadline_input_key(app: &mut App, code: KeyCode) {
             app.calendar_input_mode = CalendarInputMode::Navigate;
         }
         KeyCode::Enter => app.submit_deadline_edit(),
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
         _ => {}
     }
 }
@@ -512,10 +552,6 @@ async fn handle_email_snooze_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => app.commit_snooze().await,
         KeyCode::Esc => app.cancel_snooze(),
-        KeyCode::Char(c) => app.input_buffer.push(c),
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
         _ => {}
     }
 }
@@ -567,10 +603,6 @@ async fn handle_email_rule_input_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => app.commit_rule_input().await,
         KeyCode::Esc => app.cancel_rule_input(),
-        KeyCode::Char(c) => app.input_buffer.push(c),
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
         _ => {}
     }
 }
@@ -653,8 +685,6 @@ async fn handle_email_compose_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         KeyCode::Tab => app.compose_next_field(),
         KeyCode::BackTab => app.compose_prev_field(),
         KeyCode::Enter => app.compose_newline(),
-        KeyCode::Char(c) => app.compose_push_char(c),
-        KeyCode::Backspace => app.compose_backspace(),
         _ => {}
     }
     KeyOutcome::Continue
@@ -673,12 +703,6 @@ async fn handle_editing_key(app: &mut App, code: KeyCode) {
             }
             app.input_mode = InputMode::Normal;
         }
-        KeyCode::Char(c) => {
-            app.input_buffer.push(c);
-        }
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
         KeyCode::Esc => {
             app.editing_task_id = None;
             app.input_mode = InputMode::Normal;
@@ -690,13 +714,8 @@ async fn handle_editing_key(app: &mut App, code: KeyCode) {
 async fn handle_search_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Enter => app.commit_search().await,
-        KeyCode::Esc => app.cancel_search(),
-        KeyCode::Char(c) => app.input_buffer.push(c),
-        // Backspace on an empty prompt leaves it, as in vim.
-        KeyCode::Backspace if app.input_buffer.is_empty() => app.cancel_search(),
-        KeyCode::Backspace => {
-            app.input_buffer.pop();
-        }
+        // Backspace only arrives on an empty prompt (`type_into` declines it): leave, as in vim.
+        KeyCode::Esc | KeyCode::Backspace => app.cancel_search(),
         _ => {}
     }
 }

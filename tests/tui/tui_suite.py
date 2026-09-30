@@ -635,6 +635,32 @@ def _(c: Ctx):
     c.eq(c.descs(), ["hello world"], "db after add")
 
 
+@scenario("text_word_nav")
+def _(c: Ctx):
+    t = c.tui()
+    t.press("a")
+    t.type("one two three")
+    t.press("M-b")
+    t.type("X")
+    c.check(t.has("one two Xthree"), "Alt-b then insert should land before the last word")
+    t.press("M-BS")
+    c.check(t.has("one two three"), "Alt-Backspace should delete the word before the caret (X)")
+    t.press("M-LEFT")
+    t.type("Y")
+    c.check(t.has("one Ytwo three"), "Option+Left should land before 'two'")
+    t.press("M-RIGHT")
+    t.type("Z")
+    c.check(t.has("one YtwoZ three"), "Option+Right should move to the end of the word")
+    t.press("HOME")
+    t.type("_")
+    t.press("END")
+    t.type("!")
+    c.check(t.has("_one YtwoZ three!"), "Home/End should jump to the line ends")
+    t.press("C-w")
+    c.check(t.has("_one YtwoZ "), "Ctrl-w should delete the word before the caret")
+    t.press("ESC")
+
+
 @scenario("todo_reword")
 def _(c: Ctx):
     c.cli("add", "alpha")

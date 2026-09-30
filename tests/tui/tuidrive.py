@@ -58,6 +58,7 @@ NAMED_KEYS = {
     "ENTER": "\r", "ESC": "\x1b", "TAB": "\t", "BTAB": "\x1b[Z", "BS": "\x7f", "SPACE": " ",
     "UP": "\x1b[A", "DOWN": "\x1b[B", "RIGHT": "\x1b[C", "LEFT": "\x1b[D",
     "HOME": "\x1b[H", "END": "\x1b[F", "PGUP": "\x1b[5~", "PGDN": "\x1b[6~", "DEL": "\x1b[3~",
+    "M-LEFT": "\x1b[1;3D", "M-RIGHT": "\x1b[1;3C", "M-BS": "\x1b\x7f",  # Option/Alt+arrow, Alt+Backspace
 }
 
 
@@ -71,10 +72,12 @@ def parse_keys(tokens: list[str]) -> list[str]:
             out.extend(tok[2:])
         elif re.fullmatch(r"C-[a-z]", tok):
             out.append(chr(ord(tok[2]) - 96))
+        elif re.fullmatch(r"M-.", tok):
+            out.append("\x1b" + tok[2])  # Alt+char (what macOS terminals send for Option+char)
         elif len(tok) == 1:
             out.append(tok)
         else:
-            raise ValueError(f"bad key token {tok!r}: use NAME ({', '.join(NAMED_KEYS)}), C-x, t:text or one char")
+            raise ValueError(f"bad key token {tok!r}: use NAME ({', '.join(NAMED_KEYS)}), C-x, M-x, t:text or one char")
     return out
 
 

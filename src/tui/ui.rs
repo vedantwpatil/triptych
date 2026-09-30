@@ -9,7 +9,7 @@ mod todo;
 pub use grid::{CalendarGrid, CellView, TimeSlot, build_cell_view, cell_task_displays};
 pub use todo::urgency_style;
 
-use crate::app::{App, ViewMode};
+use crate::app::{App, ViewMode, cursor_col};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
@@ -46,35 +46,35 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 /// The `/query` prompt shown under the todo and email lists while a search is being typed.
-fn render_search_box(f: &mut Frame, query: &str, area: Rect) {
+fn render_search_box(f: &mut Frame, query: &str, caret: Option<usize>, area: Rect) {
     let title = "Search (Enter: jump, Esc: cancel, n/N: next/previous)";
     let input = Paragraph::new(format!("/{query}"))
         .style(Style::default().fg(Color::Yellow))
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(input, area);
     f.set_cursor_position(Position {
-        x: area.x + u16::try_from(query.chars().count()).unwrap_or(u16::MAX) + 2,
+        x: area.x + u16::try_from(cursor_col(query, caret)).unwrap_or(u16::MAX) + 2,
         y: area.y + 1,
     });
 }
 
 /// The snooze-spec prompt shown under the email list while `z` is being typed
 /// (`InputMode::EmailSnooze`); see `App::parse_snooze_spec`.
-fn render_snooze_box(f: &mut Frame, spec: &str, area: Rect) {
+fn render_snooze_box(f: &mut Frame, spec: &str, caret: Option<usize>, area: Rect) {
     let title = "Snooze until (10m, 2h, 3d, tomorrow, nextweek; Enter: apply, Esc: cancel)";
     let input = Paragraph::new(spec.to_string())
         .style(Style::default().fg(Color::Yellow))
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(input, area);
     f.set_cursor_position(Position {
-        x: area.x + u16::try_from(spec.chars().count()).unwrap_or(u16::MAX) + 1,
+        x: area.x + u16::try_from(cursor_col(spec, caret)).unwrap_or(u16::MAX) + 1,
         y: area.y + 1,
     });
 }
 
 /// The rule-spec prompt shown under the rules popup while `n` is being typed
 /// (`InputMode::EmailRuleInput`); see `App::parse_rule_spec`.
-fn render_rule_input_box(f: &mut Frame, spec: &str, area: Rect) {
+fn render_rule_input_box(f: &mut Frame, spec: &str, caret: Option<usize>, area: Rect) {
     let title =
         "New rule: field pattern action, e.g. subject newsletter star (Enter: save, Esc: cancel)";
     let input = Paragraph::new(spec.to_string())
@@ -82,7 +82,7 @@ fn render_rule_input_box(f: &mut Frame, spec: &str, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(input, area);
     f.set_cursor_position(Position {
-        x: area.x + u16::try_from(spec.chars().count()).unwrap_or(u16::MAX) + 1,
+        x: area.x + u16::try_from(cursor_col(spec, caret)).unwrap_or(u16::MAX) + 1,
         y: area.y + 1,
     });
 }

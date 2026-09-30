@@ -1,6 +1,6 @@
 //! The todo list view.
 
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, cursor_col};
 use crate::canvas::split_course;
 use crate::urgency;
 use chrono::NaiveTime;
@@ -203,12 +203,15 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
 
             f.set_cursor_position(ratatui::layout::Position {
                 x: chunks[1].x
-                    + u16::try_from(app.input_buffer.chars().count()).unwrap_or(u16::MAX)
+                    + u16::try_from(cursor_col(&app.input_buffer, app.edit_cursor))
+                        .unwrap_or(u16::MAX)
                     + 1,
                 y: chunks[1].y + 1,
             });
         }
-        InputMode::Search => super::render_search_box(f, &app.input_buffer, chunks[1]),
+        InputMode::Search => {
+            super::render_search_box(f, &app.input_buffer, app.edit_cursor, chunks[1]);
+        }
         // Compose/snooze/rule-input only open from the Email view; nothing to draw over the todo
         // list for them.
         InputMode::EmailCompose | InputMode::EmailSnooze | InputMode::EmailRuleInput => {}
