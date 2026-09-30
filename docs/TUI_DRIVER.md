@@ -8,7 +8,7 @@ pty so an agent or human can drive and inspect the TUI without a terminal. See
 
 Every session/scenario gets a throwaway sandbox dir with its own `todo.db`, socket and log
 (`DATABASE_URL`, `TRIPTYCH_SOCKET_PATH`, `TRIPTYCH_LOG_PATH`). The driver strips `IMAP_*`/`SMTP_*`,
-sets `TRIPTYCH_EMAIL_ENABLED=false`, strips `TRIPTYCH_OLLAMA_URL` and refuses `--env` overrides of the
+sets `TRIPTYCH_EMAIL_ENABLED=false`, `TRIPTYCH_NOTIFY_CMD=true` and `TRIPTYCH_OPEN_CMD=true` (no real alerts or browser; `start --env TRIPTYCH_OPEN_CMD=<script>` records opened links), strips `TRIPTYCH_OLLAMA_URL` and refuses `--env` overrides of the
 three path vars. Email sync and summaries only reach the sandbox's own fakes ([`TUI_FAKES.md`](./TUI_FAKES.md)). Never run the binary by hand against the real `todo.db` / `$TMPDIR/triptych.sock`.
 
 ## tuidrive.py: interactive driver
@@ -30,7 +30,7 @@ python3 tests/tui/tuidrive.py resize 20 60 | restart | ls | path | stop [--keep]
 ```
 
 Key tokens for `send`: `ENTER ESC TAB BTAB BS SPACE UP DOWN LEFT RIGHT HOME END PGUP PGDN DEL`,
-`C-x` (control), `t:literal text`, or one character (`j`, `a`, `[`). Escape sequences are written
+`C-x` (control), `M-x` (Alt/Option+char), `M-LEFT`/`M-RIGHT`/`M-BS` (Alt arrows and Backspace), `t:literal text`, or one character (`j`, `a`, `[`). Escape sequences are written
 atomically with ~50ms pacing (crossterm reads a split `ESC [ A` as two keys). `--compact` strips box
 characters; `--marks` also lists highlighted spans (the calendar cursor cell is bg `7f7f7f`).
 `send` waits for the screen to settle (`--settle`), then prints it; a dead process shows `EXITED code=N`.

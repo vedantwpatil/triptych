@@ -35,6 +35,7 @@ Every variable is optional.
 | `CANVAS_ICS_URL` | Canvas calendar feed; enables assignment sync | unset (off) |
 | `TRIPTYCH_NOTIFY` | `0`/`false`/`off`/`no` turns deadline alerts off | on |
 | `TRIPTYCH_NOTIFY_CMD` | Program run as `cmd <title> <body>` instead of the system notifier | `osascript` (macOS), `notify-send` (Linux) |
+| `TRIPTYCH_OPEN_CMD` | Program run as `cmd <url>` to open a task link | `open` (macOS), `xdg-open` (Linux) |
 | `TRIPTYCH_EMAIL_ENABLED` | `true` starts background mail sync | off |
 
 ### Canvas

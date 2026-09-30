@@ -57,7 +57,7 @@ cargo run
 | `j/k`   | Navigate tasks (`5j`, `gg`, `G`, `Ctrl-d/u`)        |
 | `/`     | Search (`n`/`N` next/previous)                      |
 | `a`     | Add new task                                        |
-| `r`     | Reword selected task                                |
+| `r`/`R` | Reword selected task                                |
 | `Enter` | Toggle completion                                   |
 | `x`/`d` | Delete task (or selection)                          |
 | `v`/`V` | Select rows (`j/k` extend, `Esc` cancels)           |

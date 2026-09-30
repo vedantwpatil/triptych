@@ -8,7 +8,7 @@ code: [`../tests/tui/`](../tests/tui/CLAUDE.md); features they cover: [`DEVELOPM
 
 `tests/tui/fakeimap.py` is a threaded IMAP4rev1 server over TLS on `127.0.0.1` (random port), backed by
 `mailbox.json` in the sandbox. It speaks what `src/email/client.rs` sends: LOGIN (`tester`/`secret`),
-SELECT with UIDVALIDITY, `UID SEARCH ALL | UID n:*` (RFC-correct: `n:*` always returns the top UID),
+SELECT with UIDVALIDITY, `UID SEARCH ALL | SINCE <date> | UID n:*` (ALL and SINCE return the whole box) (RFC-correct: `n:*` always returns the top UID),
 `UID FETCH` of `RFC822.SIZE`, `RFC822`, `RFC822.HEADER`, `UID STORE` of `+/-FLAGS(.SILENT) (\Deleted)`,
 `EXPUNGE` (emits `* n EXPUNGE` per removed message, sequence numbers shifted for earlier removals in
 the same response), `UID MOVE`/`UID COPY` for archive, LOGOUT. No real LIST, but SELECT of a

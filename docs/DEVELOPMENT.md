@@ -21,6 +21,39 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-30 (reword key): todo reword is `r`/`R` (it moved from `e` in `a25f249`); scenario
+  `todo_reword` and the docs now match, and the scenario uses `R` for the second reword.
+- 2026-09-30 (canvas links): Canvas tasks carry links. New `tasks.links` (JSON array, `add_links`
+  migration): the assignment page built from the feed `URL` (course and assignment ids), then the
+  `href`s in `X-ALT-DESC`. `canvas::upsert` refreshes them on every known task, finished or not. Todo
+  `o` opens the first link, `O` lists them (`App.links_open`, `app/links.rs`, popup in `ui/todo.rs`,
+  `1`-`9` pick). `⇗N` marks tasks with N links past the first. Opener is `open`/`xdg-open`, or
+  `TRIPTYCH_OPEN_CMD`; the suite sets it to `true`, scenario `canvas_links_open_pick` swaps in a logger.
+  Open: popup rows are bare URLs; anchor text would read better.
+- 2026-09-29 (text caret + word motions): every typed input (task, search, snooze, rule, calendar
+  block/task/deadline, email compose) now has a caret, not append-only. `src/app/textedit.rs` is the pure
+  edit engine (`Edit`, `apply_edit`; caret = `App.edit_cursor`, `None` = end); `tui/keys.rs::edit_for` maps
+  keys and `type_into` applies them before mode dispatch, and any non-edit key resets the caret to the end.
+  Renders place the terminal cursor with `cursor_col`. Scenario `text_word_nav`, driver tokens `M-x`,
+  `M-LEFT`, `M-RIGHT`, `M-BS`.
+- 2026-09-29 (canvas delete guard): tasks with `external_id` (Canvas sync) cannot be deleted by `x`/`d`/`D`, visual range delete, `rm` or `clear`; the feed would re-add them. TUI shows "Canvas task: cannot delete", range delete reports how many were kept, `rm` errors.
+- 2026-09-29 (contact noise filter): `store::contacts` drops automated senders (`is_noise_address`: noreply, notifications, mailer-daemon, ...) and senders whose every message triage marked Other. Still senders only.
+- 2026-09-29 (6-month mail load): first sync now searches `SINCE` 180 days (was `ALL`, last 25),
+  capped at the newest 1000 (`INITIAL_SYNC_DAYS`/`INITIAL_SYNC_LIMIT`, `src/email/client.rs`); Email list
+  loads up to 1000 rows (`EMAIL_LIST_LIMIT`). Existing accounts keep their cursor, so run
+  `triptych email sync --backfill` once (clears `email_sync_state`, dupes skipped by `insert_new`).
+  Fake IMAP accepts `SEARCH SINCE`. Also: `v` in a calendar cell opens the popup for blocks too.
+- 2026-09-29 (compose contact autofill): To/Cc suggest contacts while typing (name or address, the
+  fragment after the last `,`). `email::store::contacts` (senders by frequency) loads into
+  `App.contacts` in `toggle_to_email`; pure `suggest_contacts` matches (5 max); `Ctrl-N`/`Ctrl-P` move,
+  `Enter` accepts (`compose_accept_suggestion`, else newline as before). Sent-mail recipients are not
+  included yet. Scenario `email_compose_autofill`.
+- 2026-09-29 (calendar cell popup): `Enter` opens `CalendarInputMode::CellDetail` (full titles, kind,
+  priority, deadline, tags); `stack_index` is its cursor so `m`/`u`/`e` reuse the grid paths. Cause: the
+  12-char headline truncation made stacked `CS-472: Q...` tasks look identical while cycling. Blocks
+  imported from TOML get `schedule_blocks.source = 'toml'` (idempotent migration `add_block_source`) and
+  `d` refuses them. New scenarios `cal_cell_detail`, `cal_toml_block_protected`. `todo_reword` failed at
+  HEAD (scenario pressed `e`, key is `r`); fixed, see the reword key entry above.
 - 2026-09-29 (todo colours): MED has no badge (default level, `priority_badge` returns `None`). Row
   colours: course-code prefix per course, green fitness (red is reserved for priority), magenta tags,
   dim struck-through done rows, cyan far dates. All named ANSI colours so the user's theme applies.
