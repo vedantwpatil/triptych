@@ -26,11 +26,11 @@ mod time;
 pub use allocation::*;
 pub use calendar::*;
 pub use mail::{
-    ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, DeleteResult, FolderListResult,
+    ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, Contact, DeleteResult, FolderListResult,
     FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, chain_references,
     compose_full_body, forward_subject, match_rule, merge_reply_all_cc, next_category,
     normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original, reply_subject,
-    sanitize_filename, thread_count,
+    sanitize_filename, suggest_contacts, thread_count,
 };
 pub use model::*;
 pub use motion::*;
@@ -132,6 +132,10 @@ pub struct App {
     pub email_attachments: std::collections::HashMap<i64, Vec<crate::email::EmailAttachment>>,
     /// The open compose/reply/forward form, when `input_mode` is `InputMode::EmailCompose`.
     pub email_compose: Option<ComposeState>,
+    /// Known contacts for To/Cc autofill, loaded when the email view opens (`toggle_to_email`).
+    pub contacts: Vec<Contact>,
+    /// Highlighted row of the To/Cc suggestion list.
+    pub suggest_index: usize,
     /// Loaded fresh from the DB each time the drafts list popup (`D` in the email view) opens.
     pub drafts: Vec<crate::email::Draft>,
     pub drafts_open: bool,
@@ -264,6 +268,8 @@ impl App {
             attachment_rx,
             email_attachments: std::collections::HashMap::new(),
             email_compose: None,
+            contacts: Vec::new(),
+            suggest_index: 0,
             drafts: Vec::new(),
             drafts_open: false,
             selected_draft: 0,
@@ -315,6 +321,9 @@ impl App {
         self.start_email_sync(false);
         self.cleanup_old_emails().await;
         let _ = self.refresh_emails().await;
+        self.contacts = crate::email::store::contacts(&self.db_pool)
+            .await
+            .unwrap_or_default();
     }
 
     /// Tab: `TodoList` -> Calendar -> Email -> `TodoList`.

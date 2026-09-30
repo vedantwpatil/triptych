@@ -676,6 +676,8 @@ async fn handle_email_compose_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         match key.code {
             KeyCode::Char('s') => app.send_compose(),
             KeyCode::Char('d') => app.save_compose_as_draft().await,
+            KeyCode::Char('n') => app.compose_suggest_move(true),
+            KeyCode::Char('p') => app.compose_suggest_move(false),
             _ => {}
         }
         return KeyOutcome::Continue;
@@ -684,7 +686,7 @@ async fn handle_email_compose_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         KeyCode::Esc => app.cancel_compose(),
         KeyCode::Tab => app.compose_next_field(),
         KeyCode::BackTab => app.compose_prev_field(),
-        KeyCode::Enter => app.compose_newline(),
+        KeyCode::Enter if !app.compose_accept_suggestion() => app.compose_newline(),
         _ => {}
     }
     KeyOutcome::Continue

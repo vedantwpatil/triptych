@@ -589,11 +589,13 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
     let body = Paragraph::new(body_text)
         .style(body_style)
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "Body — {} (Tab: next field, Ctrl-S: send, Ctrl-D: save draft, Esc: cancel)",
+            "Body — {} (Tab: next field, Ctrl-S: send, Ctrl-D: save draft, Ctrl-N/P + Enter: pick contact, Esc: cancel)",
             compose.account
         )))
         .wrap(Wrap { trim: false });
     f.render_widget(body, chunks[3]);
+
+    render_contact_suggestions(f, app, &chunks);
 
     if body_active {
         let (row, col) = cursor_position_in(before_cursor(&compose.body, app.edit_cursor));
@@ -602,6 +604,51 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
             y: chunks[3].y + 1 + u16::try_from(row).unwrap_or(u16::MAX),
         });
     }
+}
+
+/// The To/Cc autofill list, drawn just under the active field over whatever is below it.
+fn render_contact_suggestions(f: &mut Frame, app: &App, chunks: &[Rect]) {
+    let suggestions = app.compose_suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+    let field = app.email_compose.as_ref().map_or(chunks[0], |c| {
+        if c.active_field == ComposeField::Cc {
+            chunks[1]
+        } else {
+            chunks[0]
+        }
+    });
+    let height = u16::try_from(suggestions.len() + 2).unwrap_or(7);
+    let area = Rect::new(field.x, field.y + field.height, field.width, height);
+    let selected = app.suggest_index.min(suggestions.len() - 1);
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, (addr, name))| {
+            let label = name
+                .as_deref()
+                .filter(|n| !n.is_empty())
+                .map_or_else(|| addr.clone(), |n| format!("{n} <{addr}>"));
+            let style = if i == selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+    f.render_widget(Clear, area);
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .style(Style::default().bg(Color::Black)),
+        ),
+        area,
+    );
 }
 
 fn render_compose_field(

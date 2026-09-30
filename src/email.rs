@@ -14,3 +14,4 @@ pub use drafts::Draft;
 pub use message::{EmailAttachment, EmailMessage, EmailRule};
 pub use priority::EmailSort;
 pub use smtp::OutgoingMessage;
+pub use store::is_noise_address;

@@ -31,6 +31,40 @@ pub struct MailSync {
     errors: Vec<String>,
 }
 
+/// A known correspondent: `(address, display name)`.
+pub type Contact = (String, Option<String>);
+
+/// Most suggestions shown under a To/Cc field.
+const SUGGEST_LIMIT: usize = 5;
+
+/// Split a To/Cc value at its last `,`/`;`: (everything up to and including it, the fragment
+/// being typed).
+fn split_recipient(field: &str) -> (&str, &str) {
+    let cut = field.rfind([',', ';']).map_or(0, |i| i + 1);
+    field.split_at(cut)
+}
+
+/// Contacts whose address or name contains the recipient fragment being typed (case-insensitive),
+/// in the given (frequency) order. Nothing for an empty fragment or one already completed
+/// as `Name <addr>`.
+#[must_use]
+pub fn suggest_contacts<'a>(contacts: &'a [Contact], field: &str) -> Vec<&'a Contact> {
+    let needle = split_recipient(field).1.trim().to_lowercase();
+    if needle.is_empty() || needle.contains('<') {
+        return Vec::new();
+    }
+    contacts
+        .iter()
+        .filter(|(addr, name)| {
+            addr.to_lowercase().contains(&needle)
+                || name
+                    .as_deref()
+                    .is_some_and(|n| n.to_lowercase().contains(&needle))
+        })
+        .take(SUGGEST_LIMIT)
+        .collect()
+}
+
 /// State of one email's AI summary in `App::email_summaries`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Summary {
@@ -1028,6 +1062,64 @@ impl App {
         self.input_mode = InputMode::Normal;
     }
 
+    /// Suggestions for the active To/Cc field; empty for any other field.
+    #[must_use]
+    pub fn compose_suggestions(&self) -> Vec<&Contact> {
+        let Some(compose) = self.email_compose.as_ref() else {
+            return Vec::new();
+        };
+        match compose.active_field {
+            ComposeField::To => suggest_contacts(&self.contacts, &compose.to),
+            ComposeField::Cc => suggest_contacts(&self.contacts, &compose.cc),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ctrl-N / Ctrl-P: move the highlight, wrapping.
+    pub fn compose_suggest_move(&mut self, forward: bool) {
+        let count = self.compose_suggestions().len();
+        if count > 0 {
+            let cur = self.suggest_index.min(count - 1);
+            self.suggest_index = if forward {
+                (cur + 1) % count
+            } else {
+                (cur + count - 1) % count
+            };
+        }
+    }
+
+    /// Replace the fragment being typed with the highlighted contact as `Name <addr>`. Returns
+    /// false (and changes nothing) when no suggestion is showing.
+    pub fn compose_accept_suggestion(&mut self) -> bool {
+        let suggestions = self.compose_suggestions();
+        let Some((addr, name)) = suggestions
+            .get(self.suggest_index.min(suggestions.len().saturating_sub(1)))
+            .map(|c| (*c).clone())
+        else {
+            return false;
+        };
+        let entry = match name.filter(|n| !n.is_empty()) {
+            Some(n) => format!("{n} <{addr}>"),
+            None => addr,
+        };
+        self.suggest_index = 0;
+        let Some(compose) = self.email_compose.as_mut() else {
+            return false;
+        };
+        let field = match compose.active_field {
+            ComposeField::To => &mut compose.to,
+            ComposeField::Cc => &mut compose.cc,
+            _ => return false,
+        };
+        let head = split_recipient(field).0.trim_end().to_string();
+        *field = if head.is_empty() {
+            entry
+        } else {
+            format!("{head} {entry}")
+        };
+        true
+    }
+
     /// Types `c` into the active compose field at the caret.
     pub fn compose_push_char(&mut self, c: char) {
         self.compose_edit(Edit::Insert(c));
@@ -1039,6 +1131,7 @@ impl App {
 
     /// Applies a caret edit to the active compose field.
     pub fn compose_edit(&mut self, edit: Edit) {
+        self.suggest_index = 0;
         let Some(compose) = self.email_compose.as_mut() else {
             return;
         };

@@ -237,6 +237,49 @@ pub async fn distinct_folders(pool: &SqlitePool) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Local-part fragments that mark automated senders, excluded from contact suggestions.
+const NOISE_LOCAL_PARTS: [&str; 12] = [
+    "noreply",
+    "no-reply",
+    "no_reply",
+    "donotreply",
+    "do-not-reply",
+    "notification",
+    "mailer-daemon",
+    "postmaster",
+    "bounce",
+    "newsletter",
+    "digest",
+    "alert",
+];
+
+/// True for automated senders (`noreply@`, `notifications@`, ...) that are never worth suggesting.
+#[must_use]
+pub fn is_noise_address(addr: &str) -> bool {
+    let local = addr.split('@').next().unwrap_or_default().to_lowercase();
+    NOISE_LOCAL_PARTS.iter().any(|n| local.contains(n))
+}
+
+/// Known contacts from synced mail, most frequent sender first: `(address, display name)`.
+/// Skips automated addresses and senders whose every message triage classed as "Other".
+pub async fn contacts(pool: &SqlitePool) -> Result<Vec<(String, Option<String>)>> {
+    let rows = sqlx::query(
+        "SELECT from_addr, MAX(from_name) AS name FROM email_messages
+         WHERE instr(from_addr, '@') > 0 AND from_addr != 'unknown@unknown'
+         GROUP BY lower(from_addr)
+         HAVING MAX(COALESCE(triage_focused, 1)) = 1
+         ORDER BY COUNT(*) DESC, MAX(id) DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| (row.get::<String, _>("from_addr"), row.get("name")))
+        .filter(|(addr, _)| !is_noise_address(addr))
+        .collect())
+}
+
 /// Every distinct sender-domain with at least one stored message, alphabetical — backs the
 /// email list's per-domain filter cycle (Slice 25). `from_addr` is always a bare address
 /// (`message.rs::parse_raw` already strips any display name), so splitting on the first `@`

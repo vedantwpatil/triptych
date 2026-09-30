@@ -1,7 +1,7 @@
 use chrono::Utc;
 use triptych::app::{
     ComposeField, ComposeState, chain_references, compose_full_body, forward_subject,
-    merge_reply_all_cc, quote_original, reply_subject,
+    merge_reply_all_cc, quote_original, reply_subject, suggest_contacts,
 };
 use triptych::email::EmailMessage;
 
@@ -118,4 +118,35 @@ fn compose_full_body_omits_separators_for_absent_parts() {
     assert_eq!(compose_full_body("hi", None, None), "hi");
     assert_eq!(compose_full_body("", Some("sig"), None), "sig");
     assert_eq!(compose_full_body("", None, Some("> old")), "> old");
+}
+
+#[test]
+fn suggest_contacts_matches_name_or_address_at_last_fragment() {
+    let contacts = vec![
+        ("ann@x.com".to_string(), Some("Ann Lee".to_string())),
+        ("bob@y.org".to_string(), None),
+    ];
+    assert_eq!(suggest_contacts(&contacts, "LEE").len(), 1);
+    assert_eq!(suggest_contacts(&contacts, "y.org")[0].0, "bob@y.org");
+    assert_eq!(
+        suggest_contacts(&contacts, "ann@x.com, bo")[0].0,
+        "bob@y.org"
+    );
+    assert!(suggest_contacts(&contacts, "").is_empty());
+    assert!(suggest_contacts(&contacts, "ann@x.com, ").is_empty());
+    assert!(suggest_contacts(&contacts, "Ann Lee <ann@x.com>").is_empty());
+}
+
+#[test]
+fn noise_addresses_are_not_contacts() {
+    use triptych::email::is_noise_address;
+    for addr in [
+        "noreply@x.com",
+        "No-Reply@x.com",
+        "notifications@github.com",
+        "mailer-daemon@x.com",
+    ] {
+        assert!(is_noise_address(addr), "{addr}");
+    }
+    assert!(!is_noise_address("alice@example.com"));
 }

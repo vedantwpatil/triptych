@@ -2035,6 +2035,22 @@ def _(c: Ctx):
         c.check(body.index("Just checking in.") < body.index("Best,"), "signature not after typed body")
 
 
+@scenario("email_compose_autofill")
+def _(c: Ctx):
+    c.smtp()
+    c.seed_emails(3)
+    t = c.tui()
+    t.press("m", "c")
+    c.see("Ctrl-S: send")
+    t.type("person")
+    c.check(t.has("Person 2 <p2@ex.com>") and t.has("Person 0 <p0@ex.com>"), "suggestions not listed")
+    t.press("C-n", "ENTER")
+    c.check(t.has("Person 1 <p1@ex.com>") and not t.has("p2@ex.com"), "Ctrl-N + Enter did not accept the second contact")
+    t.type(", p0")
+    t.press("ENTER")
+    c.check(t.has("Person 1 <p1@ex.com>, Person 0 <p0@ex.com>"), "second recipient not appended after the comma")
+
+
 @scenario("email_compose_cancel")
 def _(c: Ctx):
     sm = c.smtp()
