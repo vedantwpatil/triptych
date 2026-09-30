@@ -74,7 +74,7 @@ pub struct App {
     pub block_form: BlockFormState,
     pub task_picker_selected: usize,
     pub input_buffer: String,
-    /// Task being reworded by the todo `e` prompt; `None` when the prompt adds a new task.
+    /// Task being reworded by the todo `r`/`R` prompt; `None` when the prompt adds a new task.
     pub editing_task_id: Option<i64>,
     nlp_parser: Arc<NLPParser>,
     pub cached_schedule_blocks: Vec<(NaiveDate, ScheduleBlock)>,
