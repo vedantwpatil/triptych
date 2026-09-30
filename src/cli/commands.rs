@@ -252,13 +252,19 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             }
         }
         Commands::Email(email_cmd) => match email_cmd {
-            EmailCommands::Sync => {
+            EmailCommands::Sync { backfill } => {
                 let configs = EmailConfig::all_from_env();
                 if configs.is_empty() {
                     eprintln!(
                         "✗ Email not configured (set TRIPTYCH_EMAIL_ENABLED=true and IMAP_* in .env)"
                     );
                     std::process::exit(1);
+                }
+
+                if backfill {
+                    store::clear_sync_cursors(&app.db_pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
 
                 let mut any_failed = false;

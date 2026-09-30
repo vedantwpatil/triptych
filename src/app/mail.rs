@@ -19,6 +19,9 @@ use crate::email::{
 /// the day.
 const EMAIL_RETENTION_DAYS: i64 = 180;
 
+/// Rows the Email list loads; sized for the retention window rather than a screenful.
+const EMAIL_LIST_LIMIT: i64 = 1000;
+
 /// Outcome of a background mail sync, sent from the spawned task to `run_app` over `App::mail_rx`.
 #[derive(Debug, Default)]
 pub struct MailSync {
@@ -220,7 +223,7 @@ impl App {
     /// Returns an error if a database query fails.
     pub async fn refresh_emails(&mut self) -> Result<(), sqlx::Error> {
         let selected_id = self.emails.get(self.selected_email).map(|e| e.id);
-        self.emails = email_store::get_recent(&self.db_pool, 100)
+        self.emails = email_store::get_recent(&self.db_pool, EMAIL_LIST_LIMIT)
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         if let Some(account) = &self.account_filter {

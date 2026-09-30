@@ -1528,7 +1528,7 @@ def _(c: Ctx):
     c.eq(rows[0][1:], ("default", "INBOX", "bob@corp.example", "Bob Boss", "Quarterly report", 0), "parsed fields of uid 1")
     c.eq(c.db("select uid_validity, last_uid from email_sync_state"), [(1, 3)], "sync cursor")
     log = c.sb.imap_log()
-    c.check("UID SEARCH ALL" in log and "(RFC822.SIZE)" in log and "LOGOUT" in log, f"protocol steps missing:\n{log}")
+    c.check("UID SEARCH SINCE " in log and "(RFC822.SIZE)" in log and "LOGOUT" in log, f"protocol steps missing:\n{log}")
     c.check("secret" not in log, "password leaked into the command log")
     out = c.cli("email", "list").out
     c.check("Quarterly report" in out and "Bob Boss" in out, f"email list lacks the synced mail: {out!r}")
@@ -1538,8 +1538,8 @@ def _(c: Ctx):
 def _(c: Ctx):
     c.imap().add(count=30)
     r = c.sync()
-    c.check("Synced 25 new email(s)" in r.out, f"first sync should cap at 25: {r.clean_out!r}")
-    c.eq(c.db("select min(uid), max(uid), count(*) from email_messages"), [(6, 30, 25)], "newest 25 kept")
+    c.check("Synced 30 new email(s)" in r.out, f"first sync should take all 30 (under the 1000 cap): {r.clean_out!r}")
+    c.eq(c.db("select min(uid), max(uid), count(*) from email_messages"), [(1, 30, 30)], "all 30 kept")
     c.eq(c.db("select last_uid from email_sync_state"), [(30,)], "cursor at the newest uid")
 
 

@@ -298,11 +298,11 @@ class Handler:
         msgs = self._mailbox_messages(self.box.load())
         uids = [m["uid"] for m in msgs]
         if sub.upper() == "SEARCH":
-            m = re.fullmatch(r"(?i)(ALL|UID (\S+))", rest.strip())
+            m = re.fullmatch(r"(?i)(ALL|SINCE \S+|UID (\S+))", rest.strip())
             if not m:
                 self.w(f"{tag} BAD unsupported search {rest}\r\n")
                 return
-            hits = uids if m.group(1).upper() == "ALL" else _uid_set(m.group(2), uids)
+            hits = _uid_set(m.group(2), uids) if m.group(2) else uids  # ALL/SINCE: whole box
             self.w(f"* SEARCH{''.join(f' {u}' for u in hits)}\r\n{tag} OK SEARCH completed\r\n")
         elif sub.upper() == "FETCH":
             spec, _, items = rest.partition(" ")

@@ -60,7 +60,11 @@ pub enum CanvasCommands {
 #[derive(Subcommand)]
 pub enum EmailCommands {
     /// One-shot fetch of new mail over IMAP into local storage
-    Sync,
+    Sync {
+        /// Forget sync cursors first, so the last 6 months are fetched again (duplicates are skipped)
+        #[arg(long)]
+        backfill: bool,
+    },
 
     /// Print recently stored emails
     List,

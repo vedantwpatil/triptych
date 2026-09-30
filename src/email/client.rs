@@ -13,10 +13,13 @@ use super::config::EmailConfig;
 use super::store::SyncCursor;
 use super::tls::{build_root_store, ensure_crypto_provider};
 
-/// First-sync cap: when there's no prior `since_uid` to resume from, fetch only the
-/// most recent N messages instead of the entire mailbox history. Full-body IMAP
-/// fetches of a real inbox's entire history can be extremely slow and memory-heavy.
-const INITIAL_SYNC_LIMIT: usize = 25;
+/// First-sync window: with no cursor to resume from, only mail newer than this many days is
+/// searched (`SINCE`), matching the local retention window in `app/mail.rs`.
+const INITIAL_SYNC_DAYS: i64 = 180;
+
+/// First-sync cap inside that window: keep only the most recent N messages, since full-body
+/// IMAP fetches of a huge inbox can be slow and memory-heavy (and one sync is all-or-nothing).
+const INITIAL_SYNC_LIMIT: usize = 1000;
 
 /// Messages larger than this skip the full `RFC822` fetch (headers + body + every
 /// MIME part, attachments included) and get `RFC822.HEADER` only instead — enough
@@ -305,8 +308,13 @@ impl ImapMailSource {
             },
         );
 
-        let search_query =
-            since_uid.map_or_else(|| "ALL".to_string(), |uid| format!("UID {}:*", uid + 1));
+        let search_query = since_uid.map_or_else(
+            || {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(INITIAL_SYNC_DAYS);
+                format!("SINCE {}", cutoff.format("%d-%b-%Y"))
+            },
+            |uid| format!("UID {}:*", uid + 1),
+        );
 
         tracing::debug!("[Mail:{account}] UID search: {search_query}");
         let uids = session

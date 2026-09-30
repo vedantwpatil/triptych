@@ -110,6 +110,14 @@ pub async fn get_sync_cursor(
     })
 }
 
+/// Drops every sync cursor so the next sync is a first sync (windowed backfill).
+pub async fn clear_sync_cursors(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("DELETE FROM email_sync_state")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_sync_cursor(
     pool: &SqlitePool,
     account: &str,
