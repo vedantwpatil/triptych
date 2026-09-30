@@ -18,9 +18,7 @@ reqwest = { version = "0.13.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9.11"
-regex = "1.0"
 nom = "7"
-once_cell = "1.19"
 lru = "0.16.1"
 anyhow = "1.0"
 dotenvy = "0.15"
@@ -41,7 +39,6 @@ mail-parser = { version = "0.11.5", features = ["full_encoding"] }
 icalendar = { version = "0.17.4", features = ["chrono-tz"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
 
 [lints.rust]
 unsafe_code = "forbid"
