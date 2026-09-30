@@ -77,6 +77,13 @@ On by default while the TUI is open. macOS: the first alert may need permission 
 Notifications (alerts are posted through `osascript`). Linux: install `libnotify` for `notify-send`.
 Point `TRIPTYCH_NOTIFY_CMD` at any script (ntfy, Slack webhook, ...) to route them elsewhere.
 
+To get alerts with the TUI closed, run `triptych notify install` from the directory holding `todo.db`
+and `.env`. It writes `~/Library/LaunchAgents/com.triptych.notify.plist` and loads it: launchd then runs
+`triptych notify check` every minute and at login (log: `$TMPDIR/triptych-notify.log`). It pins the
+binary you ran it with, so use an installed or release build, not `cargo run`; rerun it after moving
+either. `triptych notify uninstall` removes it. Linux: call `triptych notify check` from cron or a
+systemd timer. Running the TUI at the same time is safe: each task still alerts once.
+
 ### Weekly schedule
 
 Recurring blocks (classes, focus time) come from a TOML file: format in the README, load it with

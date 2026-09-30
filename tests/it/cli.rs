@@ -762,3 +762,111 @@ DTSTART:20991015T235900Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     assert!(stdout(&list).contains("Essay 2"), "{}", stdout(&list));
     assert_eq!(stdout(&list).matches("Essay 2").count(), 1);
 }
+
+/// Inserts an open task due `minutes` from now, bypassing the NLP parser.
+fn seed_task_due_in(db_path: &Path, description: &str, minutes: i64) {
+    let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    rt.block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+            .await
+            .expect("connect to sandbox db");
+        sqlx::query(
+            "INSERT INTO tasks (description, completed, item_order, priority, deadline) VALUES (?, 0, 0, 1, ?)",
+        )
+        .bind(description)
+        .bind(Utc::now() + chrono::Duration::minutes(minutes))
+        .execute(&pool)
+        .await
+        .expect("seed task");
+    });
+}
+
+/// A `TRIPTYCH_NOTIFY_CMD` script that appends `title|body` to the returned log path.
+fn alert_logger(sb: &Sandbox) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (script, log) = (sb.path("alert.sh"), sb.path("alerts.log"));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"$2\" >> '{}'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (script, log)
+}
+
+#[test]
+fn notify_check_alerts_once_and_needs_no_tui() {
+    let sb = Sandbox::new();
+    let (script, log) = alert_logger(&sb);
+    let check = || {
+        sb.cmd(&["notify", "check"])
+            .env("TRIPTYCH_NOTIFY_CMD", &script)
+            .output()
+            .expect("spawn triptych")
+    };
+
+    let fresh = check();
+    assert!(fresh.status.success(), "{}", stderr(&fresh));
+    assert!(
+        stdout(&fresh).contains("No alerts due"),
+        "{}",
+        stdout(&fresh)
+    );
+
+    seed_task_due_in(&sb.db_path(), "Essay due soon", 30);
+    seed_task_due_in(&sb.db_path(), "Far away", 5 * 24 * 60);
+    let first = check();
+    assert!(
+        stdout(&first).contains("Sent 1 alert"),
+        "{}",
+        stdout(&first)
+    );
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        logged.contains("Due within 1 hour|Essay due soon"),
+        "{logged}"
+    );
+    assert!(!logged.contains("Far away"), "{logged}");
+
+    let second = check();
+    assert!(
+        stdout(&second).contains("No alerts due"),
+        "{}",
+        stdout(&second)
+    );
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn notify_check_honors_the_off_switch() {
+    let sb = Sandbox::new();
+    let (script, log) = alert_logger(&sb);
+    assert!(sb.run(&["list"]).status.success());
+    seed_task_due_in(&sb.db_path(), "Essay due soon", 30);
+    let out = sb
+        .cmd(&["notify", "check"])
+        .env("TRIPTYCH_NOTIFY_CMD", &script)
+        .env("TRIPTYCH_NOTIFY", "off")
+        .output()
+        .expect("spawn triptych");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Alerts are off"), "{}", stdout(&out));
+    assert!(!log.exists(), "alerted while off");
+}
+
+#[test]
+fn notify_install_refuses_without_a_database() {
+    let sb = Sandbox::new();
+    // HOME points into the sandbox so nothing can reach the real ~/Library/LaunchAgents.
+    let out = sb
+        .cmd(&["notify", "install"])
+        .env("HOME", &sb.dir)
+        .output()
+        .expect("spawn triptych");
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains('✗'), "{}", stderr(&out));
+    assert!(!sb.path("Library").exists(), "wrote a plist anyway");
+}

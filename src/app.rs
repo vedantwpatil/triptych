@@ -42,11 +42,29 @@ pub use time::*;
 
 const DB_URL: &str = "sqlite:todo.db";
 
-/// Resolves the active database URL. Honors `DATABASE_URL` (matching
-/// `src/bin/import_schedule.rs` and every other config value in this project) so
-/// tests/tooling can point at an isolated database; falls back to `DB_URL` when unset.
-fn db_url() -> String {
+/// Resolves the active database URL: `DATABASE_URL`, else `DB_URL`.
+///
+/// Honoring the env var (as `src/bin/import_schedule.rs` does) lets tests and tooling point at an
+/// isolated database.
+#[must_use]
+pub fn db_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| DB_URL.to_string())
+}
+
+/// Creates (if missing), opens and migrates the database, without building an `App` (no NLP
+/// parser, no Ollama probe), for commands that only need the pool.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be created, opened or migrated.
+pub async fn open_pool() -> Result<SqlitePool, sqlx::Error> {
+    let db_url = db_url();
+    if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
+        Sqlite::create_database(&db_url).await?;
+    }
+    let pool = SqlitePool::connect(&db_url).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    Ok(pool)
 }
 
 #[derive(Debug)]
@@ -359,15 +377,7 @@ impl App {
     ///
     /// Returns an error if the database cannot be created, opened or migrated.
     pub async fn build() -> Result<Self, sqlx::Error> {
-        let db_url = db_url();
-        if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
-            Sqlite::create_database(&db_url).await?;
-        }
-
-        let db_pool = SqlitePool::connect(&db_url).await?;
-        sqlx::migrate!("./migrations").run(&db_pool).await?;
-
-        let app = Self::new(db_pool).await;
+        let app = Self::new(open_pool().await?).await;
 
         if app.nlp_parser.is_ollama_available() {
             tracing::info!("NLP parsing ready");

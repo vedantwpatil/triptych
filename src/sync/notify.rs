@@ -16,14 +16,11 @@ pub async fn notify_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiver<
         tokio::select! {
             _ = shutdown_rx.recv() => break,
 
-            _ = poll.tick() => match notify::due_alerts(&db, chrono::Utc::now()).await {
-                Ok(alerts) => {
-                    for alert in &alerts {
-                        notify::send(alert).await;
-                    }
+            _ = poll.tick() => {
+                if let Err(e) = notify::check_once(&db, chrono::Utc::now()).await {
+                    tracing::warn!("deadline alerts failed: {e}");
                 }
-                Err(e) => tracing::warn!("deadline alerts failed: {e}"),
-            },
+            }
         }
     }
 

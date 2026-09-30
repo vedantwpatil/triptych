@@ -49,6 +49,22 @@ pub enum Commands {
     /// Canvas assignment commands
     #[command(subcommand)]
     Canvas(CanvasCommands),
+
+    /// Deadline alerts without the TUI open
+    #[command(subcommand)]
+    Notify(NotifyCommands),
+}
+
+#[derive(Subcommand)]
+pub enum NotifyCommands {
+    /// Send any deadline alerts due now, then exit
+    Check,
+
+    /// macOS: run `notify check` every minute through a `LaunchAgent` (run from the directory holding `todo.db`)
+    Install,
+
+    /// macOS: remove the `LaunchAgent`
+    Uninstall,
 }
 
 #[derive(Subcommand)]

@@ -1,11 +1,12 @@
 //! Non-interactive CLI subcommands (`add`, `list`, `schedule ...`, `email ...`).
 
 use super::daemon::{self, DaemonRequest, DaemonResponse};
-use crate::app::App;
+use crate::app::{App, open_pool};
 use crate::canvas;
-use crate::cli::{CanvasCommands, Commands, EmailCommands, ScheduleCommands};
+use crate::cli::{CanvasCommands, Commands, EmailCommands, NotifyCommands, ScheduleCommands};
 use crate::email::{EmailConfig, store, sync::sync_account};
-use crate::urgency;
+use crate::migrations::run_calendar_migration;
+use crate::{notify, urgency};
 
 // One match arm per CLI subcommand - splitting it up would scatter each
 // subcommand's handling across functions without reducing complexity.
@@ -317,10 +318,48 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             }
         },
 
-        // Daemon/Stop/Status are filtered out in `main` before this fn is called;
-        // reaching here means that filtering has a bug, not a real user path.
-        _ => return Err("unexpected daemon command reached handle_cli_command".into()),
+        // Daemon/Stop/Status/Notify are handled in `run` before this fn is called;
+        // reaching here means that routing has a bug, not a real user path.
+        _ => return Err("unexpected command reached handle_cli_command".into()),
     }
 
+    Ok(())
+}
+
+/// `triptych notify ...`. Runs before `App::build()` (see `run`): it needs only the database, and
+/// the `LaunchAgent` calls `check` every minute, so it must not pay the NLP parser's Ollama probe.
+pub async fn handle_notify_command(command: NotifyCommands) -> Result<(), crate::BoxError> {
+    match command {
+        NotifyCommands::Check => {
+            if !notify::enabled() {
+                println!("✗ Alerts are off ({})", notify::NOTIFY_ENV);
+                return Ok(());
+            }
+            let pool = open_pool().await?;
+            run_calendar_migration(&pool).await?;
+            match notify::check_once(&pool, chrono::Utc::now()).await? {
+                0 => println!("No alerts due"),
+                n => println!("✓ Sent {n} alert(s)"),
+            }
+        }
+        NotifyCommands::Install => match notify::agent::install() {
+            Ok(path) => {
+                println!("✓ Installed {}", path.display());
+                println!("  Alerts now run every minute, TUI open or not.");
+            }
+            Err(e) => {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
+            }
+        },
+        NotifyCommands::Uninstall => match notify::agent::uninstall() {
+            Ok(true) => println!("✓ Removed the alert agent"),
+            Ok(false) => println!("No alert agent installed"),
+            Err(e) => {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
+            }
+        },
+    }
     Ok(())
 }

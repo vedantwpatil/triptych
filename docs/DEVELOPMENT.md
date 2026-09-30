@@ -30,6 +30,18 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
   `1`-`9` pick). `⇗N` marks tasks with N links past the first. Opener is `open`/`xdg-open`, or
   `TRIPTYCH_OPEN_CMD`; the suite sets it to `true`, scenario `canvas_links_open_pick` swaps in a logger.
   Open: popup rows are bare URLs; anchor text would read better.
+- 2026-09-30 (alerts with the TUI closed): `triptych notify check|install|uninstall`. `check` is one
+  pass of `notify::check_once` (no `App::build()`, so no Ollama probe each minute: `app::open_pool`);
+  `install` (`src/notify/agent.rs`, macOS) writes `~/Library/LaunchAgents/com.triptych.notify.plist`
+  (`StartInterval` 60, `RunAtLoad`, `WorkingDirectory` = cwd for `.env`, `DATABASE_URL` pinned absolute
+  because launchd's cwd is `/`) and loads it with `launchctl bootstrap`; it refuses when no database file
+  exists, since an agent started elsewhere would create an empty one. `due_alerts` now claims a task with
+  an atomic `UPDATE ... WHERE notified_tier < ?`, so the TUI worker and the agent never double-alert
+  (`concurrent_checks_alert_each_task_once`). Tests: `tests/it/notify.rs`, `tests/it/cli.rs`
+  (`notify_*`); the installer itself is not run by tests (it needs the real launchd). Open: Linux has no
+  installer (cron/systemd timer by hand); the agent does not sync Canvas, so Canvas deadlines stay as
+  fresh as the last TUI or `canvas sync` run. Suite: `todo_add_cold_model` fails at `-j 4` here with
+  or without this change (2s budget; passes alone with `--only todo_add_cold_model -j 1`): load, not a regression.
 - 2026-09-30 (email legend): `docs/USAGE.md`'s Email section now explains every list-row mark (`▲ △ ●`, `[folder]`, `[other]`, `[N]`, `[attach]`, `[invite]`, `[task]`, `[snoozed until ..]`) and the title-bar filter tags. Docs only.
 - 2026-09-29 (text caret + word motions): every typed input (task, search, snooze, rule, calendar
   block/task/deadline, email compose) now has a caret, not append-only. `src/app/textedit.rs` is the pure

@@ -1,7 +1,11 @@
 //! `notify`: deadline alert tiers, batching and idempotence.
 
+use std::path::Path;
+
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use triptych::notify::agent::{db_file, plist};
 use triptych::notify::due_alerts;
 
 async fn test_pool() -> SqlitePool {
@@ -83,4 +87,110 @@ async fn a_moved_deadline_alerts_again_and_long_lists_are_batched() {
         .await
         .unwrap();
     assert_eq!(due_alerts(&pool, now).await.unwrap().len(), 1);
+}
+
+/// The TUI worker and the `LaunchAgent` can check at the same instant; each task must still alert once.
+#[tokio::test]
+async fn concurrent_checks_alert_each_task_once() {
+    let dir = std::env::temp_dir().join(format!("triptych_notify_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let opts = SqliteConnectOptions::new()
+        .filename(dir.join("race.db"))
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(opts)
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    triptych::migrations::run_calendar_migration(&pool)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    for i in 0..3 {
+        add(
+            &pool,
+            &format!("t{i}"),
+            Some(now + Duration::minutes(30 + i)),
+            false,
+        )
+        .await;
+    }
+
+    let (a, b) = tokio::join!(due_alerts(&pool, now), due_alerts(&pool, now));
+    let listed: usize = a
+        .unwrap()
+        .iter()
+        .chain(&b.unwrap())
+        .map(|alert| alert.body.lines().filter(|l| l.contains("(in")).count())
+        .sum();
+    assert_eq!(
+        listed, 3,
+        "each task alerts exactly once across both checks"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn db_file_resolves_sqlite_urls_against_the_cwd() {
+    let cwd = Path::new("/work");
+    assert_eq!(db_file("sqlite:todo.db", cwd), Some("/work/todo.db".into()));
+    assert_eq!(
+        db_file("sqlite:/abs/t.db?mode=rwc", cwd),
+        Some("/abs/t.db".into())
+    );
+    assert_eq!(db_file("sqlite:///abs/t.db", cwd), Some("/abs/t.db".into()));
+    assert_eq!(db_file("sqlite::memory:", cwd), None);
+    assert_eq!(db_file("postgres://host/db", cwd), None);
+}
+
+/// macOS only: the generated plist must parse, or launchd would refuse it.
+#[test]
+fn plist_passes_plutil_lint() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let text = plist(
+        Path::new("/bin/triptych"),
+        Path::new("/a & b"),
+        Path::new("/a & b/todo.db"),
+        Path::new("/tmp/n.log"),
+    );
+    let mut child = Command::new("plutil")
+        .args(["-lint", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn plist_runs_notify_check_with_pinned_paths_and_escapes_xml() {
+    let p = plist(
+        Path::new("/bin/triptych"),
+        Path::new("/a & b"),
+        Path::new("/a & b/todo.db"),
+        Path::new("/tmp/n.log"),
+    );
+    assert!(
+        p.contains("<string>/bin/triptych</string><string>notify</string><string>check</string>")
+    );
+    assert!(p.contains("<key>WorkingDirectory</key><string>/a &amp; b</string>"));
+    assert!(p.contains("<key>DATABASE_URL</key><string>sqlite:/a &amp; b/todo.db</string>"));
+    assert!(p.contains("<key>StartInterval</key><integer>60</integer>"));
+    assert!(p.contains("<key>RunAtLoad</key><true/>"));
 }

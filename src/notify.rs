@@ -2,7 +2,11 @@
 //!
 //! [`due_alerts`] is terminal-free and idempotent: each task is alerted once per tier (within 24h,
 //! within 1h), remembered in `tasks.notified_tier`, so restarts never repeat an alert. [`send`]
-//! shells out; the worker in `sync/notify.rs` ties the two together every minute.
+//! shells out; [`check_once`] ties the two together. The TUI worker in `sync/notify.rs` calls it
+//! every minute while the TUI is open; [`agent`] installs a `LaunchAgent` that calls it with the TUI
+//! closed.
+
+pub mod agent;
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
@@ -69,11 +73,18 @@ pub async fn due_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<Ale
         if sent >= tier {
             continue;
         }
-        sqlx::query("UPDATE tasks SET notified_tier = ? WHERE id = ?")
-            .bind(tier)
-            .bind(id)
-            .execute(pool)
-            .await?;
+        // Atomic claim: the TUI worker and the LaunchAgent may run at once, and only the one whose
+        // UPDATE changes the row may alert.
+        let claimed =
+            sqlx::query("UPDATE tasks SET notified_tier = ? WHERE id = ? AND notified_tier < ?")
+                .bind(tier)
+                .bind(id)
+                .bind(tier)
+                .execute(pool)
+                .await?;
+        if claimed.rows_affected() == 0 {
+            continue;
+        }
         by_tier[usize::try_from(tier - 1).unwrap_or(0)]
             .push(format!("{description} (in {})", describe(left)));
     }
@@ -95,6 +106,20 @@ pub async fn due_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<Ale
             }
         })
         .collect())
+}
+
+/// One pass: the alerts due at `now`, each shown. Returns how many were sent. Shared by the TUI
+/// worker and `triptych notify check`.
+///
+/// # Errors
+///
+/// Returns an error if a database query fails.
+pub async fn check_once(pool: &SqlitePool, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+    let alerts = due_alerts(pool, now).await?;
+    for alert in &alerts {
+        send(alert).await;
+    }
+    Ok(alerts.len())
 }
 
 /// Shows `alert`. A failure is logged, never raised: an alert must not take the worker down.

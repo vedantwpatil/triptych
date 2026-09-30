@@ -65,6 +65,10 @@ While the TUI is open, a desktop notification fires once when a task comes withi
 deadline and once within 1 hour (batched if several). Moving a deadline re-arms it. Completed and
 overdue tasks are skipped. Off with `TRIPTYCH_NOTIFY=off`.
 
+With the TUI closed, `triptych notify install` (macOS) keeps them coming through a LaunchAgent, see
+[`SETUP.md`](./SETUP.md#desktop-alerts). `triptych notify check` sends whatever is due right now and exits.
+Canvas deadlines only refresh while the TUI runs (or after `triptych canvas sync`).
+
 ## Calendar
 
 Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks. Load blocks from TOML
@@ -139,6 +143,7 @@ triptych daemon &                 # optional: instant one-shot commands
 triptych add "Buy milk tomorrow 4pm #home"
 triptych list                     # also: done <id>, rm <id>, clear
 triptych canvas sync
+triptych notify check | install | uninstall   # deadline alerts without the TUI
 triptych email sync [--backfill] | list   # --backfill re-pulls the last 6 months
 triptych schedule show | import <file> | export [file] | clear | reallocate
 triptych status                   # daemon state; stop it with `triptych stop`

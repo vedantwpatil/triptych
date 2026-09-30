@@ -65,6 +65,10 @@ pub async fn run() -> Result<(), BoxError> {
         return Ok(());
     }
 
+    if let Some(Commands::Notify(command)) = cli_args.command {
+        return commands::handle_notify_command(command).await;
+    }
+
     // Build app for other commands
     let mut app = App::build().await?;
 
