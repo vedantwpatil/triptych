@@ -30,6 +30,7 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
   `1`-`9` pick). `⇗N` marks tasks with N links past the first. Opener is `open`/`xdg-open`, or
   `TRIPTYCH_OPEN_CMD`; the suite sets it to `true`, scenario `canvas_links_open_pick` swaps in a logger.
   Open: popup rows are bare URLs; anchor text would read better.
+- 2026-09-30 (email legend): `docs/USAGE.md`'s Email section now explains every list-row mark (`▲ △ ●`, `[folder]`, `[other]`, `[N]`, `[attach]`, `[invite]`, `[task]`, `[snoozed until ..]`) and the title-bar filter tags. Docs only.
 - 2026-09-29 (text caret + word motions): every typed input (task, search, snooze, rule, calendar
   block/task/deadline, email compose) now has a caret, not append-only. `src/app/textedit.rs` is the pure
   edit engine (`Edit`, `apply_edit`; caret = `App.edit_cursor`, `None` = end); `tui/keys.rs::edit_for` maps

@@ -111,6 +111,27 @@ Press `m`. Set up accounts first ([`SETUP.md`](./SETUP.md#email)). Sync runs in 
 | `o`                         | Toggle priority/date sort                                                            |
 | `s` (in message)            | Save attachments                                                                     |
 
+Each list row reads left to right:
+`(account) [MM/DD HH:MM] sender [folder] [other] ▲ ● [color] [N] subject [attach] [invite] [task] [snoozed until ..]`.
+Tags with no state are hidden.
+
+| Mark                 | Meaning                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| bold subject         | Unread                                                                                   |
+| `▲` / `△`            | Priority: high / medium, from subject and snippet keywords. Display only; `o` sorts by it |
+| `●` (yellow)         | Starred (`f`)                                                                            |
+| `[folder]`           | Message lives outside `INBOX`, e.g. `[Archive]`                                          |
+| `[other]`            | AI triage put it in Other (Focused mail is untagged)                                     |
+| `[red]`, `[blue]`... | Color category (`t`)                                                                     |
+| `[N]`                | Thread of N messages                                                                     |
+| `[attach]`           | Has attachments (`s` in the message saves them)                                          |
+| `[invite]`           | Meeting invite not yet accepted (`M`); becomes `[task]` once accepted                    |
+| `[task]`             | Already turned into a task                                                               |
+| `[snoozed until ..]` | Hidden from the main list until then (`Z` shows snoozed mail)                            |
+
+The title bar adds `· account:`, `· folder:`, `· focus:`, `· attach:`, `· unread:`, `· starred:`, `· domain:` or
+`· snoozed view` while that filter is on.
+
 ## CLI
 
 ```bash
