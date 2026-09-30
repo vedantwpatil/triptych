@@ -266,8 +266,8 @@ impl App {
                 }
 
                 sqlx::query(
-                    "INSERT INTO schedule_blocks (day_of_week, start_time, end_time, block_type, title, description, priority)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO schedule_blocks (day_of_week, start_time, end_time, block_type, title, description, priority, source)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, 'toml')",
                 )
                 .bind(day_of_week)
                 .bind(&block.start)
@@ -420,6 +420,18 @@ impl App {
             let end = Self::time_to_minutes(&block.end_time).unwrap_or(0);
 
             if time_minutes >= start && time_minutes < end {
+                let source: String =
+                    sqlx::query_scalar("SELECT source FROM schedule_blocks WHERE id = ?")
+                        .bind(block.id)
+                        .fetch_one(&self.db_pool)
+                        .await?;
+                if source == "toml" {
+                    self.status_message = Some((
+                        "Block is from schedule.toml: edit the file and re-import".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                    return Ok(());
+                }
                 sqlx::query("DELETE FROM schedule_blocks WHERE id = ?")
                     .bind(block.id)
                     .execute(&self.db_pool)

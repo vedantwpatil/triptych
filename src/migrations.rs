@@ -18,6 +18,17 @@ async fn add_external_id(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Blocks imported from schedule.toml are protected from in-app deletion.
+async fn add_block_source(pool: &SqlitePool) -> Result<()> {
+    if !column_exists(pool, "schedule_blocks", "source").await? {
+        sqlx::query("ALTER TABLE schedule_blocks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added source to schedule_blocks");
+    }
+    Ok(())
+}
+
 /// Highest deadline-alert tier already sent for a task (`notify.rs`); reset when the deadline moves.
 async fn add_notified_tier(pool: &SqlitePool) -> Result<()> {
     if !column_exists(pool, "tasks", "notified_tier").await? {
@@ -111,6 +122,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_schedule_blocks_day ON schedule_blocks(day_of_week, start_time)")
         .execute(pool)
         .await?;
+    add_block_source(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(task_category)")
         .execute(pool)
         .await?;

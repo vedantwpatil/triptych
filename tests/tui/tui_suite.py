@@ -1270,6 +1270,19 @@ def _(c: Ctx):
     c.check(a != b and a == d, f"stack cycle did not alternate: {a!r} {b!r} {d!r}")
 
 
+@scenario("cal_toml_block_protected")
+def _(c: Ctx):
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write('[[blocks]]\nday = "daily"\nstart = "07:00"\nend = "08:00"\ntype = "admin"\ntitle = "x"\n')
+    c.cli("schedule", "import", f.name)
+    t = c.tui()
+    c.cal()
+    t.press("d")
+    c.check(t.has("schedule.toml"), "no protection message for an imported block")
+    c.eq(c.db("SELECT count(*) FROM schedule_blocks")[0][0], 7, "imported blocks survive d")
+
+
 @scenario("cal_long_task_spans")
 def _(c: Ctx):
     monday = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
