@@ -20,6 +20,7 @@ fn task(
         tags: None,
         task_category: None,
         links: None,
+        recurrence: None,
     };
     (task, now)
 }

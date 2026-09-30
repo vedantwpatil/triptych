@@ -21,6 +21,23 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-09-30 (recurring tasks): `every day|weekday|week|month|<weekday>` in a task. Rules are pure in
+  `src/recurrence.rs` (`Recurrence`, `extract`, `next_after`, `next_dates`); `NLPParser::parse` strips
+  the phrase first (`every fri` becomes `friday`, since the date parser only knows full names) and
+  returns it as `ParseResult.recurrence`, so the regex, LLM and cache layers are untouched. Stored in
+  `tasks.recurrence` (`add_recurrence` migration, key like `fri`, `weekly`). All three insert paths bind
+  it: `insert_parsed_task` (TUI), `App::add_task` (CLI), `add_task_to_db` (daemon).
+  `App::toggle_completed` and `complete_task_by_id` call `add_next_occurrence` (`src/app/repeat.rs`),
+  which copies the row with shifted dates and skips when an identical open copy exists (done, reopen,
+  done). `↻ rule` in the todo row and `[↻ rule]` in `triptych list`. Tests: `tests/it/recurrence.rs`,
+  `tests/it/app.rs`, `tests/it/cli.rs`, scenario `todo_repeat_complete`. Open: no `every 2 weeks`, no
+  multi-weekday, no end date; reopening a task leaves its spawned copy; an undated first task stays
+  undated but its copies get an end-of-day deadline; monthly drift after a clamp.
+- 2026-09-30 (docs refresh): `roadmap.md` slices and focus order rewritten (todo and email first, then
+  todo in the calendar view, CalDAV last); `roadmap-outlook.md` is now a backlog, not the active goal;
+  `README.md` Implemented/Next updated. Corrections: email to task auto-scheduling is done
+  (`convert_selected_email_to_task` reaches `on_task_changed`); CalDAV is only a stub (Canvas ICS import
+  and invite parsing are not CalDAV).
 - 2026-09-30 (reword key): todo reword is `r`/`R` (it moved from `e` in `a25f249`); scenario
   `todo_reword` and the docs now match, and the scenario uses `R` for the second reword.
 - 2026-09-30 (canvas links): Canvas tasks carry links. New `tasks.links` (JSON array, `add_links`

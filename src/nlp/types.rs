@@ -1,12 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::recurrence::Recurrence;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseResult {
     pub item: ParsedItem,
     pub strategy: ParseStrategy,
     pub confidence: f32,
     pub parse_time_ms: u64,
+    /// Repeat phrase found in the input ("every friday", "daily"); the item is parsed without it.
+    #[serde(default)]
+    pub recurrence: Option<Recurrence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

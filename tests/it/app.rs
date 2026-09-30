@@ -1956,3 +1956,85 @@ async fn range_delete_keeps_canvas_rows_and_removes_the_rest() {
 
     assert_eq!(task_count(&pool).await, 1);
 }
+
+async fn insert_repeating(pool: &SqlitePool, deadline: DateTime<Utc>) -> i64 {
+    let id = insert_task_with_deadline(pool, "water plants", deadline, 30).await;
+    sqlx::query("UPDATE tasks SET recurrence = 'weekly' WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("set recurrence");
+    id
+}
+
+async fn open_copies(pool: &SqlitePool) -> Vec<(DateTime<Utc>, Option<String>)> {
+    sqlx::query_as("SELECT deadline, recurrence FROM tasks WHERE completed = 0")
+        .fetch_all(pool)
+        .await
+        .expect("open tasks")
+}
+
+#[tokio::test]
+async fn completing_a_repeating_task_adds_the_next_occurrence() {
+    let pool = test_pool().await;
+    let due = Utc::now() + Duration::days(2);
+    insert_repeating(&pool, due).await;
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load");
+    app.toggle_completed().await.expect("complete");
+
+    assert_eq!(task_count(&pool).await, 2);
+    let open = open_copies(&pool).await;
+    assert_eq!(open.len(), 1);
+    let gap = (open[0].0 - due).num_hours();
+    assert!(
+        (167..=169).contains(&gap),
+        "next is a week later, got {gap}h"
+    );
+    assert_eq!(open[0].1.as_deref(), Some("weekly"));
+}
+
+#[tokio::test]
+async fn done_reopen_done_keeps_a_single_next_occurrence() {
+    let pool = test_pool().await;
+    insert_repeating(&pool, Utc::now() + Duration::days(2)).await;
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load");
+    for _ in 0..3 {
+        app.toggle_completed().await.expect("toggle");
+        app.selected = app.tasks.iter().position(|t| t.id == 1).unwrap_or(0);
+    }
+
+    assert_eq!(task_count(&pool).await, 2);
+}
+
+#[tokio::test]
+async fn completing_a_plain_task_adds_nothing() {
+    let pool = test_pool().await;
+    insert_task(&pool, "one-off").await;
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.expect("load");
+    app.toggle_completed().await.expect("complete");
+
+    assert_eq!(task_count(&pool).await, 1);
+}
+
+#[tokio::test]
+async fn add_task_stores_the_repeat_rule_and_the_first_date() {
+    let pool = test_pool().await;
+    let mut app = App::new(pool.clone()).await;
+    let id = app
+        .add_task("water plants every friday")
+        .await
+        .expect("add");
+
+    let (description, recurrence, scheduled): (String, Option<String>, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT description, recurrence, scheduled_at FROM tasks WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+    assert_eq!(description, "water plants");
+    assert_eq!(recurrence.as_deref(), Some("fri"));
+    assert!(scheduled.is_some(), "first Friday becomes the due date");
+}

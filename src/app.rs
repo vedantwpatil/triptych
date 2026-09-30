@@ -18,6 +18,7 @@ mod mail;
 mod model;
 mod motion;
 mod placement;
+mod repeat;
 mod schedule_io;
 mod search;
 mod tasks;

@@ -66,9 +66,11 @@ pub struct Task {
     pub task_category: Option<String>,
     /// JSON array of URLs (see `app::parse_links`); `None` when the task has none.
     pub links: Option<String>,
+    /// `Recurrence::key` of the repeat rule; `None` for a one-off task.
+    pub recurrence: Option<String>,
 }
 
-pub(super) const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category, links";
+pub(super) const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category, links, recurrence";
 
 /// A concrete occurrence of a recurring schedule block on a specific date
 #[derive(Debug, Clone)]

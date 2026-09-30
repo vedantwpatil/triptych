@@ -19,6 +19,7 @@ mod motion;
 mod nlp_llm;
 mod nlp_rules;
 mod notify;
+mod recurrence;
 mod textedit;
 mod ui;
 mod urgency;

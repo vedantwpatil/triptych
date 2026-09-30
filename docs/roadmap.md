@@ -28,7 +28,7 @@ Full detail and phase breakdown in [`docs/roadmap-email.md`](./roadmap-email.md)
 - **Slice 1 (done)**: IMAP app-password fetch on a 60s poll, SQLite storage (UIDVALIDITY-aware
   `SyncCursor`, 180-day retention purge), TUI list view + `v` body popup, email→task
   conversion via the existing NLP pipeline. See `src/email/`.
-- **Slice 2 (planned)**: true IMAP IDLE (push instead of poll).
+- **Slice 2 (done)**: true IMAP IDLE (push instead of poll); `roadmap-email.md` Slice 15.
 - **Slice 3 (planned)**: OAuth2 for Gmail and other providers (needs external OAuth client
   setup — a user action, not something buildable unilaterally).
 - **Slice 4 (done)**: multi-account. Shipped as env-var config (`IMAP_ACCOUNTS=label1,label2`
@@ -40,37 +40,43 @@ Full detail and phase breakdown in [`docs/roadmap-email.md`](./roadmap-email.md)
   across all configured accounts, no account switcher. Revisit the `accounts` table if
   per-account state needs to live in the DB (e.g. sync cursors, enable/disable toggles from the
   UI).
-- **Slice 5 (partially done)**: SMTP send/reply/forward, real delete and archive/folder-move are
-  done (`roadmap-email.md`'s own Slice 2, Slice 5 and Slice 6 — that doc's slice numbers track a
-  separate, finer-grained sequence than this file's); snooze triage, enhanced NLP parsing and
-  auto-scheduling integration for email-derived tasks remain planned.
+- **Slice 5 (done)**: SMTP send/reply/forward, delete, archive/folder-move, snooze (`roadmap-email.md`
+  numbers its own finer-grained slices). Email-derived tasks take a deadline from the body
+  (`convert_selected_email_to_task`) and go through the same allocation as any task.
 - **Slice 6 (done)**: unified inbox with AI-driven triage. Shipped as a binary Focused/Other
   split (Outlook's Focused Inbox) rather than a ranked score, using the existing Ollama
   integration (`src/nlp/ollama_client.rs`'s `triage`) — no new LLM dependency. Distinct from
   Slice 5's keyboard triage (archive/snooze are manual actions; this is automatic classification,
   unrelated to either). See `docs/roadmap-email.md`'s Slice 17.
 
-Goal: Superhuman-like email productivity in the terminal, integrated with task/calendar
-workflows — not a standalone mail client bolted on.
+Goal: email productivity in the terminal, integrated with task/calendar workflows, not a
+standalone mail client bolted on. The email view is feature-complete enough for daily use; further
+ideas (Outlook-style panes, quick steps, RSVP) sit in [`roadmap-outlook.md`](./roadmap-outlook.md) as
+a backlog, not a goal. Core todo and calendar work comes first.
+
+## Focus order
+
+1. ~~Recurring tasks~~ — done (see below).
+2. Email work only where it feeds tasks and the calendar.
+3. Todo list inside the calendar view.
+4. CalDAV sync, last (large; needs an external account to test).
 
 ## Other Planned Features
 
-Carried over from the README roadmap; no implementation work started on any of these yet.
-
-- **CalDAV calendar sync** — two-way sync with external calendars (Google Calendar, iCloud,
-  etc.) via CalDAV. Note: `icalendar` crate is already an optional dependency
-  (`calendar-sync` feature) but unwired — check `src/sync/calendar.rs` before starting, it has
-  a `calendar_sync_worker` stub marked "Not yet finished" in `src/sync/daemon.rs`.
+- **CalDAV calendar sync** — Planned, not started. `src/sync/calendar.rs` is a stub: `sync_calendar`
+  only counts `events` rows and `calendar_sync_enabled` is hardcoded `false`. Canvas and email
+  invites read iCalendar data but are not CalDAV (no server protocol, read-only).
 - **Canvas assignment sync** — built (`CANVAS_ICS_URL`, `triptych canvas sync`). Open: reconcile
   assignments removed from the feed; details in [`future-features.md`](./future-features.md) (first entry).
-- **Todo list in the calendar** — plan to integrate the todo list into the calendar view. Not a
-  priority right now; nothing started.
-- **Recurring tasks** — repeat rules for tasks (daily/weekly/custom), distinct from the
-  existing recurring *schedule blocks* (TOML-defined).
+- **Desktop notifications** — built: in-TUI worker plus `triptych notify install` (macOS
+  LaunchAgent); see [`USAGE.md`](./USAGE.md).
+- **Todo list in the calendar** — allocated tasks already show in the grid; a todo panel inside the
+  calendar view is not started.
+- **Recurring tasks** — built: `every day|weekday|week|month|<weekday>` in the task text; finishing one
+  adds the next copy (`src/recurrence.rs`, `src/app/repeat.rs`, see [`USAGE.md`](./USAGE.md)). Open:
+  `every 2 weeks`, several weekdays, an end date. Separate from the TOML recurring *schedule blocks*.
 - **Full-text search** — search across task descriptions (and, once built, email bodies).
   Likely SQLite FTS5 virtual table given the existing SQLite-only storage layer.
-- **Desktop notifications** — OS-level notifications for deadlines/reminders; needs a
-  platform-notification crate, decision on daemon vs TUI as the trigger point.
 - **Task dependencies** — blocking/blocked-by relationships between tasks, feeding into the
   scheduling algorithm's priority ordering.
 - **Statistics dashboard** — a TUI view (new `ViewMode` variant, same pattern as `Calendar`/

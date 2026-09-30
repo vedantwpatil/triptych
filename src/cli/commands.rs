@@ -95,6 +95,10 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
                                     .push(urgency::deadline_badge(deadline, chrono::Local::now()));
                             }
 
+                            if let Some(rule) = &task.recurrence {
+                                indicators.push(format!("[↻ {rule}]"));
+                            }
+
                             let indicators_str = if indicators.is_empty() {
                                 String::new()
                             } else {

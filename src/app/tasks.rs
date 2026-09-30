@@ -9,6 +9,7 @@ use super::{
 };
 use crate::{
     nlp::{ParsedItem, Priority},
+    recurrence::Recurrence,
     urgency::effective_priority,
 };
 
@@ -26,6 +27,8 @@ pub struct TaskParse {
     /// applied only as a fallback when `item`'s own parse found no deadline (see `insert_parsed_task`).
     body_deadline: Option<DateTime<Utc>>,
     item: Result<ParsedItem, String>,
+    /// Repeat phrase found in `description` ("every friday"); stored on the new task.
+    recurrence: Option<Recurrence>,
 }
 
 #[must_use]
@@ -167,8 +170,14 @@ impl App {
             .parse(description)
             .await
             .map_err(|e| sqlx::Error::Protocol(format!("NLP parsing failed: {e}")))?;
-        self.insert_parsed_task(description, parse_result.item, None, None)
-            .await
+        self.insert_parsed_task(
+            description,
+            parse_result.item,
+            None,
+            None,
+            parse_result.recurrence,
+        )
+        .await
     }
 
     /// Parses `description` in the background, so the TUI never waits on the parser: a parse that
@@ -188,17 +197,17 @@ impl App {
         let parser = Arc::clone(&self.nlp_parser);
         let tx = self.task_tx.clone();
         tokio::spawn(async move {
-            let item = parser
-                .parse(&description)
-                .await
-                .map(|r| r.item)
-                .map_err(|e| format!("NLP parsing failed: {e}"));
+            let (item, recurrence) = match parser.parse(&description).await {
+                Ok(r) => (Ok(r.item), r.recurrence),
+                Err(e) => (Err(format!("NLP parsing failed: {e}")), None),
+            };
             let _ = tx.send(TaskParse {
                 description,
                 email_id,
                 title_override,
                 body_deadline,
                 item,
+                recurrence,
             });
         });
     }
@@ -216,6 +225,7 @@ impl App {
             title_override,
             body_deadline,
             item,
+            recurrence,
         } = parsed;
         let item = item.map_err(sqlx::Error::Protocol)?;
 
@@ -233,7 +243,13 @@ impl App {
         }
 
         let task_id = self
-            .insert_parsed_task(&description, item, title_override.as_deref(), body_deadline)
+            .insert_parsed_task(
+                &description,
+                item,
+                title_override.as_deref(),
+                body_deadline,
+                recurrence,
+            )
             .await?;
         self.status_message = None;
         match email_id {
@@ -248,6 +264,7 @@ impl App {
         item: ParsedItem,
         title_override: Option<&str>,
         body_deadline: Option<DateTime<Utc>>,
+        recurrence: Option<Recurrence>,
     ) -> Result<i64, sqlx::Error> {
         let (parsed_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
             extract_task_fields(item);
@@ -285,7 +302,7 @@ impl App {
             duration_minutes.unwrap_or_else(|| default_duration_for_category(&category));
 
         let new_task_id = sqlx::query(
-            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&task_title)
         .bind(false)
@@ -297,6 +314,7 @@ impl App {
         .bind(deadline)
         .bind(duration_minutes)
         .bind(&category)
+        .bind(recurrence.map(Recurrence::key))
         .execute(&self.db_pool)
         .await?
         .last_insert_rowid();
@@ -410,13 +428,16 @@ impl App {
         }
 
         let task = &self.tasks[self.selected];
-        let new_status = !task.completed;
+        let (id, new_status) = (task.id, !task.completed);
 
         sqlx::query("UPDATE tasks SET completed = ? WHERE id = ?")
             .bind(new_status)
-            .bind(task.id)
+            .bind(id)
             .execute(&self.db_pool)
             .await?;
+        if new_status {
+            self.add_next_occurrence(id).await?;
+        }
 
         self.reload_tasks_keep_selection().await?;
         self.on_task_changed().await?;
@@ -510,6 +531,7 @@ impl App {
             .rows_affected();
 
         if rows_affected > 0 {
+            self.add_next_occurrence(id).await?;
             self.on_task_changed().await?;
         }
         Ok(rows_affected > 0)

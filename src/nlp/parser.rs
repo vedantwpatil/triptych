@@ -1,6 +1,7 @@
 use crate::nlp::ollama_client::{OllamaClient, OllamaError, bulk_mail_heuristic};
 use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
+use crate::recurrence;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -89,7 +90,10 @@ impl NLPParser {
     ///
     /// Returns [`ParseError`] for unusable input. The current layers always fall back to a plain task, so no path returns it yet.
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
-        let result = self.parse_layers(input).await?;
+        let phrase = recurrence::extract(input);
+        let text = phrase.as_ref().map_or(input, |(_, text)| text.as_str());
+        let mut result = self.parse_layers(text).await?;
+        result.recurrence = phrase.map(|(rule, _)| rule);
         tracing::info!(strategy = ?result.strategy, ms = result.parse_time_ms, "nlp parse");
         Ok(result)
     }
@@ -114,6 +118,7 @@ impl NLPParser {
                 strategy: ParseStrategy::Cached,
                 confidence: cached.confidence,
                 parse_time_ms: elapsed,
+                recurrence: None,
             });
         }
 
@@ -133,6 +138,7 @@ impl NLPParser {
                     strategy: ParseStrategy::Regex,
                     confidence: 0.95,
                     parse_time_ms: elapsed,
+                    recurrence: None,
                 };
 
                 let mut cache = self.cache.lock().await;
@@ -167,6 +173,7 @@ impl NLPParser {
                         strategy: ParseStrategy::Ollama,
                         confidence: 0.85,
                         parse_time_ms: elapsed,
+                        recurrence: None,
                     };
 
                     // Cache Ollama results
@@ -205,6 +212,7 @@ impl NLPParser {
                 strategy: ParseStrategy::Regex,
                 confidence: 0.7,
                 parse_time_ms: elapsed,
+                recurrence: None,
             });
         }
 
@@ -226,6 +234,7 @@ impl NLPParser {
             strategy: ParseStrategy::Fallback,
             confidence: 0.50,
             parse_time_ms: elapsed,
+            recurrence: None,
         };
 
         // Cache fallback results

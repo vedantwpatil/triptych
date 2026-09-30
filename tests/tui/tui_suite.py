@@ -959,6 +959,20 @@ def _(c: Ctx):
     c.check(t.has("#bills") and t.has("[URGENT↑]"), "badges not shown after TUI add (HIGH raised: due in 2h)")
 
 
+@scenario("todo_repeat_complete")
+def _(c: Ctx):
+    t = c.tui()
+    c.add("water plants every friday")
+    c.eq(c.db("select description, recurrence from tasks"), [("water plants", "fri")], "stored row")
+    c.check(t.has("↻ fri"), "repeat mark not rendered")
+    t.press("ENTER")
+    c.see("Repeats fri", msg="no status line after completing a repeating task")
+    c.eq(c.db("select completed, recurrence from tasks order by id"), [(1, "fri"), (0, "fri")], "done plus next copy")
+    t.press("ENTER")
+    t.press("ENTER")
+    c.eq(c.db("select count(*) from tasks"), [(2,)], "done, reopen, done must not add a third copy")
+
+
 @scenario("todo_fuzzy_cache")
 def _(c: Ctx):
     c.tui()

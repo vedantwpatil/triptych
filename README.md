@@ -143,33 +143,24 @@ Import with `triptych schedule import schedule.toml`.
 
 ### Implemented
 
-- Task management with NLP parsing
-- Weekly calendar view with schedule blocks
+- Task management with NLP parsing, urgency badges, vim motions and `/` search
+- Weekly calendar view with schedule blocks; deadline tasks auto-allocated into blocks
 - Persistent daemon for CLI performance
 - TOML-based schedule import/export
-- Auto-scheduling to available time slots
+- Canvas assignment sync (`CANVAS_ICS_URL`)
+- Deadline alerts, also with the TUI closed (`triptych notify install`, macOS)
+- Recurring tasks: `water plants every friday`, finishing one adds the next (`docs/USAGE.md`)
+- Email: multi-account IMAP with IDLE, SMTP reply/forward, archive/delete/snooze, Focused/Other
+  triage, rules, categories, drafts, email-to-task with body deadline scan
+  (see `docs/roadmap-email.md`)
 
-### Email Client — In Progress
+### Next
 
-IMAP fetch, storage, TUI view, email-to-task conversion, and multi-account are already
-working (see `docs/roadmap-email.md` for details). Still planned:
+1. Email work that feeds tasks and the calendar
+2. Todo list inside the calendar view
+3. CalDAV calendar sync (a stub exists; not functional)
 
-- IMAP IDLE for real-time notifications
-- Keyboard-driven email triage (archive, reply, snooze)
-- OAuth2 support for Gmail and other providers
-- SMTP send/reply
-- Enhance the nlp parsing and the automatic scheduling
-- Unified inbox with AI-driven triage (using the existing Ollama integration) — not started
-
-The goal is to bring Superhuman-like email productivity to the terminal, fully integrated with task and calendar workflows.
-
-### Other Planned Features
-
-- CalDAV calendar sync
-- Recurring tasks
-- Full-text search
-- Task dependencies
-- Statistics dashboard
+Later: OAuth2 for Gmail, task dependencies, statistics dashboard. Status detail: `docs/roadmap.md`.
 
 ## Troubleshooting
 

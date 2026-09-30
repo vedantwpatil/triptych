@@ -163,6 +163,13 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
                 ));
             }
 
+            if let Some(rule) = &task.recurrence {
+                spans.push(Span::styled(
+                    format!(" ↻ {rule}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
             // Add tags
             if !tags.is_empty() {
                 spans.push(Span::styled(

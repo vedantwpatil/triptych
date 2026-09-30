@@ -194,6 +194,28 @@ fn add_list_done_rm_clear_roundtrip() {
 }
 
 #[test]
+fn repeating_task_lists_its_rule_and_done_adds_the_next_one() {
+    let sb = Sandbox::new();
+    let add = sb.run(&["add", "water plants every friday"]);
+    assert!(add.status.success(), "add failed: {}", stderr(&add));
+    let id = extract_id(&stdout(&add)).expect("task id in add output");
+
+    let before = stdout(&sb.run(&["list"]));
+    assert!(before.contains("[↻ fri]"), "rule not listed: {before}");
+    assert!(
+        !before.contains("every"),
+        "phrase left in the title: {before}"
+    );
+
+    let done = sb.run(&["done", &id.to_string()]);
+    assert!(done.status.success(), "done failed: {}", stderr(&done));
+
+    let after = stdout(&sb.run(&["list"]));
+    assert_eq!(after.matches("water plants").count(), 2, "{after}");
+    assert_eq!(after.matches("[↻ fri]").count(), 2, "{after}");
+}
+
+#[test]
 fn done_and_rm_report_missing_ids() {
     let sb = Sandbox::new();
 

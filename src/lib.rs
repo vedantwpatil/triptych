@@ -11,6 +11,7 @@ pub mod logging;
 pub mod migrations;
 pub mod nlp;
 pub mod notify;
+pub mod recurrence;
 mod sync;
 mod tui;
 pub mod urgency;

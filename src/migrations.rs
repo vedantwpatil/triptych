@@ -41,6 +41,17 @@ async fn add_links(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Repeat rule key for a task (`recurrence::Recurrence::key`); finishing it adds the next occurrence.
+async fn add_recurrence(pool: &SqlitePool) -> Result<()> {
+    if !column_exists(pool, "tasks", "recurrence").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN recurrence TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added recurrence to tasks");
+    }
+    Ok(())
+}
+
 /// Highest deadline-alert tier already sent for a task (`notify.rs`); reset when the deadline moves.
 async fn add_notified_tier(pool: &SqlitePool) -> Result<()> {
     if !column_exists(pool, "tasks", "notified_tier").await? {
@@ -72,6 +83,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
 
     add_external_id(pool).await?;
     add_links(pool).await?;
+    add_recurrence(pool).await?;
     add_notified_tier(pool).await?;
 
     if !column_exists(pool, "tasks", "task_category").await? {

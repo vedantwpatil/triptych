@@ -1,4 +1,5 @@
 use crate::nlp::{NLPParser, types::ParseResult};
+use crate::recurrence::Recurrence;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -219,8 +220,8 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
     // Use runtime query instead of query! macro
     let result = sqlx::query(
         r"
-        INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category)
-        VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence)
+        VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?, ?)
         "
     )
     .bind(&task_title)
@@ -232,6 +233,7 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
     .bind(deadline)
     .bind(duration_minutes)
     .bind(category)
+    .bind(parse_result.recurrence.map(Recurrence::key))
     .execute(db)
     .await?;
 

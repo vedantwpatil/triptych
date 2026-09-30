@@ -16,7 +16,7 @@ deadline. Finished tasks sink to the bottom. Badges: `[LOW]`, `[HIGH]`, `[URGENT
 | `/`, `n`/`N`                                | Search, next/previous match                            |
 | `a`                                         | Add a task in plain language                           |
 | `r`/`R`                                     | Reword the selected task (keeps its date and priority) |
-| `Enter`                                     | Toggle done                                            |
+| `Enter`                                     | Toggle done (a repeating task adds its next copy)      |
 | `x`/`d`                                     | Delete (a selection if one is active)                  |
 | `v`/`V`                                     | Select rows; `j`/`k` extend, `Esc` cancels             |
 | `s`                                         | Auto-schedule onto the calendar                        |
@@ -26,6 +26,17 @@ deadline. Finished tasks sink to the bottom. Badges: `[LOW]`, `[HIGH]`, `[URGENT
 **Adding tasks.** `Submit report tomorrow at 3pm #work !!`: dates (`today`, `next Monday`, `10/15`),
 times (`3pm`, `15:00`), tags (`#work`), priority (`!` medium, `!!` high, `!!!` urgent). Parsing runs
 in the background: regex first, local LLM for anything fuzzy.
+
+**Repeating tasks.** Add `every day`, `every weekday`, `every week`, `every month` or `every friday`
+(`every fri` works too) anywhere in the text: `water plants every friday 6pm`. A trailing `daily`,
+`weekly`, `monthly` or `weekdays` also counts, but only at the end or before `#tags`/`!` marks
+(`pay rent monthly #bills`), so "review weekly report" stays a plain task. The phrase is removed from
+the title and the row shows `↻ fri`. Marking it done (`Enter` or `triptych done`) adds the next copy
+at the bottom of the list: same text, priority, tags, duration and links, dates moved by the rule and
+never in the past. A scheduled time and a deadline keep the same gap. A task with no date gets a
+deadline at the end of the next day. Done, reopen, done does not add a second copy. Not supported yet:
+`every 2 weeks`, several weekdays, ending a series (delete the open copy). Monthly clamps short
+months (31 Jan becomes 28 Feb, then stays on the 28th). Reword (`r`) keeps the rule.
 
 **Colours.** Every colour is one of the 16 named terminal colours, so your terminal theme decides the
 shades. `[HIGH]`/`[URGENT]` and near deadlines are red (urgent is bold and brighter), far deadlines cyan,
