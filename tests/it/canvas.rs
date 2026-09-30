@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Local, TimeZone, Timelike, Utc};
 use sqlx::SqlitePool;
+use triptych::app::parse_links;
 use triptych::canvas::{Assignment, parse_feed, split_course, tidy_title, upsert};
 
 const FEED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//canvas//EN\r\n\
@@ -31,6 +32,7 @@ fn assignment(uid: &str, title: &str, due: DateTime<Utc>) -> Assignment {
         uid: uid.to_string(),
         title: title.to_string(),
         due,
+        links: Vec::new(),
     }
 }
 
@@ -158,4 +160,68 @@ fn split_course_separates_the_code_from_tidy_titles_only() {
     );
     assert_eq!(split_course("Note: call mom"), None);
     assert_eq!(split_course("no colon here"), None);
+}
+
+const LINKED_FEED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//canvas//EN\r\n\
+BEGIN:VEVENT\r\nUID:event-assignment-94491\r\nSUMMARY:Lab 1 [CS-472-001]\r\nDTSTART:20261015T235900Z\r\n\
+URL:https://school.instructure.com/calendar?include_contexts=course_14672&month=10&year=2026#assignment_94491\r\n\
+X-ALT-DESC;FMTTYPE=text/html:<p>Clone <a href=\"https://classroom.github.com/a/abc\">the repo</a>\\, then\r\n \
+ watch <a href=\"https://www.youtube.com/watch?v=xyz&amp;t=5\">this</a> and <a href='https://school.instructure.com/courses/14672/files/7?wrap=1'>notes</a>.\r\n \
+ <a href=\"https://classroom.github.com/a/abc\">again</a> <a href=\"mailto:ta@school.edu\">mail</a></p>\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:event-assignment-2\r\nSUMMARY:Reading\r\nDTSTART:20261016T100000Z\r\n\
+URL:https://school.instructure.com/calendar?include_contexts=user_9&month=10#event_5\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:event-assignment-3\r\nSUMMARY:Bare\r\nDTSTART:20261017T100000Z\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+#[test]
+fn parse_feed_links_the_assignment_page_then_the_description_links() {
+    let items = parse_feed(LINKED_FEED);
+    assert_eq!(
+        items[0].links,
+        [
+            "https://school.instructure.com/courses/14672/assignments/94491",
+            "https://classroom.github.com/a/abc",
+            "https://www.youtube.com/watch?v=xyz&t=5",
+            "https://school.instructure.com/courses/14672/files/7?wrap=1",
+        ]
+    );
+    // An unrecognised event URL is kept as is; an event with neither has no links.
+    assert_eq!(
+        items[1].links,
+        ["https://school.instructure.com/calendar?include_contexts=user_9&month=10#event_5"]
+    );
+    assert!(items[2].links.is_empty());
+}
+
+#[tokio::test]
+async fn upsert_stores_links_and_refreshes_them_even_on_finished_tasks() {
+    let pool = test_pool().await;
+    let due = Utc.with_ymd_and_hms(2026, 10, 15, 23, 59, 0).unwrap();
+    let mut item = assignment("u1", "Essay 2", due);
+    item.links = vec!["https://a.example/1".into(), "https://b.example/2".into()];
+
+    upsert(&pool, std::slice::from_ref(&item)).await.unwrap();
+    let stored = || async {
+        let (json,): (Option<String>,) = sqlx::query_as("SELECT links FROM tasks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        parse_links(json.as_deref())
+    };
+    assert_eq!(stored().await, item.links);
+    let same = upsert(&pool, std::slice::from_ref(&item)).await.unwrap();
+    assert_eq!((same.added, same.updated), (0, 0));
+
+    sqlx::query("UPDATE tasks SET completed = true")
+        .execute(&pool)
+        .await
+        .unwrap();
+    item.links = vec!["https://c.example/3".into()];
+    let r = upsert(&pool, std::slice::from_ref(&item)).await.unwrap();
+    assert_eq!((r.added, r.updated), (0, 1));
+    assert_eq!(stored().await, item.links);
+
+    item.links.clear();
+    upsert(&pool, std::slice::from_ref(&item)).await.unwrap();
+    assert!(stored().await.is_empty());
 }

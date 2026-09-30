@@ -133,6 +133,7 @@ class Sandbox:
             TRIPTYCH_ATTACHMENT_DIR=str(self.attachment_dir),
             TERM="xterm-256color",
             TRIPTYCH_NOTIFY_CMD="true",  # no real desktop alerts from the suite; scenarios override with a logger
+            TRIPTYCH_OPEN_CMD="true",  # never launch a real browser; scenarios override with a logger
         )
         if (self.imap_dir / "port").exists():  # only ever the local fake server, never an inherited real account
             env.update(fakeimap.env_for(self.imap_dir))

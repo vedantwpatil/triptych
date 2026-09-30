@@ -29,6 +29,18 @@ async fn add_block_source(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// JSON array of URLs for a task (`canvas::sync` fills it: the assignment page, then the links in
+/// its description).
+async fn add_links(pool: &SqlitePool) -> Result<()> {
+    if !column_exists(pool, "tasks", "links").await? {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN links TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added links to tasks");
+    }
+    Ok(())
+}
+
 /// Highest deadline-alert tier already sent for a task (`notify.rs`); reset when the deadline moves.
 async fn add_notified_tier(pool: &SqlitePool) -> Result<()> {
     if !column_exists(pool, "tasks", "notified_tier").await? {
@@ -59,6 +71,7 @@ pub async fn run_calendar_migration(pool: &SqlitePool) -> Result<()> {
     }
 
     add_external_id(pool).await?;
+    add_links(pool).await?;
     add_notified_tier(pool).await?;
 
     if !column_exists(pool, "tasks", "task_category").await? {

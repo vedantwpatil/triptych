@@ -1,6 +1,7 @@
 //! The todo list view.
 
-use crate::app::{App, InputMode, cursor_col};
+use super::centered_rect;
+use crate::app::{App, InputMode, cursor_col, link_label, parse_links};
 use crate::canvas::split_course;
 use crate::urgency;
 use chrono::NaiveTime;
@@ -153,6 +154,15 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
                 None => spans.push(Span::styled(task.description.as_str(), text_style)),
             }
 
+            // Links past the first (the Canvas page): `o` opens the first, `O` lists them all
+            let extra = parse_links(task.links.as_deref()).len().saturating_sub(1);
+            if extra > 0 {
+                spans.push(Span::styled(
+                    format!(" ⇗{extra}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+
             // Add tags
             if !tags.is_empty() {
                 spans.push(Span::styled(
@@ -179,7 +189,7 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
     let title = if app.visual_anchor.is_some() {
         "-- VISUAL -- (j/k/5j/gg/G: extend, d/x: delete, v/Esc: cancel)"
     } else {
-        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, j/k: move, /: search, ENTER: toggle)"
+        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, j/k: move, /: search, ENTER: toggle, o/O: links)"
     };
     let tasks_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -226,4 +236,49 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             }
         }
     }
+
+    if app.links_open {
+        render_links_popup(f, app);
+    }
+}
+
+/// The links popup (`O`): one numbered row per link of the selected task.
+fn render_links_popup(f: &mut Frame, app: &App) {
+    let area = centered_rect(80, 50, f.area());
+    f.render_widget(Clear, area);
+
+    let width = usize::from(area.width.saturating_sub(8));
+    let items: Vec<ListItem> = app
+        .links
+        .iter()
+        .enumerate()
+        .map(|(i, url)| {
+            let number = if i < 9 {
+                format!("{} ", i + 1)
+            } else {
+                "  ".to_string()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(number, Style::default().fg(Color::Cyan)),
+                Span::raw(link_label(url, width)),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ")
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Links (j/k: move, Enter or 1-9: open, Esc: close)")
+                .style(Style::default().bg(Color::Black)),
+        );
+
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(app.selected_link));
+    f.render_stateful_widget(list, area, &mut state);
 }

@@ -19,6 +19,7 @@ fn task(
         priority,
         tags: None,
         task_category: None,
+        links: None,
     };
     (task, now)
 }

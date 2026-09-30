@@ -14,6 +14,7 @@ mod email_priority;
 mod email_rules;
 mod email_smtp;
 mod email_thread;
+mod links;
 mod motion;
 mod nlp_llm;
 mod nlp_rules;

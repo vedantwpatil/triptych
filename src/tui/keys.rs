@@ -169,7 +169,7 @@ const fn motion_key(key: KeyEvent) -> MotionKey {
 /// not while one of its forms is open, and not while the drafts list popup is — that one owns `j`/`k`
 /// directly, same as `CalendarInputMode::TaskPicker`).
 fn motions_active(app: &App) -> bool {
-    if app.drafts_open || app.folder_browser_open || app.rules_open {
+    if app.drafts_open || app.folder_browser_open || app.rules_open || app.links_open {
         return false;
     }
     app.view_mode != ViewMode::Calendar || app.calendar_input_mode == CalendarInputMode::Navigate
@@ -218,6 +218,9 @@ fn apply_motion(app: &mut App, motion: Motion, count: Option<usize>) {
 }
 
 async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    if app.links_open {
+        return handle_links_key(app, code);
+    }
     // Motions never reach here (see `handle_motion`), so any other key but a delete or a `v` toggle
     // ends visual selection; Esc only ends it.
     if app.visual_anchor.is_some() && !matches!(code, KeyCode::Char('v' | 'V' | 'd' | 'D' | 'x')) {
@@ -254,9 +257,30 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
+        KeyCode::Char('o') => app.open_first_link(),
+        KeyCode::Char('O') => app.open_links_popup(),
         KeyCode::Char('/') => app.start_search(),
         KeyCode::Char('n') => app.search_step(true).await,
         KeyCode::Char('N') => app.search_step(false).await,
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while the links popup (`O` in the todo list) is open: `j`/`k`/arrows move the selection
+/// directly (not vim motions — see `motions_active`), `Enter` opens the highlighted link, `1`-`9`
+/// open that numbered link, `Esc` closes the popup.
+fn handle_links_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Esc => app.close_links_popup(),
+        KeyCode::Char('j') | KeyCode::Down => {
+            if app.selected_link + 1 < app.links.len() {
+                app.selected_link += 1;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.selected_link = app.selected_link.saturating_sub(1),
+        KeyCode::Enter => app.open_selected_link(),
+        KeyCode::Char(c @ '1'..='9') => app.open_link_number(usize::from(c as u8 - b'0')),
         _ => {}
     }
     KeyOutcome::Continue

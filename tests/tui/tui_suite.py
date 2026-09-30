@@ -723,6 +723,42 @@ def _(c: Ctx):
         stop()
 
 
+@scenario("canvas_links_open_pick")
+def _(c: Ctx):
+    feed = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:event-assignment-77\r\nSUMMARY:Lab 1 [CS-472-001]\r\n"
+            "DTSTART:20991015T235900Z\r\n"
+            "URL:http://127.0.0.1/calendar?include_contexts=course_5&month=10#assignment_77\r\n"
+            'X-ALT-DESC;FMTTYPE=text/html:<p><a href="https://example.org/a">A</a> '
+            '<a href="https://example.org/b?x=1&amp;y=2">B</a></p>\r\n'
+            "END:VEVENT\r\nEND:VCALENDAR\r\n")
+    log = c.sb.dir / "opened.log"
+    script = c.sb.dir / "open.sh"
+    script.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "' + str(log) + '"\n')
+    script.chmod(0o755)
+    opened = lambda: log.read_text().splitlines() if log.exists() else []
+    url, stop = _serve_feed(feed)
+    try:
+        c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"CANVAS_ICS_URL": url, "TRIPTYCH_OPEN_CMD": str(script)}), 42, 130)
+        c.t.spawn()
+        c.check(c.t.wait_for("CS-472 Lab 1", 10), "assignment never appeared")
+        c.check("⇗2" in c.t.text(), "row lacks the count of extra links")
+        c.t.press("o")
+        c.eq(opened(), ["http://127.0.0.1/courses/5/assignments/77"], "o should open the assignment page")
+        c.t.press("O")
+        c.check(c.t.wait_for("Links (j/k", 3), "O did not open the links popup")
+        c.check("example.org/b?x=1&y=2" in c.t.text(), "popup row missing or & not decoded")
+        c.t.press("j", "j", "ENTER")
+        c.check(c.t.wait_for("Links (j/k", 3, gone=True), "popup still open after Enter")
+        c.eq(opened()[1:], ["https://example.org/b?x=1&y=2"], "Enter should open the highlighted link")
+        c.t.press("O", "ESC")
+        c.check(c.t.wait_for("Links (j/k", 3, gone=True), "Esc did not close the popup")
+        c.t.press("O", "1")
+        c.eq(len(opened()), 3, "1 should open the first link")
+        c.eq(c.db("select links is not null from tasks"), [(1,)], "links not stored")
+    finally:
+        stop()
+
+
 @scenario("notify_deadline_alert")
 def _(c: Ctx):
     c.tui()  # creates the schema

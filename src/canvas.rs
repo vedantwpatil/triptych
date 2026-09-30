@@ -10,7 +10,7 @@ use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use icalendar::{Calendar, CalendarDateTime, Component, DatePerhapsTime};
 use sqlx::SqlitePool;
 
-use crate::app::{classify_task, default_duration_for_category};
+use crate::app::{classify_task, default_duration_for_category, is_web_url};
 
 /// Env var holding the secret Canvas calendar feed URL. Never log it.
 pub const FEED_URL_ENV: &str = "CANVAS_ICS_URL";
@@ -61,6 +61,8 @@ pub struct Assignment {
     pub uid: String,
     pub title: String,
     pub due: DateTime<Utc>,
+    /// The assignment page first, then the links in its description. May be empty.
+    pub links: Vec<String>,
 }
 
 /// What one sync changed.
@@ -96,6 +98,69 @@ fn due_from(dpt: &DatePerhapsTime) -> Option<DateTime<Utc>> {
     }
 }
 
+/// The digits straight after `marker`, if any.
+fn id_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = text.split_once(marker)?.1;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[..end])
+}
+
+/// The assignment page for a feed event `URL`. Canvas points events at its calendar view
+/// (`https://host/calendar?include_contexts=course_14672&month=09#assignment_94491`); the course
+/// and assignment ids in it give the page itself (`https://host/courses/14672/assignments/94491`).
+/// Any other `http(s)` URL is kept as it is.
+fn page_url(feed_url: &str) -> Option<String> {
+    let url = feed_url.trim();
+    if !is_web_url(url) {
+        return None;
+    }
+    let course = id_after(url, "include_contexts=course_");
+    let assignment = id_after(url, "#assignment_");
+    let (Some(course), Some(assignment)) = (course, assignment) else {
+        return Some(url.to_string());
+    };
+    let host_start = url.find("://")? + 3;
+    let host_end = url[host_start..]
+        .find('/')
+        .map_or(url.len(), |i| host_start + i);
+    Some(format!(
+        "{}/courses/{course}/assignments/{assignment}",
+        &url[..host_end]
+    ))
+}
+
+/// Every `http(s)` link in the event's HTML description (`X-ALT-DESC`), in order, without repeats.
+fn description_links(html: &str) -> Vec<String> {
+    let mut links: Vec<String> = Vec::new();
+    let mut rest = html;
+    while let Some((_, after)) = rest.split_once("href=") {
+        rest = after;
+        let Some(quote) = after.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+            continue;
+        };
+        let body = &after[1..];
+        let Some(end) = body.find(quote) else {
+            break;
+        };
+        let url = body[..end].trim().replace("&amp;", "&");
+        if is_web_url(&url) && !links.contains(&url) {
+            links.push(url);
+        }
+        rest = &body[end..];
+    }
+    links
+}
+
+/// The stored form of a task's links; `None` when there are none.
+fn links_json(links: &[String]) -> Option<String> {
+    if links.is_empty() {
+        return None;
+    }
+    serde_json::to_string(links).ok()
+}
+
 /// Every usable `VEVENT` in the feed. Events without a `UID`, a start time or a title are skipped;
 /// text that is not a calendar yields an empty list.
 #[must_use]
@@ -111,20 +176,35 @@ pub fn parse_feed(ics: &str) -> Vec<Assignment> {
             if uid.is_empty() || title.is_empty() {
                 return None;
             }
+            let mut links: Vec<String> = event.get_url().and_then(page_url).into_iter().collect();
+            for link in event
+                .property_value("X-ALT-DESC")
+                .map(description_links)
+                .unwrap_or_default()
+            {
+                if !links.contains(&link) {
+                    links.push(link);
+                }
+            }
             Some(Assignment {
                 uid: uid.to_string(),
                 title: title.to_string(),
                 due: due_from(&event.get_start()?)?,
+                links,
             })
         })
         .collect()
 }
 
+/// A task already in the database: id, completed, deadline, description, links.
+type KnownTask = (i64, bool, Option<DateTime<Utc>>, String, Option<String>);
+
 /// Inserts new assignments and moves the deadline of known, unfinished ones.
 ///
 /// A known task's completion, priority and tags are never touched, so local edits survive a
 /// re-poll. Its title is rewritten only while it still equals the raw feed title (imported before
-/// titles were tidied); a reworded title stays. Assignments that vanish from the feed are left alone.
+/// titles were tidied); a reworded title stays. Its links follow the feed, finished or not.
+/// Assignments that vanish from the feed are left alone.
 ///
 /// # Errors
 ///
@@ -133,8 +213,9 @@ pub async fn upsert(pool: &SqlitePool, items: &[Assignment]) -> Result<SyncRepor
     let mut report = SyncReport::default();
     for item in items {
         let tidy = tidy_title(&item.title);
-        let known: Option<(i64, bool, Option<DateTime<Utc>>, String)> = sqlx::query_as(
-            "SELECT id, completed, deadline, description FROM tasks WHERE external_id = ?",
+        let links = links_json(&item.links);
+        let known: Option<KnownTask> = sqlx::query_as(
+            "SELECT id, completed, deadline, description, links FROM tasks WHERE external_id = ?",
         )
         .bind(&item.uid)
         .fetch_optional(pool)
@@ -144,8 +225,8 @@ pub async fn upsert(pool: &SqlitePool, items: &[Assignment]) -> Result<SyncRepor
                 let category = classify_task(&item.title);
                 sqlx::query(
                     "INSERT INTO tasks (description, completed, item_order, priority, deadline, \
-                     duration_minutes, task_category, external_id) \
-                     VALUES (?, false, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?)",
+                     duration_minutes, task_category, external_id, links) \
+                     VALUES (?, false, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&tidy)
                 .bind(NEW_TASK_PRIORITY)
@@ -153,32 +234,44 @@ pub async fn upsert(pool: &SqlitePool, items: &[Assignment]) -> Result<SyncRepor
                 .bind(default_duration_for_category(category))
                 .bind(category)
                 .bind(&item.uid)
+                .bind(&links)
                 .execute(pool)
                 .await?;
                 report.added += 1;
             }
-            Some((id, false, deadline, description))
-                if deadline != Some(item.due)
-                    || (description == item.title && tidy != item.title) =>
-            {
-                let description = if description == item.title {
-                    tidy
-                } else {
-                    description
-                };
-                sqlx::query(
-                    "UPDATE tasks SET deadline = ?, description = ?, notified_tier = \
-                     CASE WHEN deadline IS ? THEN notified_tier ELSE 0 END WHERE id = ?",
-                )
-                .bind(item.due)
-                .bind(description)
-                .bind(item.due)
-                .bind(id)
-                .execute(pool)
-                .await?;
-                report.updated += 1;
+            Some((id, completed, deadline, description, stored_links)) => {
+                let moved = !completed
+                    && (deadline != Some(item.due)
+                        || (description == item.title && tidy != item.title));
+                if moved {
+                    let description = if description == item.title {
+                        tidy
+                    } else {
+                        description
+                    };
+                    sqlx::query(
+                        "UPDATE tasks SET deadline = ?, description = ?, notified_tier = \
+                         CASE WHEN deadline IS ? THEN notified_tier ELSE 0 END WHERE id = ?",
+                    )
+                    .bind(item.due)
+                    .bind(description)
+                    .bind(item.due)
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                }
+                let relinked = stored_links != links;
+                if relinked {
+                    sqlx::query("UPDATE tasks SET links = ? WHERE id = ?")
+                        .bind(&links)
+                        .bind(id)
+                        .execute(pool)
+                        .await?;
+                }
+                if moved || relinked {
+                    report.updated += 1;
+                }
             }
-            Some(_) => {}
         }
     }
     Ok(report)

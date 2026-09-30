@@ -13,6 +13,7 @@ use sqlx::{
 
 mod allocation;
 mod calendar;
+mod links;
 mod mail;
 mod model;
 mod motion;
@@ -25,6 +26,7 @@ mod time;
 
 pub use allocation::*;
 pub use calendar::*;
+pub use links::{OPEN_CMD_ENV, is_web_url, link_label, parse_links};
 pub use mail::{
     ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, Contact, DeleteResult, FolderListResult,
     FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, chain_references,
@@ -144,6 +146,10 @@ pub struct App {
     pub rules: Vec<crate::email::EmailRule>,
     pub rules_open: bool,
     pub selected_rule: usize,
+    /// Snapshot of the selected task's links, taken when the links popup (`O` in the todo list) opens.
+    pub links: Vec<String>,
+    pub links_open: bool,
+    pub selected_link: usize,
     pub emails: Vec<crate::email::EmailMessage>,
     /// `None` shows every configured account's mail merged (the default); `Some(label)` restricts
     /// `refresh_emails` to that one account. Cycled with `A` in the email list.
@@ -275,6 +281,9 @@ impl App {
             selected_draft: 0,
             rules: Vec::new(),
             rules_open: false,
+            links: Vec::new(),
+            links_open: false,
+            selected_link: 0,
             selected_rule: 0,
             emails: Vec::new(),
             account_filter: None,

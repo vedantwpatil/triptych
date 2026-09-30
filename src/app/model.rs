@@ -64,9 +64,11 @@ pub struct Task {
     pub priority: i32,
     pub tags: Option<String>,
     pub task_category: Option<String>,
+    /// JSON array of URLs (see `app::parse_links`); `None` when the task has none.
+    pub links: Option<String>,
 }
 
-pub(super) const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category";
+pub(super) const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category, links";
 
 /// A concrete occurrence of a recurring schedule block on a specific date
 #[derive(Debug, Clone)]
