@@ -99,6 +99,9 @@ with `triptych schedule import file.toml` (`--clear` replaces existing).
 | `Enter` / `v`            | Cell popup: block (type, title, times) and tasks with full titles; `j`/`k` select, `m`/`u`/`e` act, `Esc` closes |
 | `t`/`Esc`                | Back to todo                                        |
 
+On a small terminal the grid shows only the hours and days that fit around the cursor and scrolls as
+you move (about 10 columns per day, 2 rows per hour).
+
 The to-do panel (right 30%) lists open tasks beside the grid. `T` focuses it and the grid cursor stays
 visible: that cell is where `Enter` schedules the highlighted task (scheduling an already placed task
 moves it). `j`/`k` move, `x` completes (a recurring task adds its next copy), `Esc` returns to the grid

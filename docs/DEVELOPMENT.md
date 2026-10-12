@@ -21,6 +21,16 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-10-12 (calendar on small terminals): the grid drew all 16 hour rows and 7 days whatever the
+  terminal size, so the cursor row scrolled off screen and headers truncated (`Thu 0`).
+  `render_calendar_view` now sizes both axes from the grid area (after the to-do panel split) and draws
+  only the window returned by `ui::window(selected, total, visible)` (`src/tui/ui/grid.rs`): pure,
+  centred on the cursor, clamped at the ends, so no scroll offset is stored in `App` and `render_*`
+  stays `&App`. Rows are 2 high plus 4 of overhead; a day column needs 10 cells (`Thu 10/09` and
+  spacing). A full-size terminal shows everything as before. Tests: `tests/it/ui.rs`
+  (`window_keeps_the_cursor_in_view_and_inside_the_bounds`), scenario `cal_small_scroll` (60x16, scrolls
+  to 10pm and Sunday, then opens the panel). Suite is 182 scenarios. Open: the calendar title and cell
+  headlines still truncate when narrow.
 - 2026-10-12 (calendar to-do panel): `T` in the calendar opens a right-hand panel of open tasks
   (`src/app/calendar_todo.rs`, `src/tui/ui/calendar_todo.rs`, `CalendarInputMode::TodoPanel`). `Enter`
   schedules the highlighted task at the grid cursor (which stays drawn), `x` completes it through

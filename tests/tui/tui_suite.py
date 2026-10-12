@@ -1478,6 +1478,23 @@ def _(c: Ctx):
     c.check(t.alive(), "block form crashed at 70x20")
 
 
+@scenario("cal_small_scroll")
+def _(c: Ctx):
+    t = c.tui(rows=16, cols=60)
+    c.cal()
+    c.check(t.has("07am") and not t.has("10pm"), "top of the day not shown at the start")
+    t.press(*["j"] * 15)
+    c.see("10pm", msg="cursor row (10pm) scrolled off screen")
+    c.check(not t.has("07am"), "grid did not scroll with the cursor")
+    t.press(*["l"] * 6)
+    c.see("Sun", msg="Sunday column not scrolled into view")
+    c.check(re.search(r"Sun \d\d/\d\d", t.text()), f"Sunday header truncated: {t.lines()[:3]}")
+    c.check(not re.search(r"Mon \d\d/\d\d", t.text()), "Monday still shown at 60 columns")
+    t.press("T")
+    c.see("To-Do (")
+    c.check(re.search(r"Sun", t.text()) and t.has("10pm"), "cursor lost once the to-do panel narrowed the grid")
+
+
 # ---------------------------------------------------------------- email TUI
 
 @scenario("email_empty")

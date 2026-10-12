@@ -7,7 +7,7 @@ mod grid;
 mod popups;
 mod todo;
 
-pub use grid::{CalendarGrid, CellView, TimeSlot, build_cell_view, cell_task_displays};
+pub use grid::{CalendarGrid, CellView, TimeSlot, build_cell_view, cell_task_displays, window};
 pub use todo::urgency_style;
 
 use crate::app::{App, ViewMode, cursor_col};

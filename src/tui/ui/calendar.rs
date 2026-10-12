@@ -1,7 +1,7 @@
 //! The weekly calendar view: header, hour rows and status line.
 
 use super::calendar_todo::render_calendar_todo;
-use super::grid::{CalendarGrid, TimeSlot, build_cell_view};
+use super::grid::{CalendarGrid, TimeSlot, build_cell_view, window};
 use super::popups::{
     render_block_form_popup, render_calendar_task_input, render_cell_detail, render_deadline_input,
     render_task_picker,
@@ -38,6 +38,30 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
 
     let calendar_data = build_calendar_grid(app);
 
+    let (grid_area, panel_area) = if app.calendar_todo_open {
+        let [grid, panel] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Fill(1), Constraint::Percentage(30)])
+            .areas(chunks[0]);
+        (grid, Some(panel))
+    } else {
+        (chunks[0], None)
+    };
+
+    // Show only the hours and days that fit around the cursor. Two border rows and the header's two
+    // rows are overhead and an hour takes two rows; a day column needs 9 cells ("Thu 10/09") plus
+    // spacing, after the 8-cell time column and two border columns.
+    let slots = window(
+        app.selected_time_slot,
+        calendar_data.time_slots.len(),
+        usize::from(grid_area.height.saturating_sub(4) / 2),
+    );
+    let days = window(
+        app.selected_day,
+        calendar_data.days.len(),
+        usize::from(grid_area.width.saturating_sub(10) / 10),
+    );
+
     // The cursor stays visible while the to-do panel has focus: it marks the cell Enter schedules into.
     let cursor_shown = matches!(
         app.calendar_input_mode,
@@ -48,35 +72,25 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
     let is_empty =
         calendar_data.schedule_blocks.is_empty() && calendar_data.scheduled_tasks.is_empty();
 
-    // Build header with weekday names
-    let header_strings: Vec<String> = std::iter::once("Time".to_string())
-        .chain(
-            calendar_data
-                .days
-                .iter()
-                .map(|d| d.format("%a %m/%d").to_string()),
-        )
-        .collect();
-
     let today = chrono::Local::now().naive_local().date();
     let now = chrono::Local::now().naive_local();
     // Only accent a "now" row when today is actually in the displayed week -
     // paging to another week (H/L) has no current-hour row to show.
     let now_hour: Option<u32> = calendar_data.days.contains(&today).then(|| now.hour());
 
-    let header_cells: Vec<Cell> = header_strings
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| {
-            let style = if idx > 0 && calendar_data.days[idx - 1] == today {
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let header_cells: Vec<Cell> = std::iter::once(Cell::from("Time").style(header_style))
+        .chain(days.clone().map(|day_idx| {
+            let day = calendar_data.days[day_idx];
+            let style = if day == today {
                 today_accent()
             } else {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+                header_style
             };
-            Cell::from(h.as_str()).style(style)
-        })
+            Cell::from(day.format("%a %m/%d").to_string()).style(style)
+        }))
         .collect();
 
     let header = Row::new(header_cells).height(1).bottom_margin(1);
@@ -86,6 +100,8 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         .time_slots
         .iter()
         .enumerate()
+        .skip(slots.start)
+        .take(slots.len())
         .map(|(slot_idx, slot)| {
             let is_now_row = now_hour == Some(slot.time.hour());
 
@@ -96,7 +112,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
             };
             let mut cells = vec![time_cell];
 
-            for day_idx in 0..7 {
+            for day_idx in days.clone() {
                 let is_selected = day_idx == app.selected_day
                     && slot_idx == app.selected_time_slot
                     && cursor_shown;
@@ -136,10 +152,10 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    // Calculate column widths: time column + 7 day columns
+    // Calculate column widths: time column + the visible day columns
     let widths = vec![Constraint::Length(8)]
         .into_iter()
-        .chain(std::iter::repeat_n(Constraint::Fill(1), 7))
+        .chain(std::iter::repeat_n(Constraint::Fill(1), days.len()))
         .collect::<Vec<_>>();
 
     // While a task is held (picked up with 'm'), the title swaps to drop
@@ -155,15 +171,9 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .column_spacing(1);
 
-    if app.calendar_todo_open {
-        let [grid_area, panel_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Fill(1), Constraint::Percentage(30)])
-            .areas(chunks[0]);
-        f.render_widget(table, grid_area);
+    f.render_widget(table, grid_area);
+    if let Some(panel_area) = panel_area {
         render_calendar_todo(f, app, panel_area);
-    } else {
-        f.render_widget(table, chunks[0]);
     }
 
     // Status line for feedback from m/u/e/d (e.g. "No scheduled task here") -

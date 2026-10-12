@@ -3,6 +3,7 @@
 use crate::app::{CellEntry, ScheduleBlock, entry_in_cell, parse_time_string};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use ratatui::style::{Color, Modifier, Style};
+use std::ops::Range;
 
 /// Per-frame render view over the app's cached weekly data.
 ///
@@ -15,6 +16,20 @@ pub struct CalendarGrid<'a> {
     pub schedule_blocks: &'a [(NaiveDate, ScheduleBlock)],
     pub scheduled_tasks: &'a [CellEntry],
     pub task_allocations: &'a [CellEntry],
+}
+
+/// The `visible`-long run of `total` rows or columns that keeps `selected` on screen, centred on it
+/// where it can be.
+///
+/// Pure (no state carried between frames), so the calendar's scroll position is a function of the
+/// cursor and the terminal size alone.
+#[must_use]
+pub fn window(selected: usize, total: usize, visible: usize) -> Range<usize> {
+    let visible = visible.clamp(1, total.max(1));
+    let start = selected
+        .saturating_sub(visible / 2)
+        .min(total.saturating_sub(visible));
+    start..(start + visible).min(total)
 }
 
 #[derive(Debug)]

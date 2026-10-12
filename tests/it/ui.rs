@@ -144,3 +144,26 @@ fn cell_task_displays_finds_multi_hour_allocation_by_range() {
     assert!(cell_task_displays(&grid, d, time(11)).is_empty());
     assert!(cell_task_displays(&grid, day(1), time(9)).is_empty());
 }
+
+/// The calendar shows only the rows and days that fit, and the cursor is always among them.
+#[test]
+fn window_keeps_the_cursor_in_view_and_inside_the_bounds() {
+    // Everything fits: no scrolling, whatever the cursor.
+    assert_eq!(window(9, 16, 16), 0..16);
+    assert_eq!(window(3, 7, 40), 0..7);
+    // Centred when there is room either side, pinned at the ends otherwise.
+    assert_eq!(window(8, 16, 3), 7..10);
+    assert_eq!(window(0, 16, 3), 0..3);
+    assert_eq!(window(15, 16, 3), 13..16);
+    // Never empty while there is something to show, even in a zero-height terminal.
+    assert_eq!(window(5, 16, 0), 5..6);
+    assert_eq!(window(0, 0, 4), 0..0);
+
+    for (total, visible) in [(16, 1), (16, 3), (16, 4), (7, 2), (7, 5)] {
+        for selected in 0..total {
+            let w = window(selected, total, visible);
+            assert!(w.contains(&selected), "{selected} not in {w:?} of {total}");
+            assert!(w.end <= total && w.len() == visible, "{w:?} of {total}");
+        }
+    }
+}

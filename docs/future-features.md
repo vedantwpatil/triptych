@@ -67,12 +67,16 @@ motions and search, email sync (`s`), summaries, priority. Suggested order for t
 
 - On smaller views the calendar doesn't scale
 
-  **Feasible, S-M. Reproduced** at 60x16: after 20 `j` presses the screen still shows 07am-10am (the
+  **Implemented (2026-10-12).** Original assessment: feasible, S-M. Reproduced at 60x16: after 20 `j` presses the screen still shows 07am-10am (the
   cursor row is off screen, nothing scrolls) and headers truncate (`Thu 0`).
   - Vertical: `render_calendar_view` builds every hour row in a `Table` with no scroll offset. Track
     a top-hour offset in `App` and keep the cursor row inside the visible window (`TableState` offset).
   - Horizontal: below about 80 columns show a window of 3-5 days around the cursor (so `h`/`l` pan)
     with a 3-letter header, or shorten headers to `Mo 09`.
+  - Shipped: `render_calendar_view` draws only the hours and days that fit around the cursor
+    (`ui::window`, a pure function of cursor and size, centred, no stored scroll offset). A day column
+    needs 9 cells for `Thu 10/09`, so 60 columns show 4 days and `h`/`l` pan; with the to-do panel open
+    the grid is narrower still. Scenario `cal_small_scroll`.
 
 - When adding/scheduling tasks it fails and says that there is no task scheduled for the already rendered schedule
 
