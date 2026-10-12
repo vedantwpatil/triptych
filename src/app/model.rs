@@ -121,6 +121,8 @@ pub enum CalendarInputMode {
     DeadlineInput,
     /// `Enter` on a cell: full list of its tasks, `stack_index` is the cursor.
     CellDetail,
+    /// Keys drive the side to-do panel (`T`); `calendar_todo_selected` is its cursor.
+    TodoPanel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -150,6 +150,7 @@ Import with `triptych schedule import schedule.toml`.
 - Canvas assignment sync (`CANVAS_ICS_URL`)
 - Deadline alerts, also with the TUI closed (`triptych notify install`, macOS)
 - Recurring tasks: `water plants every friday`, finishing one adds the next (`docs/USAGE.md`)
+- To-do panel inside the calendar (`T`): schedule or complete tasks without leaving the grid
 - Email: multi-account IMAP with IDLE, SMTP reply/forward, archive/delete/snooze, Focused/Other
   triage, rules, categories, drafts, email-to-task with body deadline scan
   (see `docs/roadmap-email.md`)
@@ -157,8 +158,7 @@ Import with `triptych schedule import schedule.toml`.
 ### Next
 
 1. Email work that feeds tasks and the calendar
-2. Todo list inside the calendar view
-3. CalDAV calendar sync (a stub exists; not functional)
+2. CalDAV calendar sync (a stub exists; not functional)
 
 Later: OAuth2 for Gmail, task dependencies, statistics dashboard. Status detail: `docs/roadmap.md`.
 

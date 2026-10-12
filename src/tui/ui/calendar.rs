@@ -1,5 +1,6 @@
 //! The weekly calendar view: header, hour rows and status line.
 
+use super::calendar_todo::render_calendar_todo;
 use super::grid::{CalendarGrid, TimeSlot, build_cell_view};
 use super::popups::{
     render_block_form_popup, render_calendar_task_input, render_cell_detail, render_deadline_input,
@@ -36,6 +37,12 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         .split(f.area());
 
     let calendar_data = build_calendar_grid(app);
+
+    // The cursor stays visible while the to-do panel has focus: it marks the cell Enter schedules into.
+    let cursor_shown = matches!(
+        app.calendar_input_mode,
+        CalendarInputMode::Navigate | CalendarInputMode::TodoPanel
+    );
 
     // Check if calendar is empty (no blocks and no tasks)
     let is_empty =
@@ -92,7 +99,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
             for day_idx in 0..7 {
                 let is_selected = day_idx == app.selected_day
                     && slot_idx == app.selected_time_slot
-                    && app.calendar_input_mode == CalendarInputMode::Navigate;
+                    && cursor_shown;
 
                 // Non-selected cells always show the first (topmost) task;
                 // the selected cell shows whichever one `[`/`]` cycled to.
@@ -139,7 +146,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
     // instructions so the pending action is always visible, not just in the
     // fading status line.
     let title = app.held_task.map_or_else(
-        || "Weekly Calendar (t: todo, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string(),
+        || "Weekly Calendar (t: todo, T: todo panel, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string(),
         |task_id| format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel"),
     );
 
@@ -148,12 +155,21 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .column_spacing(1);
 
-    f.render_widget(table, chunks[0]);
+    if app.calendar_todo_open {
+        let [grid_area, panel_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Fill(1), Constraint::Percentage(30)])
+            .areas(chunks[0]);
+        f.render_widget(table, grid_area);
+        render_calendar_todo(f, app, panel_area);
+    } else {
+        f.render_widget(table, chunks[0]);
+    }
 
     // Status line for feedback from m/u/e/d (e.g. "No scheduled task here") -
     // without this the calendar view swallows that feedback entirely, since
     // (unlike the todo/email views) it never rendered app.status_message.
-    if app.calendar_input_mode == CalendarInputMode::Navigate
+    if cursor_shown
         && let Some((msg, instant)) = &app.status_message
         && instant.elapsed() < std::time::Duration::from_secs(3)
     {
@@ -170,7 +186,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
         CalendarInputMode::TaskInput => render_calendar_task_input(f, app),
         CalendarInputMode::DeadlineInput => render_deadline_input(f, app),
         CalendarInputMode::CellDetail => render_cell_detail(f, app),
-        CalendarInputMode::Navigate => {}
+        CalendarInputMode::Navigate | CalendarInputMode::TodoPanel => {}
     }
 }
 

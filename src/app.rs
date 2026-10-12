@@ -13,6 +13,7 @@ use sqlx::{
 
 mod allocation;
 mod calendar;
+mod calendar_todo;
 mod links;
 mod mail;
 mod model;
@@ -96,6 +97,10 @@ pub struct App {
     pub calendar_input_mode: CalendarInputMode,
     pub block_form: BlockFormState,
     pub task_picker_selected: usize,
+    /// Whether the calendar shows the side to-do panel; it stays open while focus is on the grid.
+    pub calendar_todo_open: bool,
+    /// Cursor into `App::calendar_todo_tasks`.
+    pub calendar_todo_selected: usize,
     pub input_buffer: String,
     /// Caret in whichever text is being typed (byte offset, `None` = end); see `app/textedit.rs`.
     pub edit_cursor: Option<usize>,
@@ -228,6 +233,8 @@ pub struct App {
 }
 
 impl App {
+    // A flat field-initialiser list: splitting it would only scatter the defaults.
+    #[allow(clippy::too_many_lines)]
     pub async fn new(pool: SqlitePool) -> Self {
         let nlp_parser = Arc::new(NLPParser::new().await);
         let (deadline_tx, deadline_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -259,6 +266,8 @@ impl App {
             calendar_input_mode: CalendarInputMode::Navigate,
             block_form: BlockFormState::new_at(0),
             task_picker_selected: 0,
+            calendar_todo_open: false,
+            calendar_todo_selected: 0,
             input_buffer: String::new(),
             edit_cursor: None,
             editing_task_id: None,

@@ -362,19 +362,7 @@ impl App {
             return Ok(());
         };
 
-        let datetime = resolve_local_datetime(
-            self.selected_cell_date()
-                .and_time(self.selected_cell_time()),
-        );
-
-        sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
-            .bind(datetime)
-            .bind(task_id)
-            .execute(&self.db_pool)
-            .await?;
-
-        self.load_tasks().await?;
-        self.refresh_calendar_data().await;
+        self.schedule_task_at_selected_cell(task_id).await?;
         self.status_message = Some(("Task moved".to_string(), std::time::Instant::now()));
         Ok(())
     }

@@ -50,7 +50,7 @@ python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-
 | `nlp_*`   | 17    | dates, weekdays, times, ranges, durations, tags, priorities                   |
 | `sched_*` | 9     | schedule import/export/show/clear/reallocate, overlaps, bad input             |
 | `todo_*`  | 20    | add/cancel/toggle/delete, `v` visual delete, linked-email delete, badges, persist, `s`, view cycle |
-| `cal_*`   | 24    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking    |
+| `cal_*`   | 29    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking, `T` to-do panel |
 | `email_*` | 26    | list, popup, mark read, convert, compose/reply/forward/send, `s` sync, priority order, AI summaries |
 | `imap_*`  | 19    | real `email sync` and TUI sync/delete/archive (incl. no-`MOVE` fallback) against the fake IMAP server |
 | `vim_*`   | 16    | counts, `gg`/`G`, `C-d`/`C-u`, `0`/`$`, `/` search, visual counts, Ctrl chords |

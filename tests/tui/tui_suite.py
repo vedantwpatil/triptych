@@ -1249,6 +1249,43 @@ def _(c: Ctx):
     c.eq(c.tasks(), [], "tasks changed")
 
 
+@scenario("cal_todo_panel")
+def _(c: Ctx):
+    c.cli("add", "alpha")
+    c.cli("add", "bravo")
+    t = c.tui()
+    c.cal()
+    c.check(not t.has("To-Do (T"), "panel shown before T")
+    t.press("T")
+    c.see("To-Do (Enter: schedule")
+    c.check(t.has("alpha") and t.has("bravo"), "panel does not list open tasks")
+    t.press("ESC")
+    c.see("To-Do (T: focus)", msg="Esc should unfocus the panel but keep it open")
+    c.check(t.has("Weekly Calendar"), "Esc left the calendar")
+    t.press("j", "T", "ENTER")
+    c.see("Task scheduled")
+    sched = [r for r in c.tasks() if r["scheduled_at"]]
+    s = parse_ts(sched[0]["scheduled_at"]) if len(sched) == 1 else None
+    c.check(s and (s.weekday(), s.hour) == (0, 8), f"panel task not scheduled at Mon 08am: {sched}")
+    t.press("T", "x")
+    c.see("alpha", gone=True, msg="completed task still listed")
+    c.eq(c.db("SELECT description FROM tasks WHERE completed = 1"), [("alpha",)], "x should complete the highlighted task")
+    c.check(t.has("bravo"), "other open task vanished")
+    t.press("T")
+    c.see("To-Do (", gone=True, msg="T should hide the panel")
+
+
+@scenario("cal_todo_panel_empty")
+def _(c: Ctx):
+    t = c.tui()
+    c.cal()
+    t.press("T")
+    c.see("No open tasks.")
+    t.press("j", "k", "ENTER", "x")
+    c.check(t.alive(), "crashed on an empty panel")
+    c.eq(c.tasks(), [], "tasks changed")
+
+
 @scenario("cal_move_task")
 def _(c: Ctx):
     t = c.tui()

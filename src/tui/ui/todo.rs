@@ -45,7 +45,7 @@ fn course_color(code: &str) -> Color {
 }
 
 /// Date and deadline badge style: red family when close, calm cyan otherwise.
-fn date_style(level: i32) -> Style {
+pub(super) fn date_style(level: i32) -> Style {
     if level >= 2 {
         urgency_style(level)
     } else {

@@ -95,8 +95,14 @@ with `triptych schedule import file.toml` (`--clear` replaces existing).
 | `u` / `d`                | Unschedule task / delete block                      |
 | `e`                      | Edit the deadline of the task under the cursor      |
 | `[`/`]`                  | Cycle tasks stacked in one cell                     |
+| `T`                      | Focus the to-do panel (opens it on first press)     |
 | `Enter` / `v`            | Cell popup: block (type, title, times) and tasks with full titles; `j`/`k` select, `m`/`u`/`e` act, `Esc` closes |
 | `t`/`Esc`                | Back to todo                                        |
+
+The to-do panel (right 30%) lists open tasks beside the grid. `T` focuses it and the grid cursor stays
+visible: that cell is where `Enter` schedules the highlighted task (scheduling an already placed task
+moves it). `j`/`k` move, `x` completes (a recurring task adds its next copy), `Esc` returns to the grid
+with the panel still open, `T` again hides it.
 
 Blocks imported from TOML cannot be deleted with `d` (it says so); edit the file and re-import with
 `--clear`. Blocks made with `n` stay deletable. Blocks imported before this existed count as manual until

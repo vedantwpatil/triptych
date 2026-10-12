@@ -294,8 +294,32 @@ async fn handle_calendar_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         CalendarInputMode::TaskInput => handle_task_input_key(app, code).await,
         CalendarInputMode::DeadlineInput => handle_deadline_input_key(app, code),
         CalendarInputMode::CellDetail => handle_cell_detail_key(app, code).await,
+        CalendarInputMode::TodoPanel => handle_todo_panel_key(app, code).await,
     }
     KeyOutcome::Continue
+}
+
+/// Side to-do panel: `j`/`k` move its cursor directly (motions are off outside `Navigate`), `Enter`
+/// schedules the task at the grid cursor's cell, `x` completes it, `Esc` returns to the grid with the
+/// panel still showing and `T` hides it.
+async fn handle_todo_panel_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => app.calendar_input_mode = CalendarInputMode::Navigate,
+        KeyCode::Char('T') => app.close_calendar_todo(),
+        KeyCode::Char('j') | KeyCode::Down => app.calendar_todo_step(true),
+        KeyCode::Char('k') | KeyCode::Up => app.calendar_todo_step(false),
+        KeyCode::Enter => {
+            if let Err(e) = app.schedule_calendar_todo_task().await {
+                set_error(app, e);
+            }
+        }
+        KeyCode::Char('x') => {
+            if let Err(e) = app.complete_calendar_todo_task().await {
+                set_error(app, e);
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcome {
@@ -342,6 +366,7 @@ async fn handle_calendar_navigate_key(app: &mut App, code: KeyCode) -> KeyOutcom
         }
         KeyCode::Char('e') => app.start_deadline_edit_at_selected_cell(),
         KeyCode::Enter | KeyCode::Char('v') => app.open_cell_detail(),
+        KeyCode::Char('T') => app.focus_calendar_todo(),
         // Cycle which task in a stacked cell (see the "+N more" overflow
         // indicator) subsequent m/u/e presses act on.
         KeyCode::Char(']') => app.cycle_stack_next(),

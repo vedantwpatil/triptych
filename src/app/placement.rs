@@ -33,10 +33,23 @@ impl App {
             return Ok(());
         }
 
-        let task_id = unscheduled[self.task_picker_selected];
-        let date = self.selected_cell_date();
-        let time = self.selected_cell_time();
-        let datetime = resolve_local_datetime(date.and_time(time));
+        self.schedule_task_at_selected_cell(unscheduled[self.task_picker_selected])
+            .await?;
+        self.calendar_input_mode = CalendarInputMode::Navigate;
+        self.task_picker_selected = 0;
+        Ok(())
+    }
+
+    /// Sets `task_id`'s `scheduled_at` to the selected calendar cell and refreshes both views.
+    /// The one write path for the picker, `drop_held_task` and the to-do panel.
+    pub(super) async fn schedule_task_at_selected_cell(
+        &mut self,
+        task_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        let datetime = resolve_local_datetime(
+            self.selected_cell_date()
+                .and_time(self.selected_cell_time()),
+        );
 
         sqlx::query("UPDATE tasks SET scheduled_at = ? WHERE id = ?")
             .bind(datetime)
@@ -46,8 +59,6 @@ impl App {
 
         self.load_tasks().await?;
         self.refresh_calendar_data().await;
-        self.calendar_input_mode = CalendarInputMode::Navigate;
-        self.task_picker_selected = 0;
         Ok(())
     }
 

@@ -21,6 +21,16 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-10-12 (calendar to-do panel): `T` in the calendar opens a right-hand panel of open tasks
+  (`src/app/calendar_todo.rs`, `src/tui/ui/calendar_todo.rs`, `CalendarInputMode::TodoPanel`). `Enter`
+  schedules the highlighted task at the grid cursor (which stays drawn), `x` completes it through
+  `complete_task_by_id` (recurrence and reallocation included), `Esc` returns to the grid with the panel
+  open, `T` hides it. The three `scheduled_at` writes (picker, held-task drop, panel) now share
+  `schedule_task_at_selected_cell`. After scheduling, the panel cursor follows the task because
+  `load_tasks` re-sorts by urgency, which a new `scheduled_at` can raise. Tests: `tests/it/app.rs`
+  (`calendar_todo_*`), scenarios `cal_todo_panel`, `cal_todo_panel_empty`. Suite is 181 scenarios (the docs
+  said 173, already stale). `todo_add_cold_model` can fail under `-j 4` from real-Ollama timing; it passes
+  alone. Open: fixed 30% width, no unscheduled-only filter.
 - 2026-09-30 (recurring tasks): `every day|weekday|week|month|<weekday>` in a task. Rules are pure in
   `src/recurrence.rs` (`Recurrence`, `extract`, `next_after`, `next_dates`); `NLPParser::parse` strips
   the phrase first (`every fri` becomes `friday`, since the date parser only knows full names) and

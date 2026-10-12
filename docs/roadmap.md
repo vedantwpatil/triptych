@@ -58,7 +58,7 @@ a backlog, not a goal. Core todo and calendar work comes first.
 
 1. ~~Recurring tasks~~ — done (see below).
 2. Email work only where it feeds tasks and the calendar.
-3. Todo list inside the calendar view.
+3. ~~Todo list inside the calendar view~~ — done (see below).
 4. CalDAV sync, last (large; needs an external account to test).
 
 ## Other Planned Features
@@ -70,8 +70,10 @@ a backlog, not a goal. Core todo and calendar work comes first.
   assignments removed from the feed; details in [`future-features.md`](./future-features.md) (first entry).
 - **Desktop notifications** — built: in-TUI worker plus `triptych notify install` (macOS
   LaunchAgent); see [`USAGE.md`](./USAGE.md).
-- **Todo list in the calendar** — allocated tasks already show in the grid; a todo panel inside the
-  calendar view is not started.
+- **Todo list in the calendar** — built: `T` opens a side panel of open tasks; `Enter` schedules the
+  highlighted one at the grid cursor, `x` completes it (`src/app/calendar_todo.rs`,
+  `src/tui/ui/calendar_todo.rs`, see [`USAGE.md`](./USAGE.md)). Open: no drag/reorder, no
+  unscheduled-only filter, fixed 30% width.
 - **Recurring tasks** — built: `every day|weekday|week|month|<weekday>` in the task text; finishing one
   adds the next copy (`src/recurrence.rs`, `src/app/repeat.rs`, see [`USAGE.md`](./USAGE.md)). Open:
   `every 2 weeks`, several weekdays, an end date. Separate from the TOML recurring *schedule blocks*.

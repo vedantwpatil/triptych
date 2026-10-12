@@ -1,6 +1,7 @@
 //! Pure rendering: one file per view, and `ui` dispatches on the current one.
 
 mod calendar;
+mod calendar_todo;
 mod email;
 mod grid;
 mod popups;

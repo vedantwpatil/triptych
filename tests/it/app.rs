@@ -512,6 +512,93 @@ async fn unschedule_task_clears_cell_and_returns_task_to_unscheduled_pool() {
     assert!(app.unscheduled_tasks().iter().any(|t| t.id == task_id));
 }
 
+/// The side panel lists open tasks only, schedules the highlighted one at the grid cursor and
+/// hands keys back to the grid; a task already on the grid moves instead of duplicating.
+#[tokio::test]
+async fn calendar_todo_panel_lists_open_tasks_and_schedules_at_cursor() {
+    let pool = test_pool().await;
+    let done_id = insert_task(&pool, "already done").await;
+    let first_id = insert_task(&pool, "first open").await;
+    let second_id = insert_task(&pool, "second open").await;
+    sqlx::query("UPDATE tasks SET completed = true WHERE id = ?")
+        .bind(done_id)
+        .execute(&pool)
+        .await
+        .expect("complete task");
+
+    let mut app = App::new(pool).await;
+    app.load_tasks().await.expect("load tasks");
+    app.calendar_week_offset = Some(0);
+    app.selected_day = 2;
+    app.selected_time_slot = 3; // 10:00
+
+    app.focus_calendar_todo();
+    assert!(app.calendar_todo_open);
+    assert_eq!(app.calendar_input_mode, CalendarInputMode::TodoPanel);
+    let ids: Vec<i64> = app.calendar_todo_tasks().iter().map(|t| t.id).collect();
+    assert_eq!(ids, [first_id, second_id]);
+
+    app.calendar_todo_step(true);
+    app.calendar_todo_step(true); // stops at the last row
+    assert_eq!(app.calendar_todo_selected, 1);
+    app.schedule_calendar_todo_task().await.expect("schedule");
+
+    assert_eq!(app.calendar_input_mode, CalendarInputMode::Navigate);
+    assert!(app.calendar_todo_open, "panel stays open after scheduling");
+    let day = app.selected_cell_date();
+    let cell = cell_tasks(
+        &app.cached_scheduled_tasks,
+        &app.cached_task_allocations,
+        day,
+        10,
+    );
+    assert_eq!(cell.len(), 1);
+    assert_eq!(cell[0].id, second_id);
+
+    // Still listed (open), now on the grid; scheduling it again at another cell moves it.
+    app.selected_time_slot = 4; // 11:00
+    app.focus_calendar_todo();
+    app.schedule_calendar_todo_task().await.expect("move");
+    let ids_at = |app: &App, hour| {
+        cell_tasks(
+            &app.cached_scheduled_tasks,
+            &app.cached_task_allocations,
+            day,
+            hour,
+        )
+        .iter()
+        .map(|t| t.id)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(ids_at(&app, 10), Vec::<i64>::new());
+    assert_eq!(ids_at(&app, 11), [second_id]);
+}
+
+/// `x` in the panel completes the highlighted task, drops it from the list and leaves the cursor
+/// in range.
+#[tokio::test]
+async fn calendar_todo_panel_completes_task_and_clamps_cursor() {
+    let pool = test_pool().await;
+    insert_task(&pool, "keep").await;
+    let last_id = insert_task(&pool, "finish me").await;
+
+    let mut app = App::new(pool).await;
+    app.load_tasks().await.expect("load tasks");
+    app.focus_calendar_todo();
+    app.calendar_todo_step(true);
+    assert_eq!(app.calendar_todo_selected, 1);
+
+    app.complete_calendar_todo_task().await.expect("complete");
+
+    assert!(app.calendar_todo_tasks().iter().all(|t| t.id != last_id));
+    assert_eq!(app.calendar_todo_tasks().len(), 1);
+    assert_eq!(app.calendar_todo_selected, 0);
+
+    app.close_calendar_todo();
+    assert!(!app.calendar_todo_open);
+    assert_eq!(app.calendar_input_mode, CalendarInputMode::Navigate);
+}
+
 /// Editing a deadline from the calendar (the "move a deadline" half of
 /// Task 2) must persist through the same regex parser `add_task` uses, and
 /// show up on reload - it must not just update the DB row silently.
