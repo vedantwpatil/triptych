@@ -9,7 +9,9 @@
     clippy::assert_is_empty
 )]
 
+mod allocation_edges;
 mod app;
+mod calendar_edges;
 mod canvas;
 mod cli;
 mod email_attachments;
@@ -26,6 +28,7 @@ mod nlp_llm;
 mod nlp_rules;
 mod notify;
 mod recurrence;
+mod tasks_edges;
 mod textedit;
 mod ui;
 mod urgency;

@@ -6,6 +6,7 @@
 pub mod app;
 pub mod canvas;
 mod cli;
+pub mod clock;
 pub mod email;
 pub mod logging;
 pub mod migrations;

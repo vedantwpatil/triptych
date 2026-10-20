@@ -138,7 +138,15 @@ async fn claim_alerts(
         .collect())
 }
 
-/// One pass: the alerts due at `now`, each shown. Returns how many were shown.
+/// What one [`check_once`] pass did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckReport {
+    pub shown: usize,
+    /// Alerts the notifier failed to show; they are retried on the next pass.
+    pub failed: usize,
+}
+
+/// One pass: the alerts due at `now`, each shown.
 ///
 /// An alert whose notifier fails is handed back, so the next pass retries it instead of losing it.
 /// Shared by the TUI worker and `triptych notify check`.
@@ -146,13 +154,14 @@ async fn claim_alerts(
 /// # Errors
 ///
 /// Returns an error if a database query fails.
-pub async fn check_once(pool: &SqlitePool, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
-    let mut shown = 0;
+pub async fn check_once(pool: &SqlitePool, now: DateTime<Utc>) -> Result<CheckReport, sqlx::Error> {
+    let mut report = CheckReport::default();
     for (alert, claims) in claim_alerts(pool, now).await? {
         if send(&alert).await {
-            shown += 1;
+            report.shown += 1;
             continue;
         }
+        report.failed += 1;
         for claim in claims {
             sqlx::query("UPDATE tasks SET notified_tier = ? WHERE id = ? AND notified_tier = ?")
                 .bind(claim.previous)
@@ -162,7 +171,7 @@ pub async fn check_once(pool: &SqlitePool, now: DateTime<Utc>) -> Result<usize, 
                 .await?;
         }
     }
-    Ok(shown)
+    Ok(report)
 }
 
 /// Shows `alert` and says whether it worked. A failure is logged, never raised: an alert must not

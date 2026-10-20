@@ -155,7 +155,7 @@ impl RuleParser {
         // Merge a date and a time of day into one moment; a time with no date means today.
         if start_time.is_none() {
             let day = date.map_or_else(
-                || Local::now().date_naive(),
+                || crate::clock::local_now().date_naive(),
                 |dt| dt.with_timezone(&Local).date_naive(),
             );
             let at = |t: NaiveTime| resolve_local_datetime(day.and_time(t));
@@ -246,7 +246,7 @@ fn parse_segments(input: &str) -> IResult<&str, Vec<Segment>> {
 
 /// Matches "by Friday", "due tomorrow", "before wed", "due next monday", "due jan 5"
 fn parse_deadline_segment(input: &str) -> IResult<&str, Segment> {
-    let now = Local::now();
+    let now = crate::clock::local_now();
     let (input, _) = alt((tag_no_case("by"), tag_no_case("due"), tag_no_case("before")))(input)?;
     let (input, _) = space1(input)?;
     map_res(
@@ -351,8 +351,8 @@ fn parse_text_segment(input: &str) -> IResult<&str, Segment> {
 // ============================================================================
 
 fn parse_temporal_segment(input: &str) -> IResult<&str, Segment> {
-    // Resolved against Local::now() at parse time.
-    let now = Local::now();
+    // Resolved against crate::clock::local_now() at parse time.
+    let now = crate::clock::local_now();
 
     alt((
         // 1. Complex phrases ("day after tomorrow", "3pm-5pm")
@@ -503,8 +503,7 @@ fn parse_relative_duration(
         let dur = match unit.to_lowercase().as_str() {
             u if u.starts_with("min") => Duration::minutes(amount),
             u if u.starts_with("hour") || u.starts_with("hr") => Duration::hours(amount),
-            u if u.starts_with("day") => Duration::days(amount),
-            _ => Duration::seconds(0),
+            _ => Duration::days(amount), // the `alt` above only matches min/hour/day spellings
         };
 
         if prefix.to_lowercase() == "for" {

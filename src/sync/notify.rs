@@ -17,7 +17,7 @@ pub async fn notify_worker(db: SqlitePool, mut shutdown_rx: broadcast::Receiver<
             _ = shutdown_rx.recv() => break,
 
             _ = poll.tick() => {
-                if let Err(e) = notify::check_once(&db, chrono::Utc::now()).await {
+                if let Err(e) = notify::check_once(&db, crate::clock::now()).await {
                     tracing::warn!("deadline alerts failed: {e}");
                 }
             }

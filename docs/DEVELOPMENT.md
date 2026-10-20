@@ -19,7 +19,31 @@ End-to-end check (drives the real binary in sandboxes, ~1 min; see [`TUI_DRIVER.
 python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known Issue; XPASS = fixed, drop its marker
 ```
 
+What the tests do not cover (merged line coverage, mutation survivors, pty-suite determinism): [`TEST_GAPS.md`](./TEST_GAPS.md).
+
 ## Changelog
+
+- 2026-10-20 (mutation survivors): 181 of the 186 surviving mutants are now killed; the 5 left are
+  equivalent or platform-only, see [`TEST_GAPS.md`](./TEST_GAPS.md).
+  - New `tests/it/{tasks,allocation,calendar}_edges.rs`, plus cases in `cli` (daemon, `schedule show`),
+    `notify`, `email_smtp` (fake STARTTLS server), `canvas`, `recurrence`, `urgency`, `nlp_rules`.
+  - `src/email/smtp.rs`: `send_line`, `read_reply`, `expect` and `build_mime` are `pub` for those tests.
+  - `src/app/allocation.rs`: dropped a redundant capacity filter and the unused `block_has_capacity`.
+    `src/nlp/rules.rs`: the unreachable `_ => 0s` arm of `parse_relative_duration` folded into `days`.
+  - A range like `9:30-11` must end the input in a test: `parse_loose_time` eats a trailing space, so a
+    following word fails `word_boundary` before the colon rule runs.
+
+- 2026-10-20 (test gaps): the pty suite is repeatable and measurable.
+  - `src/clock.rs`: `now()` / `local_now()` replace the direct `Utc::now()` / `Local::now()` reads in
+    the app, TUI, CLI, parser and notify worker; `TRIPTYCH_NOW` (RFC 3339) freezes them. Unset, they
+    are the system clock. The `email/` modules keep the real clock on purpose. Tested by
+    `a_pinned_clock_decides_what_tomorrow_is` (`tests/it/cli.rs`).
+  - `tests/tui/`: the suite pins `TRIPTYCH_NOW` for the binary, `fakeimap.py` and its own checks, closes
+    the Ollama URL unless a scenario starts the fake, and moves the 3 real-Ollama scenarios behind
+    `--real-ollama`. `notify_deadline_alert` seeded deadlines with SQLite `'now'`, so it failed against the
+    pinned clock; it now seeds from the pinned instant. Two fixed sleeps became waits on the condition.
+  - `TUIDRIVE_COVERAGE=1` quits the TUI before the kill so an instrumented binary writes its profile:
+    merged coverage 51% to 87% of lines. First mutation batches: survivors listed in `TEST_GAPS.md`.
 
 - 2026-10-20 (audit fixes, KI-26..KI-32): a read-through of the repo found one data-loss bug and
   several robustness gaps; all fixed except the `mail.rs` split (KI-33, open).
@@ -27,7 +51,8 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
     a failure, so a broken notifier lost the alert for good. `check_once` now uses a private
     `claim_alerts` that also returns what each alert claimed, `send` returns `bool`, and a failed send
     puts the previous tier back (`WHERE notified_tier = <claimed>`, so a concurrent claim is not
-    undone). `due_alerts` keeps its signature.
+    undone). `due_alerts` keeps its signature. `check_once` returns `CheckReport { shown, failed }`,
+    and `triptych notify check` prints `▲ N alert(s) could not be shown` to stderr when any failed.
   - Attachments (`src/app/mail.rs`): `attachment_filenames` gives each attachment a unique name (a
     repeat gets `<n>-` in front); before, two `image.png` overwrote each other while the status said
     "Saved 2".
@@ -38,7 +63,8 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
     check on purpose: a second `triptych daemon` started during the first one's preload would
     otherwise treat the live socket as stale and remove it.
   - Canvas (`src/canvas.rs`): `fetch_feed` had no timeout and could hang the worker and
-    `canvas sync`; now 30s.
+    `canvas sync`; now 30s (checked by hand against a local listener that never answers: the sync
+    failed after 30s).
   - Database path (`src/app.rs`): the default `sqlite:todo.db` is relative to the working directory.
     When it has to create the file and `DATABASE_URL` is unset, it prints `Creating a new database at
     <absolute path>` to stderr.
@@ -48,7 +74,9 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
   - Tests/docs: `assert_is_empty` (new in clippy 1.99) allowed in `tests/it/main.rs`, so the tree is
     warning-free again. Docs brought in line with the code (module map, sync config, test layout,
     SMTP note) and the `mail.rs` row of `src/app/CLAUDE.md` cut from a 9 KB cell to short groups.
-    Suite: 286 `cargo test` tests (4 new); the pty suite was not re-run for this change.
+    `daemon_prewarm_loads_model` flaked under `-j 4` (it read `daemon.out` the moment the shared
+    model showed as loaded); it now waits up to 15s for the `Pre-warmed` line.
+    Suite: 286 `cargo test` tests (4 new); pty suite 182/182.
 - 2026-10-12 (calendar on small terminals): the grid drew all 16 hour rows and 7 days whatever the
   terminal size, so the cursor row scrolled off screen and headers truncated (`Thu 0`).
   `render_calendar_view` now sizes both axes from the grid area (after the to-do panel split) and draws
@@ -1100,7 +1128,7 @@ since epoch 0 never occurs on real IMAP servers.
   read and review. Split by group into `src/app/mail/*.rs` when next touching one of them. Not done
   with the KI-26..32 fixes because it moves about 1,000 lines for no behaviour change.
 
-Every other finding (KI-1..KI-32) is fixed and covered by a passing test, except KI-29 (see its entry).
+Every other finding (KI-1..KI-32) is fixed and covered by a passing test, except KI-29 (checked by hand only).
 
 ### Resolved
 
@@ -1120,19 +1148,21 @@ the 2026-10-20 repo audit (KI-26..32). The 2026-09 findings are verified with th
   working directory, so running it from another folder silently made a second, empty database. It now
   prints the absolute path when it creates one. `a_new_default_database_says_where_it_was_created`.
 - **KI-29** (2026-10-20) `canvas::fetch_feed` had no timeout, so an unresponsive server hung the Canvas
-  worker and `triptych canvas sync`. Now 30s. No test: it needs a server that accepts and never
-  answers, which the suite has no fake for.
+  worker and `triptych canvas sync`. Now 30s. Checked by hand (a local listener that
+  accepts and never answers: the sync failed after 30s); no automated test, the suite has no such fake.
 - **KI-28** (2026-10-20) The CLI daemon and its client each did a single `read` into an 8 KB buffer, so
   a request or response over 8 KB failed to parse, and the client had no timeout. Both now read to EOF
-  (capped at 1 MiB) and the client gives up after 120s.
+  (capped at 1 MiB) and the client gives up after 120s. The daemon now waits for the client's EOF
+  before parsing; the only in-tree client half-closes. A client that never closes pins one daemon
+  task until restart (a silent client already did before).
   `the_daemon_takes_a_request_larger_than_one_read`.
 - **KI-27** (2026-10-20) `save_attachments_to` wrote each attachment under its own name, so two with the
   same name (a signature `image.png`) overwrote each other and the status still said "Saved 2". Names
   are now made unique by `attachment_filenames`. `attachment_filenames_never_reuse_a_name`.
 - **KI-26** (2026-10-20) A deadline alert whose notifier failed (bad `TRIPTYCH_NOTIFY_CMD`, no
   `osascript`) was lost: `notified_tier` was set before `send`, which only logged. A failed send now
-  restores the tier, so the next pass retries. Limit: `triptych notify check` prints "No alerts due"
-  when every send failed; the failure is in the log only.
+  restores the tier, so the next pass retries. `triptych notify check` now reports the failure
+  on stderr instead of "No alerts due". A permanently broken notifier retries (and logs) every pass.
   `notify_check_retries_an_alert_whose_notifier_failed`.
 
 - **KI-25** (2026-09-27) `tests/tui/tuidrive.py`'s `Term.cursor()` misread the calendar time label

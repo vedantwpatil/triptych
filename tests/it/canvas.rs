@@ -193,6 +193,60 @@ fn parse_feed_links_the_assignment_page_then_the_description_links() {
     assert!(items[2].links.is_empty());
 }
 
+#[test]
+fn tidy_title_keeps_anything_that_is_not_a_course_code() {
+    for raw in [
+        "Essay [-101]",
+        "Essay [C5-101]",
+        "Essay [ENG-ABC]",
+        "[ENG-101]",
+    ] {
+        assert_eq!(tidy_title(raw), raw);
+    }
+}
+
+#[test]
+fn split_course_wants_letters_dash_digit_led_alphanumerics() {
+    for title in [
+        "-101: Quiz",
+        "C5-101: Quiz",
+        "ENG-ABC: Quiz",
+        "ENG-1_2: Quiz",
+    ] {
+        assert_eq!(split_course(title), None, "{title}");
+    }
+}
+
+fn feed_with(lines: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//canvas//EN\r\nBEGIN:VEVENT\r\n{lines}DTSTART:20261015T235900Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+#[test]
+fn a_short_host_still_gets_its_assignment_page() {
+    let feed = feed_with(
+        "UID:u\r\nSUMMARY:Essay\r\nURL:https://a.co/calendar?include_contexts=course_1&month=09#assignment_2\r\n",
+    );
+    assert_eq!(
+        parse_feed(&feed)[0].links,
+        ["https://a.co/courses/1/assignments/2"]
+    );
+}
+
+#[test]
+fn an_event_url_with_an_empty_course_id_is_kept_as_it_is() {
+    let url = "https://a.co/calendar?include_contexts=course_&month=09#assignment_2";
+    let feed = feed_with(&format!("UID:u\r\nSUMMARY:Essay\r\nURL:{url}\r\n"));
+    assert_eq!(parse_feed(&feed)[0].links, [url]);
+}
+
+#[test]
+fn an_event_with_a_blank_uid_or_title_is_skipped() {
+    assert!(parse_feed(&feed_with("UID: \r\nSUMMARY:Essay\r\n")).is_empty());
+    assert!(parse_feed(&feed_with("UID:u\r\nSUMMARY: \r\n")).is_empty());
+}
+
 #[tokio::test]
 async fn upsert_stores_links_and_refreshes_them_even_on_finished_tasks() {
     let pool = test_pool().await;

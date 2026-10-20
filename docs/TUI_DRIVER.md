@@ -37,10 +37,10 @@ characters; `--marks` also lists highlighted spans (the calendar cursor cell is 
 
 ## tui_suite.py: scenario suite
 
-158 scenarios, each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+179 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
-python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict]
+python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict] [--real-ollama]
 ```
 
 | Group     | Count | Covers                                                                        |
@@ -54,6 +54,12 @@ python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-
 | `email_*` | 26    | list, popup, mark read, convert, compose/reply/forward/send, `s` sync, priority order, AI summaries |
 | `imap_*`  | 19    | real `email sync` and TUI sync/delete/archive (incl. no-`MOVE` fallback) against the fake IMAP server |
 | `vim_*`   | 16    | counts, `gg`/`G`, `C-d`/`C-u`, `0`/`$`, `/` search, visual counts, Ctrl chords |
+
+Repeatable by design: the suite sets `TRIPTYCH_NOW` (binary, fake IMAP and Python all see 2026-06-10 18:00Z) and
+points every sandbox's `TRIPTYCH_OLLAMA_URL` at a closed port unless the scenario starts the fake (`Sandbox.ollama()`),
+so the parser falls back to rules. Scenarios marked `real=True` need your own Ollama and run only with
+`--real-ollama` (non-gating; it also lets every sandbox reach it). Coverage runs: `TUIDRIVE_COVERAGE=1` makes the
+driver quit the TUI with Esc, Esc, `q` before killing it, so an instrumented binary writes its profile.
 
 Statuses: `PASS`, `FAIL` (regression, exit 1), `XFAIL` (known bug still failing), `XPASS` (fixed; `--strict`
 fails on it). None open today. For a new bug, write a scenario asserting the correct behaviour, tag it
@@ -76,8 +82,9 @@ the xterm hex, e.g. `ff0000` = slot 9). Assert on DB rows and screen text, not o
 
 ## Known limits
 
-- Without `c.sb.ollama()`, NLP scenarios use the local Ollama (`localhost:11434`); most inputs return
-  from the regex fast path first. The fake replies with canned text, so it proves plumbing, not quality.
+- Without `c.sb.ollama()`, the sandbox's Ollama URL is a closed port: NLP scenarios see only the regex
+  parser, and only the `real=True` ones reach a real model. The fake replies with canned text, so it
+  proves plumbing, not quality. What the suite does not cover: [`TEST_GAPS.md`](./TEST_GAPS.md).
 - IMAP and SMTP are fakes: they prove protocol use, TLS trust and cursor/threading logic, not real
   provider quirks (OAuth, IDLE, greylisting).
 - `pyte` renders text and colour, not pixels; wide/emoji glyphs may misalign columns.

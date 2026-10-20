@@ -1,6 +1,6 @@
 //! Repeating tasks: finishing one adds its next occurrence (rules in `crate::recurrence`).
 
-use chrono::{Local, Utc};
+use chrono::Local;
 
 use super::{
     App,
@@ -29,7 +29,8 @@ impl App {
         let Some(rule) = task.recurrence.as_deref().and_then(Recurrence::from_key) else {
             return Ok(());
         };
-        let (scheduled, deadline) = rule.next_dates(task.scheduled_at, task.deadline, Utc::now());
+        let (scheduled, deadline) =
+            rule.next_dates(task.scheduled_at, task.deadline, crate::clock::now());
 
         let exists: Option<(i64,)> = sqlx::query_as(
             "SELECT id FROM tasks WHERE completed = 0 AND recurrence = ? AND description = ? \

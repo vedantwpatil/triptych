@@ -73,7 +73,9 @@ def make_certs(d: Path) -> None:
 
 def make_message(uid: int, subject: str, sender: str = "Alice Example <alice@example.com>", body: str = "",
                  pad: int = 0, age_minutes: int = 0, attachment: bool = False, invite: bool = False) -> str:
-    date = format_datetime(datetime.now(timezone.utc) - timedelta(minutes=age_minutes + uid))
+    pinned = os.environ.get("TRIPTYCH_NOW")  # same frozen clock the binary and the suite use
+    now = datetime.fromisoformat(pinned.replace("Z", "+00:00")) if pinned else datetime.now(timezone.utc)
+    date = format_datetime(now - timedelta(minutes=age_minutes + uid))
     body = body or f"Body of {subject}."
     if pad:
         body += "\r\n" + ("x" * 76 + "\r\n") * (pad // 78 + 1)

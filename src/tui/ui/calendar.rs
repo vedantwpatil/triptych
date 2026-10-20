@@ -72,8 +72,8 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
     let is_empty =
         calendar_data.schedule_blocks.is_empty() && calendar_data.scheduled_tasks.is_empty();
 
-    let today = chrono::Local::now().naive_local().date();
-    let now = chrono::Local::now().naive_local();
+    let today = crate::clock::local_now().naive_local().date();
+    let now = crate::clock::local_now().naive_local();
     // Only accent a "now" row when today is actually in the displayed week -
     // paging to another week (H/L) has no current-hour row to show.
     let now_hour: Option<u32> = calendar_data.days.contains(&today).then(|| now.hour());
@@ -202,7 +202,7 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
 
 fn build_calendar_grid(app: &App) -> CalendarGrid<'_> {
     // Calculate week start (Monday)
-    let today = chrono::Local::now().naive_local().date();
+    let today = crate::clock::local_now().naive_local().date();
     let week_offset = app.calendar_week_offset.unwrap_or(0);
     let start_of_week = today + Duration::weeks(week_offset)
         - Duration::days(i64::from(today.weekday().num_days_from_monday()));

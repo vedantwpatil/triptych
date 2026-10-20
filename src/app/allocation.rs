@@ -156,7 +156,7 @@ impl App {
         .fetch_all(&self.db_pool)
         .await?;
 
-        let now = chrono::Local::now();
+        let now = crate::clock::local_now();
         let today = now.naive_local().date();
         let current_time = now.time();
         let mut instances: Vec<BlockInstance> = Vec::new();
@@ -191,19 +191,6 @@ impl App {
 
         instances.sort_by_key(|b| (b.date, b.start_time));
         Ok(instances)
-    }
-
-    /// Remaining free minutes in this block instance, given minutes already used.
-    fn block_has_capacity(
-        usage: &std::collections::HashMap<(NaiveDate, NaiveTime), i64>,
-        block: &BlockInstance,
-        needed_minutes: i64,
-    ) -> bool {
-        let used = usage
-            .get(&(block.date, block.start_time))
-            .copied()
-            .unwrap_or(0);
-        block.capacity_minutes() - used >= needed_minutes.min(1)
     }
 
     async fn clear_all_allocations(
@@ -281,7 +268,7 @@ impl App {
         let blocks = self
             .get_available_deepwork_blocks(ALLOCATION_WINDOW_DAYS)
             .await?;
-        let window_end = allocation_window_end(chrono::Local::now().naive_local().date());
+        let window_end = allocation_window_end(crate::clock::local_now().naive_local().date());
 
         let mut tx = self.db_pool.begin().await?;
         Self::clear_all_allocations(&mut tx).await?;
@@ -299,7 +286,6 @@ impl App {
             let available: Vec<&BlockInstance> = blocks
                 .iter()
                 .filter(|b| b.start_datetime_utc() < deadline)
-                .filter(|b| Self::block_has_capacity(&block_usage, b, 1))
                 .collect();
 
             let allocated = Self::allocate_task_to_blocks(

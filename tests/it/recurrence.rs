@@ -124,6 +124,24 @@ fn a_late_finish_rolls_past_now() {
 }
 
 #[test]
+fn an_occurrence_landing_exactly_on_now_is_skipped() {
+    let next = Recurrence::Daily.next_after(local(2026, 10, 1, 9), local(2026, 10, 2, 9));
+    assert_eq!(ymd(next), (2026, 10, 3));
+}
+
+#[test]
+fn weekly_and_weekdays_work_as_bare_trailing_words() {
+    assert_eq!(
+        extract("pay rent weekly"),
+        Some((Recurrence::Weekly, "pay rent".to_string()))
+    );
+    assert_eq!(
+        extract("standup weekdays"),
+        Some((Recurrence::Weekdays, "standup".to_string()))
+    );
+}
+
+#[test]
 fn next_dates_keep_the_gap_between_scheduled_and_deadline() {
     let scheduled = local(2026, 10, 5, 9); // Monday
     let deadline = local(2026, 10, 9, 17); // Friday

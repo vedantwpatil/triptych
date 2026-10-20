@@ -117,7 +117,7 @@ fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListIte
     // A lapsed snooze's `snoozed_until` stays set until cleared (see the field's doc), so this
     // only tags a message that's genuinely still hidden by it right now.
     if let Some(until) = email.snoozed_until
-        && until > chrono::Utc::now()
+        && until > crate::clock::now()
     {
         let until_text = until.with_timezone(&chrono::Local).format("%a %H:%M");
         spans.push(Span::styled(

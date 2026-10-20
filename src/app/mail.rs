@@ -211,7 +211,7 @@ impl App {
     /// `date_utc` column is a local disk write, not a network call, so there's no
     /// TUI-stall risk to avoid.
     pub(super) async fn cleanup_old_emails(&self) {
-        let cutoff = Utc::now() - Duration::days(EMAIL_RETENTION_DAYS);
+        let cutoff = crate::clock::now() - Duration::days(EMAIL_RETENTION_DAYS);
         if let Err(e) = email_store::delete_older_than(&self.db_pool, cutoff).await {
             tracing::warn!("[Email] cleanup failed: {}", e);
         }
@@ -308,7 +308,7 @@ impl App {
             self.emails
                 .retain(|e| e.from_addr.rsplit('@').next() == Some(domain.as_str()));
         }
-        let now = Utc::now();
+        let now = crate::clock::now();
         if self.show_snoozed {
             self.emails
                 .retain(|e| e.snoozed_until.is_some_and(|t| t > now));
@@ -606,7 +606,7 @@ impl App {
             return;
         };
         let email_id = email.id;
-        let Some(until) = parse_snooze_spec(&typed, Utc::now()) else {
+        let Some(until) = parse_snooze_spec(&typed, crate::clock::now()) else {
             self.notify(&format!("Not a snooze spec: {typed}"));
             return;
         };
@@ -1898,7 +1898,7 @@ pub fn parse_snooze_spec(spec: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>
 
 /// 8am local time, `days_ahead` days from today — the shared target for `tomorrow`/`nextweek`.
 fn snooze_to_local_morning(days_ahead: i64) -> Option<DateTime<Utc>> {
-    let date = chrono::Local::now().naive_local().date() + Duration::days(days_ahead);
+    let date = crate::clock::local_now().naive_local().date() + Duration::days(days_ahead);
     let naive = date.and_hms_opt(8, 0, 0)?;
     Some(resolve_local_datetime(naive))
 }

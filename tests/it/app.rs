@@ -299,7 +299,7 @@ fn cell_tasks_spans_a_manual_task_over_its_duration() {
 /// A single-connection in-memory DB, fully migrated the same way `App::build`
 /// migrates the real one, so these tests exercise the real read/write paths
 /// instead of a hand-rolled stand-in schema.
-async fn test_pool() -> SqlitePool {
+pub async fn test_pool() -> SqlitePool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -338,7 +338,7 @@ async fn email_task_id(pool: &SqlitePool, email_id: i64) -> Option<i64> {
         .expect("read email link")
 }
 
-async fn insert_task(pool: &SqlitePool, description: &str) -> i64 {
+pub async fn insert_task(pool: &SqlitePool, description: &str) -> i64 {
     sqlx::query(
         "INSERT INTO tasks (description, completed, item_order, priority) VALUES (?, false, 0, 1)",
     )
@@ -349,7 +349,7 @@ async fn insert_task(pool: &SqlitePool, description: &str) -> i64 {
     .last_insert_rowid()
 }
 
-async fn insert_task_with_deadline(
+pub async fn insert_task_with_deadline(
     pool: &SqlitePool,
     description: &str,
     deadline: DateTime<Utc>,
@@ -2002,7 +2002,7 @@ async fn mark_canvas(pool: &SqlitePool, id: i64) {
         .expect("mark canvas");
 }
 
-async fn task_count(pool: &SqlitePool) -> i64 {
+pub async fn task_count(pool: &SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
         .fetch_one(pool)
         .await

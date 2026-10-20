@@ -137,8 +137,10 @@ class Sandbox:
         )
         if (self.imap_dir / "port").exists():  # only ever the local fake server, never an inherited real account
             env.update(fakeimap.env_for(self.imap_dir))
-        if (self.ollama_dir / "port").exists():  # only ever the local fake; otherwise the real default URL
+        if (self.ollama_dir / "port").exists():  # only ever the local fake
             env.update(fakeollama.env_for(self.ollama_dir))
+        elif not os.environ.get("TUIDRIVE_REAL_OLLAMA"):  # nothing listens here: the parser falls back to rules, repeatably
+            env["TRIPTYCH_OLLAMA_URL"] = "http://127.0.0.1:1"
         if (self.smtp_dir / "port").exists():  # only ever the local fake server, never an inherited real account
             env.update(fakesmtp.env_for(self.smtp_dir))
         if (self.imap_dir / "port").exists() and (self.smtp_dir / "port").exists():
@@ -365,7 +367,23 @@ class Term:
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.settle(0.4)
 
+    def _quit_gracefully(self) -> None:
+        """Esc, Esc, q (spaced so crossterm reads three keys, not Alt combos) so an instrumented binary writes its profile."""
+        for key in (b"\x1b", b"\x1b", b"q"):
+            try:
+                os.write(self.fd, key)
+            except OSError:
+                return
+            time.sleep(0.12)
+        for _ in range(80):
+            self._reap()
+            if self.exit_code is not None:
+                return
+            time.sleep(0.025)
+
     def kill(self) -> None:
+        if os.environ.get("TUIDRIVE_COVERAGE") and self.pid is not None and self.exit_code is None and self.fd is not None:
+            self._quit_gracefully()
         if self.pid is not None and self.exit_code is None:
             try:
                 os.kill(self.pid, signal.SIGKILL)

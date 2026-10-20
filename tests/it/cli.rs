@@ -261,6 +261,25 @@ fn priority_rises_when_the_date_is_near() {
 }
 
 #[test]
+fn a_pinned_clock_decides_what_tomorrow_is() {
+    let sb = Sandbox::new();
+    let run = |args: &[&str]| {
+        sb.cmd(args)
+            .env("TRIPTYCH_NOW", "2030-03-05T12:00:00Z")
+            .output()
+            .expect("spawn triptych")
+    };
+    let add = run(&["add", "Submit report on 03/06"]);
+    assert!(add.status.success(), "add failed: {}", stderr(&add));
+
+    let list_out = stdout(&run(&["list"]));
+    assert!(
+        list_out.contains("[TOMORROW]"),
+        "TRIPTYCH_NOW was ignored: {list_out}"
+    );
+}
+
+#[test]
 fn schedule_import_show_clear_roundtrip() {
     let sb = Sandbox::new();
     // Field names must match `BlockDefinition` in src/app.rs (day/type/start/end/title) -
@@ -395,6 +414,53 @@ fn daemon_start_status_stop_cleans_up_socket() {
         status_after.contains("not running"),
         "unexpected status: {status_after}"
     );
+}
+
+/// Starts `triptych daemon` with stderr captured, then waits until it accepts connections.
+/// The socket exists once bound, but the daemon only accepts after preloading its cache, so a
+/// `status` round trip is the readiness signal.
+fn spawn_daemon(sb: &Sandbox) -> std::process::Child {
+    let child = sb
+        .cmd(&["daemon"])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn daemon process");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !stdout(&sb.run(&["status"])).contains("Daemon is running") {
+        assert!(Instant::now() < deadline, "daemon never became ready");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child
+}
+
+#[test]
+fn daemon_adds_hand_back_the_real_row_ids() {
+    let sb = Sandbox::new();
+    let child = spawn_daemon(&sb);
+
+    let first = stdout(&sb.run(&["add", "first thing"]));
+    let second = stdout(&sb.run(&["add", "second thing"]));
+    let _ = sb.run(&["stop"]);
+    let _ = child.wait_with_output();
+
+    assert!(first.contains("via daemon"), "{first}");
+    assert_eq!(extract_id(&first), Some(1), "{first}");
+    assert_eq!(extract_id(&second), Some(2), "{second}");
+}
+
+#[test]
+fn daemon_reports_how_many_cached_inputs_it_preloaded() {
+    let sb = Sandbox::new();
+    for input in ["alpha errand", "beta errand"] {
+        let add = sb.run(&["add", input]);
+        assert!(add.status.success(), "{}", stderr(&add));
+    }
+    let child = spawn_daemon(&sb);
+
+    let _ = sb.run(&["stop"]);
+    let log = stderr(&child.wait_with_output().expect("collect daemon output"));
+
+    assert!(log.contains("Loaded 2 cache entries"), "{log}");
 }
 
 #[test]
@@ -599,6 +665,64 @@ title = "Block B"
         !show.contains("Block B"),
         "overlapping block should have been skipped: {show}"
     );
+}
+
+/// The first day listed gets its heading, and "Allocated tasks:" appears only when there are some.
+#[test]
+fn schedule_show_heads_every_day_and_lists_allocations_only_when_present() {
+    let sb = Sandbox::new();
+    let tomorrow = weekday_name(
+        chrono::Local::now()
+            .date_naive()
+            .succ_opt()
+            .unwrap()
+            .weekday(),
+    );
+    let toml_path = sb.path("schedule.toml");
+    std::fs::write(
+        &toml_path,
+        format!(
+            r#"
+[[blocks]]
+day = "tuesday"
+type = "admin"
+start = "12:00"
+end = "13:00"
+title = "Errands"
+
+[[blocks]]
+day = "{tomorrow}"
+type = "deepwork"
+start = "06:00"
+end = "10:00"
+title = "Focus Time"
+"#
+        ),
+    )
+    .unwrap();
+    let import = sb.run(&["schedule", "import", toml_path.to_str().unwrap()]);
+    assert!(
+        import.status.success(),
+        "import failed: {}",
+        stderr(&import)
+    );
+
+    let before = stdout(&sb.run(&["schedule", "show"]));
+    assert!(before.contains("Tuesday:"), "{before}");
+    assert!(!before.contains("Allocated tasks:"), "{before}");
+
+    let add = sb.run(&["add", "Finish report by tomorrow 2h"]);
+    assert!(add.status.success(), "add failed: {}", stderr(&add));
+    let reallocate = sb.run(&["schedule", "reallocate"]);
+    assert!(
+        reallocate.status.success(),
+        "reallocate failed: {}",
+        stderr(&reallocate)
+    );
+
+    let after = stdout(&sb.run(&["schedule", "show"]));
+    assert!(after.contains("Allocated tasks:"), "{after}");
+    assert!(after.contains("Finish report"), "{after}");
 }
 
 #[test]
@@ -939,10 +1063,11 @@ fn notify_check_retries_an_alert_whose_notifier_failed() {
 
     let failed = check(Path::new("false"));
     assert!(
-        stdout(&failed).contains("No alerts due"),
+        stderr(&failed).contains("1 alert(s) could not be shown"),
         "{}",
-        stdout(&failed)
+        stderr(&failed)
     );
+    assert!(!stdout(&failed).contains("Sent"), "{}", stdout(&failed));
 
     let retried = check(&script);
     assert!(

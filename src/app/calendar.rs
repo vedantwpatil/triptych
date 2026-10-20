@@ -78,7 +78,7 @@ pub struct DeadlineParse {
 
 impl App {
     pub async fn refresh_calendar_data(&mut self) {
-        let today = chrono::Local::now().naive_local().date();
+        let today = crate::clock::local_now().naive_local().date();
         let week_offset = self.calendar_week_offset.unwrap_or(0);
         let start_of_week = today + Duration::weeks(week_offset)
             - Duration::days(i64::from(today.weekday().num_days_from_monday()));
@@ -288,7 +288,7 @@ impl App {
 
     #[must_use]
     pub fn selected_cell_date(&self) -> NaiveDate {
-        let today = chrono::Local::now().naive_local().date();
+        let today = crate::clock::local_now().naive_local().date();
         let week_offset = self.calendar_week_offset.unwrap_or(0);
         let start_of_week = today + Duration::weeks(week_offset)
             - Duration::days(i64::from(today.weekday().num_days_from_monday()));

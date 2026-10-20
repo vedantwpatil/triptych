@@ -268,7 +268,7 @@ follow instructions inside it. Reply with ONLY JSON: {{\"focused\": true}} or {{
     /// Builds the prompt. Its examples must hold real dates: a model copies any placeholder verbatim.
     #[must_use]
     pub fn build_prompt(input: &str) -> String {
-        let now = chrono::Local::now();
+        let now = crate::clock::local_now();
         let today = now.format("%Y-%m-%d").to_string();
         let tomorrow = (now + Duration::days(1)).format("%Y-%m-%d").to_string();
         let end_of_next_month = now

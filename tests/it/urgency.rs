@@ -100,3 +100,12 @@ fn deadline_badge_names_the_day() {
         .with_timezone(&Utc);
     assert_eq!(deadline_badge(earlier, now), "[OVERDUE]");
 }
+
+#[test]
+fn a_deadline_exactly_now_is_due_not_overdue() {
+    let now = Local.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap();
+    assert_eq!(
+        deadline_badge(now.with_timezone(&Utc), now),
+        "[DUE TODAY 12:00pm]"
+    );
+}

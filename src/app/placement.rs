@@ -153,7 +153,7 @@ impl App {
         &self,
         task_category: &str,
     ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-        let now = chrono::Local::now();
+        let now = crate::clock::local_now();
         let today = now.naive_local().date();
 
         // Look at current week + next week (14 days)

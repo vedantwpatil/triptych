@@ -68,14 +68,14 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
                             let mut indicators = Vec::new();
 
                             if let Some((_, badge)) =
-                                urgency::priority_badge(task, chrono::Utc::now())
+                                urgency::priority_badge(task, crate::clock::now())
                             {
                                 indicators.push(badge);
                             }
 
                             if let Some(scheduled) = task.scheduled_at {
                                 let scheduled = scheduled.with_timezone(&chrono::Local);
-                                let now = chrono::Local::now();
+                                let now = crate::clock::local_now();
                                 let scheduled_date = scheduled.date_naive();
                                 let today = now.date_naive();
                                 let tomorrow = today + chrono::Duration::days(1);
@@ -91,8 +91,10 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
                             }
 
                             if let (Some(deadline), false) = (task.deadline, task.completed) {
-                                indicators
-                                    .push(urgency::deadline_badge(deadline, chrono::Local::now()));
+                                indicators.push(urgency::deadline_badge(
+                                    deadline,
+                                    crate::clock::local_now(),
+                                ));
                             }
 
                             if let Some(rule) = &task.recurrence {
@@ -341,9 +343,17 @@ pub async fn handle_notify_command(command: NotifyCommands) -> Result<(), crate:
             }
             let pool = open_pool().await?;
             run_calendar_migration(&pool).await?;
-            match notify::check_once(&pool, chrono::Utc::now()).await? {
-                0 => println!("No alerts due"),
+            let report = notify::check_once(&pool, crate::clock::now()).await?;
+            match report.shown {
+                0 if report.failed == 0 => println!("No alerts due"),
+                0 => {}
                 n => println!("✓ Sent {n} alert(s)"),
+            }
+            if report.failed > 0 {
+                eprintln!(
+                    "▲ {} alert(s) could not be shown (check TRIPTYCH_NOTIFY_CMD); retrying next run",
+                    report.failed
+                );
             }
         }
         NotifyCommands::Install => match notify::agent::install() {

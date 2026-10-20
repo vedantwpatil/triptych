@@ -373,3 +373,150 @@ fn numeric_date_needs_year_on_or_day_above_twelve() {
     assert!(date("13/45").is_err());
     assert!(parse_numeric_date(now, true)("1/2").is_ok());
 }
+
+fn local_at(y: i32, m: u32, d: u32, hour: u32) -> DateTime<Local> {
+    NaiveDate::from_ymd_opt(y, m, d)
+        .unwrap()
+        .and_hms_opt(hour, 0, 0)
+        .unwrap()
+        .and_local_timezone(Local)
+        .unwrap()
+}
+
+fn point(temporal: &TemporalContext) -> DateTime<Local> {
+    let TemporalContext::Point(dt) = temporal else {
+        panic!("expected a Point");
+    };
+    dt.with_timezone(&Local)
+}
+
+#[test]
+fn numeric_dates_expand_two_digit_years_and_keep_today_in_this_year() {
+    let now = local_at(2026, 9, 19, 12);
+    let parsed = |input| parse_numeric_date(now, false)(input).unwrap().1;
+    let date = |input| parsed(input).with_timezone(&Local).date_naive();
+    let ymd = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+
+    assert_eq!(date("3/4/28"), ymd(2028, 3, 4));
+    assert_eq!(date("3/4/99"), ymd(2099, 3, 4));
+    assert_eq!(parsed("3/4/100").year(), 100, "three digits are literal");
+    assert_eq!(date("9/19"), ymd(2026, 9, 19), "today is not yet past");
+    assert_eq!(date("9/18"), ymd(2027, 9, 18), "yesterday rolls forward");
+}
+
+#[test]
+fn eod_and_cob_mean_five_pm_today() {
+    let now = local_at(2026, 9, 16, 9);
+    for word in ["eod", "cob", "EOD", "COB"] {
+        let (_, temporal) = parse_business_time(now)(word).unwrap();
+        let at = point(&temporal);
+        assert_eq!(
+            (at.date_naive(), at.hour(), at.minute()),
+            (now.date_naive(), 17, 0),
+            "{word}"
+        );
+    }
+}
+
+#[test]
+fn eow_is_this_fridays_five_pm_and_next_fridays_from_the_weekend() {
+    // 2026-09-14 is a Monday, so the 18th is that week's Friday.
+    for (day, friday) in [
+        (14, 18),
+        (15, 18),
+        (16, 18),
+        (17, 18),
+        (18, 18),
+        (19, 25),
+        (20, 25),
+    ] {
+        let now = local_at(2026, 9, day, 9);
+        let (_, temporal) = parse_business_time(now)("EOW").unwrap();
+        let at = point(&temporal);
+        assert_eq!(
+            (at.date_naive(), at.hour(), at.minute()),
+            (NaiveDate::from_ymd_opt(2026, 9, friday).unwrap(), 17, 0),
+            "from the {day}th"
+        );
+    }
+}
+
+#[test]
+fn in_durations_land_on_the_next_quarter_hour_after_the_wait() {
+    for (spelling, wait) in [
+        ("20 minutes", Duration::minutes(20)),
+        ("7 mins", Duration::minutes(7)),
+        ("2 hours", Duration::hours(2)),
+        ("3 hrs", Duration::hours(3)),
+        ("1 day", Duration::days(1)),
+    ] {
+        let before = triptych::clock::now();
+        let task = parse_task(&format!("call mom in {spelling}"));
+        let after = triptych::clock::now();
+
+        let due = task.due_date.expect("a time");
+        assert_eq!(due.timestamp() % 900, 0, "in {spelling}: on the grid");
+        assert!(due >= before + wait, "in {spelling}: {due} is too early");
+        assert!(
+            due <= after + wait + Duration::minutes(15),
+            "in {spelling}: {due} is too late"
+        );
+    }
+}
+
+/// Hours and minutes after `for` are a task length; only days reach the event-end path.
+#[test]
+fn a_start_with_a_for_days_duration_ends_that_many_days_after() {
+    for (spelling, hours) in [("1 day", 24), ("2 days", 48)] {
+        let event = parse_event(&format!("conference tomorrow 9am for {spelling}"));
+        assert_eq!(local_hm(event.start_time), (tomorrow(), 9, 0), "{spelling}");
+        assert_eq!(
+            (event.end_time.unwrap() - event.start_time).num_hours(),
+            hours,
+            "{spelling}"
+        );
+    }
+}
+
+#[test]
+fn day_after_tomorrow_is_two_days_out_at_nine() {
+    let task = parse_task("pick up parcel day after tomorrow");
+    let (date, hour, minute) = local_hm(task.due_date.expect("a date"));
+    let two_days_out = (triptych::clock::local_now() + Duration::days(2)).date_naive();
+    assert_eq!((date, hour, minute), (two_days_out, 9, 0));
+    assert_eq!(task.title, "pick up parcel");
+}
+
+#[test]
+fn tags_keep_underscores_and_dashes() {
+    let task = parse_task("buy milk #work_home #to-do #plain");
+    assert_eq!(task.tags, ["work_home", "to-do", "plain"]);
+    assert_eq!(task.title, "buy milk");
+}
+
+#[test]
+fn a_clock_range_with_a_colon_on_only_one_end_stays_text() {
+    // The range ends the input: `parse_loose_time` eats a trailing space, so a following word
+    // would fail `word_boundary` before the colon check is reached.
+    for input in ["read 9:30-11", "read 9-11:30"] {
+        let item = RuleParser::try_parse(input);
+        assert!(
+            !matches!(item, Some(ParsedItem::Event(_))),
+            "{input} became an event"
+        );
+    }
+}
+
+#[test]
+fn an_unresolved_by_due_or_before_word_is_flagged_unless_the_deadline_resolved() {
+    for word in ["by", "due", "before", "BY", "Due"] {
+        let text = format!("finish essay {word} the end of next month");
+        assert!(has_unresolved_deadline_intent(&text, false), "{word}");
+        assert!(!has_unresolved_deadline_intent(&text, true), "{word}");
+    }
+    assert!(!has_unresolved_deadline_intent(
+        "standby bypass duet",
+        false
+    ));
+    assert!(!has_unresolved_deadline_intent("finish essay", false));
+}

@@ -88,16 +88,16 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             let mut spans = vec![Span::styled(format!("{status} "), status_style)];
 
             // Priority, date and deadline badges share one urgency style
-            let level = urgency::effective_priority(task, chrono::Utc::now());
+            let level = urgency::effective_priority(task, crate::clock::now());
             let badge_style = date_style(level);
-            if let Some((_, badge)) = urgency::priority_badge(task, chrono::Utc::now()) {
+            if let Some((_, badge)) = urgency::priority_badge(task, crate::clock::now()) {
                 spans.push(Span::styled(format!("{badge} "), urgency_style(level)));
             }
 
             // Add schedule indicator with date and time info
             if let Some(scheduled) = task.scheduled_at {
                 let scheduled = scheduled.with_timezone(&chrono::Local);
-                let now = chrono::Local::now();
+                let now = crate::clock::local_now();
                 let scheduled_date = scheduled.date_naive();
                 let today = now.date_naive();
                 let tomorrow = today + chrono::Duration::days(1);
@@ -120,7 +120,7 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
             }
 
             if let (Some(deadline), false) = (task.deadline, task.completed) {
-                let badge = urgency::deadline_badge(deadline, chrono::Local::now());
+                let badge = urgency::deadline_badge(deadline, crate::clock::local_now());
                 spans.push(Span::styled(format!("{badge} "), badge_style));
             }
 

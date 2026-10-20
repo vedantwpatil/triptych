@@ -161,7 +161,12 @@ async fn send_inner(config: &SmtpConfig, message: &OutgoingMessage) -> Result<()
     Ok(())
 }
 
-async fn send_line<S: AsyncWrite + Unpin>(stream: &mut S, line: &str) -> Result<()> {
+/// Writes `line` plus the CRLF terminator.
+///
+/// # Errors
+///
+/// Returns an error if the stream rejects the write.
+pub async fn send_line<S: AsyncWrite + Unpin>(stream: &mut S, line: &str) -> Result<()> {
     stream
         .write_all(line.as_bytes())
         .await
@@ -173,10 +178,15 @@ async fn send_line<S: AsyncWrite + Unpin>(stream: &mut S, line: &str) -> Result<
     Ok(())
 }
 
-/// Reads one (possibly multi-line) SMTP reply, returning its 3-digit status code and the last
-/// line's text. RFC 5321 §4.2: a continuation line has `-` right after the code (`250-`); the
-/// final line has a space (`250 `).
-async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u16, String)> {
+/// Reads one (possibly multi-line) SMTP reply: its 3-digit status code and the last line's text.
+///
+/// RFC 5321 §4.2: a continuation line has `-` right after the code (`250-`); the final line has a
+/// space (`250 `).
+///
+/// # Errors
+///
+/// Returns an error if the stream closes first or the last line has no 3-digit code.
+pub async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u16, String)> {
     let mut last_line: String;
     loop {
         let mut raw = Vec::new();
@@ -213,7 +223,11 @@ async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u16, String
 }
 
 /// Reads a reply and errors (tagged with `what`) unless its code is 2xx or 3xx.
-async fn expect<S: AsyncRead + Unpin>(stream: &mut S, what: &str) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error if the reply cannot be read or carries any other code.
+pub async fn expect<S: AsyncRead + Unpin>(stream: &mut S, what: &str) -> Result<()> {
     let (code, text) = read_reply(stream).await?;
     if !(200..400).contains(&code) {
         anyhow::bail!("{what} rejected: SMTP {code} {text}");
@@ -252,7 +266,8 @@ fn generate_message_id(domain: &str) -> String {
 
 /// Builds the RFC 5322 message: headers, blank line, then the plain-text body. Not yet
 /// dot-stuffed - that happens once, in [`dot_stuff`], right before the wire write.
-fn build_mime(config: &SmtpConfig, message: &OutgoingMessage) -> String {
+#[must_use]
+pub fn build_mime(config: &SmtpConfig, message: &OutgoingMessage) -> String {
     let mut headers = vec![
         format!("Date: {}", Utc::now().to_rfc2822()),
         format!("From: {}", config.from_addr),

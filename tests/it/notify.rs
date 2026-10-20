@@ -89,6 +89,57 @@ async fn a_moved_deadline_alerts_again_and_long_lists_are_batched() {
     assert_eq!(due_alerts(&pool, now).await.unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn the_time_left_switches_from_minutes_to_hours_at_sixty() {
+    let pool = test_pool().await;
+    let now = Utc::now();
+    add(
+        &pool,
+        "just under",
+        Some(now + Duration::minutes(59)),
+        false,
+    )
+    .await;
+    add(&pool, "exactly", Some(now + Duration::minutes(60)), false).await;
+    add(&pool, "over", Some(now + Duration::minutes(61)), false).await;
+
+    // 59 and 60 minutes are the 1-hour tier, 61 the 24-hour tier: two alerts.
+    let alerts = due_alerts(&pool, now).await.unwrap();
+    let body = alerts
+        .iter()
+        .map(|a| a.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for line in [
+        "just under (in 59m)",
+        "exactly (in 1h 0m)",
+        "over (in 1h 1m)",
+    ] {
+        assert!(body.contains(line), "{line:?} not in {body:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_list_exactly_at_the_cap_has_no_more_line() {
+    let pool = test_pool().await;
+    let now = Utc::now();
+    for i in 0..3 {
+        add(
+            &pool,
+            &format!("t{i}"),
+            Some(now + Duration::minutes(30 + i)),
+            false,
+        )
+        .await;
+    }
+
+    let body = due_alerts(&pool, now).await.unwrap().remove(0).body;
+
+    assert_eq!(body.lines().count(), 3, "{body:?}");
+    assert!(!body.contains("more"), "{body:?}");
+}
+
 /// The TUI worker and the `LaunchAgent` can check at the same instant; each task must still alert once.
 #[tokio::test]
 async fn concurrent_checks_alert_each_task_once() {

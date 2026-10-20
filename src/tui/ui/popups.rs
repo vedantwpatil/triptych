@@ -229,7 +229,7 @@ pub(super) fn render_cell_detail(f: &mut Frame, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let now = chrono::Local::now();
+    let now = crate::clock::local_now();
     let mut head: Vec<Line> = app
         .selected_cell_block()
         .into_iter()

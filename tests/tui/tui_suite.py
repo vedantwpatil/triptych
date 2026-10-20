@@ -29,15 +29,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tuidrive as td  # noqa: E402  (bootstraps pyte before anything else)
 
+# The binary and the fake IMAP server read this too (TRIPTYCH_NOW), so "now" never moves during a run.
+os.environ.setdefault("TRIPTYCH_NOW", "2026-06-10T18:00:00Z")
+NOW = datetime.fromisoformat(os.environ["TRIPTYCH_NOW"].replace("Z", "+00:00"))
 SCENARIOS: dict[str, dict] = {}
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
-def scenario(name: str, known: str | None = None):
+def scenario(name: str, known: str | None = None, real: bool = False):
+    """`real=True`: needs the user's own Ollama, so it only runs with `--real-ollama` and never gates."""
     assert len(name) <= 28 and name not in SCENARIOS, name
 
     def deco(fn):
-        SCENARIOS[name] = {"fn": fn, "known": known}
+        SCENARIOS[name] = {"fn": fn, "known": known, "real": real}
         return fn
     return deco
 
@@ -103,7 +107,7 @@ class Ctx:
             self.db("insert into schedule_blocks(day_of_week,start_time,end_time,block_type,title) values (?,?,?,?,?)", r)
 
     def seed_emails(self, n: int = 3, **over) -> None:
-        now = datetime.now(timezone.utc)
+        now = NOW
         for i in range(n):
             row = dict(uid=i + 1, message_id=f"<m{i}@x>", account="work" if i % 2 == 0 else "home", from_addr=f"p{i}@ex.com",
                        from_name=f"Person {i}", subject=f"Subject {i}", date_utc=(now - timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -308,7 +312,9 @@ def _(c: Ctx):
     c.check(c.cli("list").out.count("via the daemon") == 1, "daemon-added task missing from list")
     r = c.cli("stop")
     c.check(r.rc == 0, f"stop rc={r.rc} {r.clean_err!r}")
-    time.sleep(1.0)
+    end = time.time() + 10
+    while "not running" not in c.cli("status").out and time.time() < end:
+        time.sleep(0.2)
     c.check("not running" in c.cli("status").out, "status after stop")
     c.check(c.cli("add", "direct again").out.count("via daemon") == 0, "add still tried the daemon")
 
@@ -329,7 +335,10 @@ def _(c: Ctx):
     c.sb.start_daemon()
     p2 = subprocess.Popen([str(td.BIN), "daemon"], cwd=c.sb.dir, env=c.sb.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     c.sb.bg.append(p2)
-    time.sleep(3)
+    try:
+        p2.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
     c.check(p2.poll() is not None, "second daemon still running: it stole the socket instead of refusing")
 
 
@@ -349,7 +358,7 @@ def _(c: Ctx):
     c.check(len(d) == 2 and any("dad" in x.lower() for x in d), f"daemon saved wrong descriptions: {d}")
 
 
-@scenario("daemon_prewarm_loads_model")
+@scenario("daemon_prewarm_loads_model", real=True)
 @_serialized
 def _(c: Ctx):
     if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
@@ -357,7 +366,13 @@ def _(c: Ctx):
     c.check(_unload(), "model still loaded after unload")
     c.sb.start_daemon()
     c.check(_wait_loaded(90), "daemon startup did not load the model (KI-19)")
-    out = (c.sb.dir / "daemon.out").read_text()
+    # The line is printed once the warmup request returns, which can trail the model showing as
+    # loaded (another parallel scenario may have loaded it first), so wait for it.
+    end = time.time() + 15
+    out = ""
+    while "Pre-warmed" not in out and time.time() < end:
+        out = (c.sb.dir / "daemon.out").read_text()
+        time.sleep(0.25)
     c.check("Pre-warmed" in out, f"no 'Pre-warmed' line in daemon output: {out[-200:]!r}")
 
 
@@ -371,7 +386,7 @@ def nlp(c: Ctx, text: str, desc: str | None = None, hour=None, minute=None, day:
     rows = c.tasks()
     if not c.check(len(rows) == 1, f"expected 1 task, got {len(rows)}"):
         return
-    t, now = rows[0], datetime.now().astimezone()
+    t, now = rows[0], NOW.astimezone()
     s, dl = parse_ts(t["scheduled_at"]), parse_ts(t["deadline"])
     if desc is not None:
         c.eq(t["description"], desc, "description")
@@ -582,7 +597,7 @@ def _(c: Ctx):
     c.check(not t.has("[ ]"), "task rows on empty DB")
 
 
-@scenario("todo_add_cold_model")
+@scenario("todo_add_cold_model", real=True)
 @_serialized
 def _(c: Ctx):
     if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
@@ -598,7 +613,7 @@ def _(c: Ctx):
     c.check(_wait_loaded(60), "a cold add did not start a background load")
 
 
-@scenario("todo_add_llm_nonblocking")
+@scenario("todo_add_llm_nonblocking", real=True)
 @_serialized
 def _(c: Ctx):
     if not c.check(_ollama_up(), "Ollama is not running; this scenario needs it"):
@@ -767,12 +782,12 @@ def _(c: Ctx):
     script = c.sb.dir / "alert.sh"
     script.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> "' + str(log) + '"\n')
     script.chmod(0o755)
-    def at(mod: str) -> str:  # same text shape sqlx writes, so string comparison in SQL is valid
-        return f"strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now', '{mod}')"
+    def at(delta: timedelta) -> str:  # same text shape sqlx writes, so string comparison in SQL is valid
+        return "'" + (NOW + delta).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00") + "'"
 
-    soon = at("+30 minutes")
+    soon = at(timedelta(minutes=30))
     c.db(f"insert into tasks(description, completed, item_order, priority, deadline) values ('Essay due soon', 0, 0, 1, {soon})")
-    c.db("insert into tasks(description, completed, item_order, priority, deadline) values ('Far away', 0, 1, 1, " + at("+5 days") + ")")
+    c.db("insert into tasks(description, completed, item_order, priority, deadline) values ('Far away', 0, 1, 1, " + at(timedelta(days=5)) + ")")
     c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"TRIPTYCH_NOTIFY_CMD": str(script)}), 42, 130)
     c.t.spawn()
     end = time.time() + 10
@@ -1044,9 +1059,9 @@ def _(c: Ctx):
     dates = t.week_dates()
     c.eq(len(dates), 7, "header dates")
     c.check(all(f"{h:02d}" in t.text() for h in (7, 12, 10)) and t.has("07am") and t.has("10pm"), "time labels")
-    today = datetime.now().strftime("%m/%d")
+    today = NOW.astimezone().strftime("%m/%d")
     c.check(today in dates, f"today {today} not in week {dates}")
-    hour = datetime.now().hour
+    hour = NOW.astimezone().hour
     if 7 <= hour <= 22:
         c.check("▸" in t.text(), "now-marker missing on the current hour")
 
@@ -1336,7 +1351,7 @@ def _(c: Ctx):
     t.press("ENTER")
     c.see("Deadline updated")
     dl = parse_ts(c.tasks()[0]["deadline"])
-    c.check(dl and dl.date() == (datetime.now().astimezone() + timedelta(days=1)).date(), f"deadline {dl}")
+    c.check(dl and dl.date() == (NOW.astimezone() + timedelta(days=1)).date(), f"deadline {dl}")
 
 
 def bad_deadline(c: Ctx) -> td.Term:
@@ -1426,7 +1441,7 @@ def _(c: Ctx):
 
 @scenario("cal_long_task_spans")
 def _(c: Ctx):
-    monday = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    monday = NOW.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
     monday -= timedelta(days=monday.weekday())
     c.cli("add", "long lab")
     c.cli("add", "half past")
@@ -2300,7 +2315,7 @@ def _(c: Ctx):
 
 def _seed_priority(c: Ctx) -> None:
     """Newest first by date: lunch, urgent, assignment. By priority: urgent, assignment, lunch."""
-    now = datetime.now(timezone.utc)
+    now = NOW
     for i, subject in enumerate(("Lunch plans", "URGENT server down", "Assignment 4 out")):
         date = (now - timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
         c.seed_emails(1, uid=i + 1, message_id=f"<p{i}@x>", subject=subject, date_utc=date, snippet="")
@@ -2943,12 +2958,15 @@ def main() -> int:
     ap.add_argument("--build", action="store_true", help="cargo build first")
     ap.add_argument("--strict", action="store_true", help="treat XPASS (a fixed known bug) as failure")
     ap.add_argument("-v", "--verbose", action="store_true", help="print failure details + last screen for every non-pass")
+    ap.add_argument("--real-ollama", action="store_true", help="non-gating tier: also run scenarios that need the user's own Ollama, and let every sandbox reach it")
     ap.add_argument("--child")
     a = ap.parse_args()
+    if a.real_ollama:
+        os.environ["TUIDRIVE_REAL_OLLAMA"] = "1"
     if a.child:
         print("@@" + json.dumps(run_one(a.child)))
         return 0
-    names = select(a.only)
+    names = [n for n in select(a.only) if a.real_ollama or not SCENARIOS[n]["real"]]
     if a.list:
         for n in names:
             print(f"{n:30} {SCENARIOS[n]['known'] or ''}")

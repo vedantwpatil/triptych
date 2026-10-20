@@ -43,7 +43,7 @@ pub(super) fn render_calendar_todo(f: &mut Frame, app: &App, area: Rect) {
     let skip = app
         .calendar_todo_selected
         .saturating_sub(rows.saturating_sub(1));
-    let now = chrono::Utc::now();
+    let now = crate::clock::now();
     let items: Vec<ListItem> = tasks
         .iter()
         .enumerate()
@@ -59,7 +59,7 @@ pub(super) fn render_calendar_todo(f: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(format!("{badge} "), urgency_style(level)));
             }
             if let Some(deadline) = task.deadline {
-                let badge = urgency::deadline_badge(deadline, chrono::Local::now());
+                let badge = urgency::deadline_badge(deadline, crate::clock::local_now());
                 let level = urgency::effective_priority(task, now);
                 spans.push(Span::styled(format!("{badge} "), date_style(level)));
             }

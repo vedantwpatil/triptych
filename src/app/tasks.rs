@@ -193,7 +193,7 @@ impl App {
             .await?;
         // Open tasks first, then by priority, then soonest deadline (none last). Stable: further
         // ties keep `item_order`.
-        let now = Utc::now();
+        let now = crate::clock::now();
         self.tasks.sort_by_key(|t| {
             (
                 t.completed,
