@@ -1,6 +1,7 @@
 //! Todo CRUD, task classification and extraction of fields from parsed NLP items.
 
 use chrono::{DateTime, Utc};
+use sqlx::SqlitePool;
 use std::sync::Arc;
 
 use super::{
@@ -78,6 +79,60 @@ pub type ExtractedTaskFields = (
     Option<DateTime<Utc>>,
     Option<i32>,
 );
+
+/// A parsed task ready to store with [`insert_task_row`].
+#[derive(Debug)]
+pub struct NewTask<'a> {
+    pub title: &'a str,
+    /// What the user typed, kept as `natural_language_input`.
+    pub input: &'a str,
+    /// `None` appends to the end of the list.
+    pub item_order: Option<i64>,
+    pub priority: i32,
+    pub tags: &'a [String],
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub deadline: Option<DateTime<Utc>>,
+    /// `None` uses the default for the title's category.
+    pub duration_minutes: Option<i32>,
+    pub recurrence: Option<Recurrence>,
+}
+
+/// Inserts `task` and returns its id. The one `tasks` INSERT for the TUI/CLI path and the daemon, so
+/// a new column is bound in one place.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn insert_task_row(pool: &SqlitePool, task: &NewTask<'_>) -> Result<i64, sqlx::Error> {
+    let tags_json = if task.tags.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(task.tags).unwrap_or_default())
+    };
+    let category = classify_task(task.title);
+    let duration_minutes = task
+        .duration_minutes
+        .unwrap_or_else(|| default_duration_for_category(category));
+
+    Ok(sqlx::query(
+        "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence) \
+         VALUES (?, ?, COALESCE(?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks)), ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(task.title)
+    .bind(false)
+    .bind(task.item_order)
+    .bind(task.priority)
+    .bind(task.input)
+    .bind(tags_json)
+    .bind(task.scheduled_at)
+    .bind(task.deadline)
+    .bind(duration_minutes)
+    .bind(category)
+    .bind(task.recurrence.map(Recurrence::key))
+    .execute(pool)
+    .await?
+    .last_insert_rowid())
+}
 
 /// Extract the fields needed to insert a task from a parsed NLP result.
 ///
@@ -291,33 +346,21 @@ impl App {
             current_order + 1
         };
 
-        let tags_json = if tags_list.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&tags_list).unwrap_or_default())
-        };
-
-        let category = classify_task(&task_title).to_string();
-        let duration_minutes =
-            duration_minutes.unwrap_or_else(|| default_duration_for_category(&category));
-
-        let new_task_id = sqlx::query(
-            "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        let new_task_id = insert_task_row(
+            &self.db_pool,
+            &NewTask {
+                title: &task_title,
+                input: description,
+                item_order: Some(new_order),
+                priority: priority_value,
+                tags: &tags_list,
+                scheduled_at,
+                deadline,
+                duration_minutes,
+                recurrence,
+            },
         )
-        .bind(&task_title)
-        .bind(false)
-        .bind(new_order)
-        .bind(priority_value)
-        .bind(description)
-        .bind(tags_json)
-        .bind(scheduled_at)
-        .bind(deadline)
-        .bind(duration_minutes)
-        .bind(&category)
-        .bind(recurrence.map(Recurrence::key))
-        .execute(&self.db_pool)
-        .await?
-        .last_insert_rowid();
+        .await?;
 
         self.load_tasks().await?;
 

@@ -1,4 +1,4 @@
-use triptych::app::sanitize_filename;
+use triptych::app::{attachment_filenames, sanitize_filename};
 use triptych::email::message::parse_raw;
 
 const RAW_WITH_ATTACHMENT: &[u8] = b"From: Sender <sender@example.com>\r\n\
@@ -78,4 +78,18 @@ fn sanitize_filename_rejects_an_empty_or_traversal_only_name() {
     assert_eq!(sanitize_filename(""), None);
     assert_eq!(sanitize_filename(".."), None);
     assert_eq!(sanitize_filename("../.."), None);
+}
+
+#[test]
+fn attachment_filenames_never_reuse_a_name() {
+    let names = [
+        Some("image.png".to_string()),
+        Some("../image.png".to_string()),
+        None,
+        Some("report.pdf".to_string()),
+    ];
+    assert_eq!(
+        attachment_filenames(&names),
+        ["image.png", "1-image.png", "attachment-2", "report.pdf"]
+    );
 }

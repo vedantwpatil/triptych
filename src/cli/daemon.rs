@@ -1,5 +1,5 @@
+use crate::app::{NewTask, insert_task_row};
 use crate::nlp::{NLPParser, types::ParseResult};
-use crate::recurrence::Recurrence;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -17,6 +17,12 @@ fn socket_path() -> PathBuf {
         PathBuf::from,
     )
 }
+
+/// Longest request or response accepted; anything bigger fails to parse rather than fill memory.
+const MAX_MESSAGE: u64 = 1 << 20;
+/// How long a client waits for the daemon. Covers a parse that waits out a cold model load (up to
+/// 90s, see `OLLAMA_LOAD_TIMEOUT_MS`) and still frees the CLI if the daemon is stuck.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // Messages sent between CLI and daemon
 #[derive(Serialize, Deserialize, Debug)]
@@ -145,19 +151,20 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
 
 /// Handle a single client connection
 async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
-    // Read request
-    let mut buffer = vec![0u8; 8192];
-    let n = stream
-        .read(&mut buffer)
+    // Read request: the client half-closes after writing, so EOF marks its end.
+    let mut buffer = Vec::new();
+    (&mut stream)
+        .take(MAX_MESSAGE)
+        .read_to_end(&mut buffer)
         .await
         .context("Failed to read from socket")?;
 
-    if n == 0 {
+    if buffer.is_empty() {
         return Ok(());
     }
 
     let request: DaemonRequest =
-        serde_json::from_slice(&buffer[..n]).context("Failed to parse request")?;
+        serde_json::from_slice(&buffer).context("Failed to parse request")?;
 
     // Process request
     let response = match request {
@@ -204,44 +211,34 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
     anyhow::ensure!(!description.trim().is_empty(), "task description is empty");
     let parse_result = nlp.parse(description).await?;
 
-    let (task_title, scheduled_at, priority_value, tags_list, deadline, duration_minutes) =
+    let (title, scheduled_at, priority, tags, deadline, duration_minutes) =
         crate::app::extract_task_fields(parse_result.item);
 
-    let tags_json = if tags_list.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&tags_list).unwrap_or_default())
-    };
-
-    let category = crate::app::classify_task(&task_title);
-    let duration_minutes =
-        duration_minutes.unwrap_or_else(|| crate::app::default_duration_for_category(category));
-
-    // Use runtime query instead of query! macro
-    let result = sqlx::query(
-        r"
-        INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence)
-        VALUES (?, ?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks), ?, ?, ?, ?, ?, ?, ?, ?)
-        "
+    Ok(insert_task_row(
+        db,
+        &NewTask {
+            title: &title,
+            input: description,
+            item_order: None,
+            priority,
+            tags: &tags,
+            scheduled_at,
+            deadline,
+            duration_minutes,
+            recurrence: parse_result.recurrence,
+        },
     )
-    .bind(&task_title)
-    .bind(false)
-    .bind(priority_value)
-    .bind(description)
-    .bind(tags_json)
-    .bind(scheduled_at)
-    .bind(deadline)
-    .bind(duration_minutes)
-    .bind(category)
-    .bind(parse_result.recurrence.map(Recurrence::key))
-    .execute(db)
-    .await?;
-
-    Ok(result.last_insert_rowid())
+    .await?)
 }
 
 /// Send a request to the daemon
 pub async fn send_to_daemon(request: DaemonRequest) -> Result<DaemonResponse> {
+    tokio::time::timeout(REQUEST_TIMEOUT, exchange(request))
+        .await
+        .context("Daemon did not answer in time")?
+}
+
+async fn exchange(request: DaemonRequest) -> Result<DaemonResponse> {
     let socket = socket_path();
 
     if !socket.exists() {
@@ -252,17 +249,16 @@ pub async fn send_to_daemon(request: DaemonRequest) -> Result<DaemonResponse> {
         .await
         .context("Failed to connect to daemon")?;
 
-    // Send request
+    // Send request; half-closing tells the daemon it is complete.
     let request_bytes = serde_json::to_vec(&request)?;
     stream.write_all(&request_bytes).await?;
     stream.shutdown().await?;
 
-    // Read response
-    let mut buffer = vec![0u8; 8192];
-    let n = stream.read(&mut buffer).await?;
+    // Read response until the daemon closes the connection.
+    let mut buffer = Vec::new();
+    stream.take(MAX_MESSAGE).read_to_end(&mut buffer).await?;
 
-    let response: DaemonResponse = serde_json::from_slice(&buffer[..n])?;
-    Ok(response)
+    Ok(serde_json::from_slice(&buffer)?)
 }
 
 /// Check if daemon is running

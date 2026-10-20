@@ -1,7 +1,13 @@
 //! Integration tests in one binary, so it links once.
 //! `cli` spawns the compiled binary; the rest call the library directly.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    // The suggested `assert_eq!(x, [] as [T; 0])` needs a type annotation at every call site.
+    clippy::assert_is_empty
+)]
 
 mod app;
 mod canvas;

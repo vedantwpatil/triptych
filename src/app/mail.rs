@@ -157,6 +157,32 @@ pub fn sanitize_filename(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// One file name per attachment: its sanitized name, or `attachment-<n>` when it has none.
+///
+/// A name an earlier attachment already took gets `<n>-` in front, so saving never overwrites one
+/// with another (two `image.png` signature images are common).
+#[must_use]
+pub fn attachment_filenames(names: &[Option<String>]) -> Vec<String> {
+    let mut taken = std::collections::HashSet::new();
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let base = name
+                .as_deref()
+                .and_then(sanitize_filename)
+                .unwrap_or_else(|| format!("attachment-{index}"));
+            let unique = if taken.contains(&base) {
+                format!("{index}-{base}")
+            } else {
+                base
+            };
+            taken.insert(unique.clone());
+            unique
+        })
+        .collect()
+}
+
 /// Emails with a shorter body than this are not worth summarizing.
 const SUMMARY_MIN_CHARS: usize = 200;
 /// Cap on the body text sent to the model, so one huge message cannot stall the prompt.
@@ -1636,11 +1662,8 @@ async fn save_attachments_to(
     }
 
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    for (index, (name, bytes)) in attachments.iter().enumerate() {
-        let filename = name
-            .as_deref()
-            .and_then(sanitize_filename)
-            .unwrap_or_else(|| format!("attachment-{index}"));
+    let names: Vec<Option<String>> = attachments.iter().map(|(name, _)| name.clone()).collect();
+    for ((_, bytes), filename) in attachments.iter().zip(attachment_filenames(&names)) {
         std::fs::write(dir.join(filename), bytes).map_err(|e| e.to_string())?;
     }
     Ok((attachments.len(), dir.display().to_string()))

@@ -285,6 +285,8 @@ pub async fn upsert(pool: &SqlitePool, items: &[Assignment]) -> Result<SyncRepor
 pub async fn fetch_feed(url: &str) -> Result<String, String> {
     let response = reqwest::Client::builder()
         .user_agent(concat!("triptych/", env!("CARGO_PKG_VERSION")))
+        // reqwest waits forever by default, which would hang the worker and `canvas sync`.
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.without_url().to_string())?
         .get(url)

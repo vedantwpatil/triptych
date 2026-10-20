@@ -31,10 +31,10 @@ pub use calendar::*;
 pub use links::{OPEN_CMD_ENV, is_web_url, link_label, parse_links};
 pub use mail::{
     ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, Contact, DeleteResult, FolderListResult,
-    FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, chain_references,
-    compose_full_body, forward_subject, match_rule, merge_reply_all_cc, next_category,
-    normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original, reply_subject,
-    sanitize_filename, suggest_contacts, thread_count,
+    FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, attachment_filenames,
+    chain_references, compose_full_body, forward_subject, match_rule, merge_reply_all_cc,
+    next_category, normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original,
+    reply_subject, sanitize_filename, suggest_contacts, thread_count,
 };
 pub use model::*;
 pub use motion::*;
@@ -62,6 +62,14 @@ pub fn db_url() -> String {
 pub async fn open_pool() -> Result<SqlitePool, sqlx::Error> {
     let db_url = db_url();
     if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
+        if std::env::var_os("DATABASE_URL").is_none() {
+            // The default path is relative to the working directory: run from another folder it
+            // starts a second, empty database instead of opening the real one.
+            let path = std::env::current_dir()
+                .unwrap_or_default()
+                .join(DB_URL.trim_start_matches("sqlite:"));
+            eprintln!("Creating a new database at {}", path.display());
+        }
         Sqlite::create_database(&db_url).await?;
     }
     let pool = SqlitePool::connect(&db_url).await?;

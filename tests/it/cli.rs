@@ -314,6 +314,51 @@ title = "Focus Time"
 }
 
 #[test]
+fn a_new_default_database_says_where_it_was_created() {
+    let sb = Sandbox::new();
+    let out = sb
+        .cmd(&["list"])
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("spawn triptych");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Creating a new database at") && stderr(&out).contains("todo.db"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(sb.path("todo.db").exists(), "default db not in the cwd");
+
+    let again = sb
+        .cmd(&["list"])
+        .env_remove("DATABASE_URL")
+        .output()
+        .expect("spawn triptych");
+    assert!(!stderr(&again).contains("Creating a new database"));
+}
+
+#[test]
+fn the_daemon_takes_a_request_larger_than_one_read() {
+    let sb = Sandbox::new();
+    let mut child = sb.cmd(&["daemon"]).spawn().expect("spawn daemon process");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !sb.socket_path().exists() {
+        assert!(Instant::now() < deadline, "daemon never created its socket");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Past the old single 8 KB read; the daemon stores it as one task.
+    let long = format!("write notes {}", "word ".repeat(2000));
+    let add = sb.run(&["add", &long]);
+    let _ = sb.run(&["stop"]);
+    let _ = child.wait();
+
+    assert!(add.status.success(), "{}", stderr(&add));
+    // A failed daemon call falls back to direct mode, so success alone proves nothing.
+    assert!(stdout(&add).contains("via daemon"), "{}", stdout(&add));
+}
+
+#[test]
 fn daemon_start_status_stop_cleans_up_socket() {
     let sb = Sandbox::new();
 
@@ -877,6 +922,39 @@ fn notify_check_honors_the_off_switch() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("Alerts are off"), "{}", stdout(&out));
     assert!(!log.exists(), "alerted while off");
+}
+
+#[test]
+fn notify_check_retries_an_alert_whose_notifier_failed() {
+    let sb = Sandbox::new();
+    let (script, log) = alert_logger(&sb);
+    assert!(sb.run(&["list"]).status.success());
+    seed_task_due_in(&sb.db_path(), "Essay due soon", 30);
+    let check = |program: &Path| {
+        sb.cmd(&["notify", "check"])
+            .env("TRIPTYCH_NOTIFY_CMD", program)
+            .output()
+            .expect("spawn triptych")
+    };
+
+    let failed = check(Path::new("false"));
+    assert!(
+        stdout(&failed).contains("No alerts due"),
+        "{}",
+        stdout(&failed)
+    );
+
+    let retried = check(&script);
+    assert!(
+        stdout(&retried).contains("Sent 1 alert"),
+        "{}",
+        stdout(&retried)
+    );
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("Essay due soon")
+    );
 }
 
 #[test]
