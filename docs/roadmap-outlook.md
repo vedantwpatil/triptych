@@ -49,6 +49,6 @@ in any gap between the larger slices.
 
 ## Cost to watch
 
-The popup flow (`v`, `Esc`, `R`/`A`/`F`, `s`) is covered by many of the 172 scenarios in
+The popup flow (`v`, `Esc`, `R`/`A`/`F`, `s`) is covered by many of the scenarios in
 `tests/tui/tui_suite.py`. Changing it means updating those scenarios and the driver
 ([`TUI_DRIVER.md`](./TUI_DRIVER.md)) in the same slice, and keeping `docs/USAGE.md` keys current.

@@ -21,6 +21,34 @@ python3 tests/tui/tui_suite.py -j 4      # FAIL = regression; XFAIL = open Known
 
 ## Changelog
 
+- 2026-10-20 (audit fixes, KI-26..KI-32): a read-through of the repo found one data-loss bug and
+  several robustness gaps; all fixed except the `mail.rs` split (KI-33, open).
+  - Alerts (`src/notify.rs`): `due_alerts` marks `notified_tier` before `send`, and `send` only logged
+    a failure, so a broken notifier lost the alert for good. `check_once` now uses a private
+    `claim_alerts` that also returns what each alert claimed, `send` returns `bool`, and a failed send
+    puts the previous tier back (`WHERE notified_tier = <claimed>`, so a concurrent claim is not
+    undone). `due_alerts` keeps its signature.
+  - Attachments (`src/app/mail.rs`): `attachment_filenames` gives each attachment a unique name (a
+    repeat gets `<n>-` in front); before, two `image.png` overwrote each other while the status said
+    "Saved 2".
+  - CLI daemon (`src/cli/daemon.rs`): both sides did one `read` into 8 KB, so a longer request or
+    response failed to parse. Both now `read_to_end` capped at `MAX_MESSAGE` (1 MiB; the client
+    half-closes after writing, so EOF ends the request), and `send_to_daemon` times out after 120s
+    (`REQUEST_TIMEOUT`, above the 90s cold-model wait). There is no short timeout on the `Health`
+    check on purpose: a second `triptych daemon` started during the first one's preload would
+    otherwise treat the live socket as stale and remove it.
+  - Canvas (`src/canvas.rs`): `fetch_feed` had no timeout and could hang the worker and
+    `canvas sync`; now 30s.
+  - Database path (`src/app.rs`): the default `sqlite:todo.db` is relative to the working directory.
+    When it has to create the file and `DATABASE_URL` is unset, it prints `Creating a new database at
+    <absolute path>` to stderr.
+  - Task insert: `insert_task_row(pool, &NewTask)` (`src/app/tasks.rs`) is now the one `tasks`
+    INSERT; `insert_parsed_task` and the daemon's `add_task_to_db` both call it (they had drifted
+    copies of the same 11-column statement).
+  - Tests/docs: `assert_is_empty` (new in clippy 1.99) allowed in `tests/it/main.rs`, so the tree is
+    warning-free again. Docs brought in line with the code (module map, sync config, test layout,
+    SMTP note) and the `mail.rs` row of `src/app/CLAUDE.md` cut from a 9 KB cell to short groups.
+    Suite: 286 `cargo test` tests (4 new); the pty suite was not re-run for this change.
 - 2026-10-12 (calendar on small terminals): the grid drew all 16 hour rows and 7 days whatever the
   terminal size, so the cursor row scrolled off screen and headers truncated (`Thu 0`).
   `render_calendar_view` now sizes both axes from the grid area (after the to-do panel split) and draws
@@ -1066,15 +1094,46 @@ since epoch 0 never occurs on real IMAP servers.
 
 ### Open
 
-None.
+- **KI-33** (2026-10-20) `src/app/mail.rs` is about 1,960 lines and holds a dozen jobs (sync and list
+  filters, compose, drafts, delete/archive, attachments, snooze, folders, triage, rules, invites). The
+  groups are listed in [`src/app/CLAUDE.md`](../src/app/CLAUDE.md). No behaviour is wrong; it is slow to
+  read and review. Split by group into `src/app/mail/*.rs` when next touching one of them. Not done
+  with the KI-26..32 fixes because it moves about 1,000 lines for no behaviour change.
 
-Every finding (KI-1..KI-25) is fixed and covered by a passing test.
+Every other finding (KI-1..KI-32) is fixed and covered by a passing test, except KI-29 (see its entry).
 
 ### Resolved
 
 Found in the 2026-09-19 audit, the todo-list test and the LLM baseline (KI-1..21), then in the 2026-09-23
-calendar and IMAP runs (KI-22..24), then in the 2026-09-27 Slice 10 verification run (KI-25); fixed the
-same day, each verified with its `tests/tui/tui_suite.py` scenario (named at the end of each entry).
+calendar and IMAP runs (KI-22..24), then in the 2026-09-27 Slice 10 verification run (KI-25), then in
+the 2026-10-20 repo audit (KI-26..32). The 2026-09 findings are verified with their
+`tests/tui/tui_suite.py` scenario (named at the end of each entry); the 2026-10-20 ones with `cargo test`.
+
+- **KI-32** (2026-10-20) 13 clippy warnings in `tests/it` (`clippy::assert_is_empty`, new in 1.99), so
+  "the tree is warning-free" in `CLAUDE.md` was false. The lint's suggestion needs a type annotation at
+  every call site, so it is allowed once in `tests/it/main.rs`.
+- **KI-31** (2026-10-20) `insert_parsed_task` and the daemon's `add_task_to_db` each held a copy of the
+  `tasks` INSERT (tags JSON, category, default duration, 11 columns); a new column had to be added in
+  both. Both now call `insert_task_row`. Covered by the existing add tests and
+  `the_daemon_takes_a_request_larger_than_one_read`.
+- **KI-30** (2026-10-20) With `DATABASE_URL` unset the app opened `sqlite:todo.db` relative to the
+  working directory, so running it from another folder silently made a second, empty database. It now
+  prints the absolute path when it creates one. `a_new_default_database_says_where_it_was_created`.
+- **KI-29** (2026-10-20) `canvas::fetch_feed` had no timeout, so an unresponsive server hung the Canvas
+  worker and `triptych canvas sync`. Now 30s. No test: it needs a server that accepts and never
+  answers, which the suite has no fake for.
+- **KI-28** (2026-10-20) The CLI daemon and its client each did a single `read` into an 8 KB buffer, so
+  a request or response over 8 KB failed to parse, and the client had no timeout. Both now read to EOF
+  (capped at 1 MiB) and the client gives up after 120s.
+  `the_daemon_takes_a_request_larger_than_one_read`.
+- **KI-27** (2026-10-20) `save_attachments_to` wrote each attachment under its own name, so two with the
+  same name (a signature `image.png`) overwrote each other and the status still said "Saved 2". Names
+  are now made unique by `attachment_filenames`. `attachment_filenames_never_reuse_a_name`.
+- **KI-26** (2026-10-20) A deadline alert whose notifier failed (bad `TRIPTYCH_NOTIFY_CMD`, no
+  `osascript`) was lost: `notified_tier` was set before `send`, which only logged. A failed send now
+  restores the tier, so the next pass retries. Limit: `triptych notify check` prints "No alerts due"
+  when every send failed; the failure is in the log only.
+  `notify_check_retries_an_alert_whose_notifier_failed`.
 
 - **KI-25** (2026-09-27) `tests/tui/tuidrive.py`'s `Term.cursor()` misread the calendar time label
   whenever the current-hour `▸` accent (`src/tui/ui/calendar.rs`) landed on a row also covered by an

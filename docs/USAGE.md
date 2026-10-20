@@ -133,7 +133,7 @@ Press `m`. Set up accounts first ([`SETUP.md`](./SETUP.md#email)). Sync runs in 
 | `A`,`F`,`I`,`H`,`U`,`S`,`@` | Filters: account, folder, focused/other, attachments, unread, starred, domain        |
 | `B`                         | Browse server folders                                                                |
 | `o`                         | Toggle priority/date sort                                                            |
-| `s` (in message)            | Save attachments                                                                     |
+| `s` (in message)            | Save attachments (a repeated name gets an `<n>-` prefix, nothing is overwritten)     |
 
 Each list row reads left to right:
 `(account) [MM/DD HH:MM] sender [folder] [other] ▲ ● [color] [N] subject [attach] [invite] [task] [snoozed until ..]`.
