@@ -8,8 +8,8 @@ use chrono::{DateTime, Duration, Utc};
 use super::time::resolve_local_datetime;
 use super::{App, ComposeField, ComposeState, Edit, InputMode, ViewMode, textedit};
 use crate::email::{
-    EmailConfig, EmailMessage, EmailRule, EmailSort, ImapMailSource, MailSource, SmtpConfig,
-    drafts, message, priority, smtp, store as email_store,
+    EmailConfig, EmailMessage, EmailSort, ImapMailSource, MailSource, SmtpConfig, drafts, message,
+    priority, smtp, store as email_store,
     sync::{sync_account, sync_one_folder},
 };
 
@@ -79,14 +79,6 @@ pub enum Summary {
 pub struct SummaryDone {
     email_id: i64,
     result: Result<String, &'static str>,
-}
-
-/// Outcome of a background triage pass over every not-yet-classified email, sent over
-/// `App::triage_rx`.
-#[derive(Debug, Default)]
-pub struct TriageDone {
-    /// `(email_id, focused)` for every email successfully classified this pass.
-    results: Vec<(i64, bool)>,
 }
 
 /// Outcome of a background compose/reply/forward send, sent over `App::send_rx`.
@@ -187,16 +179,6 @@ pub fn attachment_filenames(names: &[Option<String>]) -> Vec<String> {
 const SUMMARY_MIN_CHARS: usize = 200;
 /// Cap on the body text sent to the model, so one huge message cannot stall the prompt.
 const SUMMARY_INPUT_CHARS: usize = 4000;
-/// Cap on how many not-yet-classified emails one background triage pass classifies, so a large
-/// backlog (e.g. after a first-ever sync) doesn't serialize dozens of Ollama round-trips at once —
-/// the rest catch up on the next sync's pass. Lowered from 20: most rows resolve via
-/// `bulk_mail_heuristic` with no Ollama call at all, so a smaller cap still clears a normal
-/// backlog in one or two passes while capping worst-case GPU load per pass.
-const TRIAGE_BATCH_LIMIT: i64 = 10;
-/// Cap on how many not-yet-checked emails one `run_email_rules` pass checks against every saved
-/// rule. Unlike `TRIAGE_BATCH_LIMIT`, this is pure local-DB work (no per-item Ollama/IMAP round
-/// trip), so a larger batch per pass costs nothing extra.
-const RULE_CHECK_LIMIT: i64 = 100;
 
 impl App {
     /// Shows `msg` in the status line for a few seconds.
@@ -837,58 +819,6 @@ impl App {
         self.email_summaries.insert(done.email_id, state);
     }
 
-    /// Runs a background triage pass (Outlook's Focused Inbox split) over every email not yet
-    /// classified, capped at `TRIAGE_BATCH_LIMIT` per pass, wired in after every sync
-    /// (`apply_mail_sync`, `apply_folder_sync`). Spawned and never awaited, same reasoning as
-    /// `start_email_sync`; a second pass is not started while one is running (`triage_running`).
-    /// `NLPParser::triage`, like `summarize`, ignores the sticky `ollama_available` flag, so this
-    /// still tries and simply logs+skips per-email on failure rather than erroring the whole pass.
-    pub fn run_email_triage(&mut self) {
-        if self.triage_running {
-            return;
-        }
-        self.triage_running = true;
-
-        let (db_pool, parser, tx) = (
-            self.db_pool.clone(),
-            Arc::clone(&self.nlp_parser),
-            self.triage_tx.clone(),
-        );
-        tokio::spawn(async move {
-            let mut done = TriageDone::default();
-            let pending = email_store::pending_triage(&db_pool, TRIAGE_BATCH_LIMIT)
-                .await
-                .unwrap_or_default();
-            for email in pending {
-                let snippet = email.snippet.as_deref().unwrap_or("");
-                match parser.triage(&email.subject, snippet).await {
-                    Ok(focused) => {
-                        if email_store::set_triage(&db_pool, email.id, focused)
-                            .await
-                            .is_ok()
-                        {
-                            done.results.push((email.id, focused));
-                        }
-                    }
-                    Err(e) => tracing::warn!("[Email] triage failed for {}: {e}", email.id),
-                }
-            }
-            let _ = tx.send(done);
-        });
-    }
-
-    /// Applies a finished background triage pass: updates each classified email's in-memory
-    /// `triage_focused` directly (rather than a full `refresh_emails` reload, which would also
-    /// re-run the whole filter chain and could move the cursor) and clears the running guard.
-    pub fn apply_triage(&mut self, done: TriageDone) {
-        self.triage_running = false;
-        for (id, focused) in done.results {
-            if let Some(email) = self.emails.iter_mut().find(|e| e.id == id) {
-                email.triage_focused = Some(focused);
-            }
-        }
-    }
-
     pub const fn close_email_detail(&mut self) {
         self.email_detail_open = false;
         self.email_detail_scroll = 0;
@@ -1145,11 +1075,13 @@ impl App {
             _ => return false,
         };
         let head = split_recipient(field).0.trim_end().to_string();
+        // Trailing separator: the next recipient can be typed straight away (`build_mime` drops it).
         *field = if head.is_empty() {
-            entry
+            format!("{entry}, ")
         } else {
-            format!("{head} {entry}")
+            format!("{head} {entry}, ")
         };
+        self.edit_cursor = None;
         true
     }
 
@@ -1349,151 +1281,17 @@ impl App {
         }
     }
 
-    /// Opens the rules popup (`R` in the email list), loading every saved rule fresh from the DB.
-    pub async fn open_rules_list(&mut self) {
-        match email_store::list_rules(&self.db_pool).await {
-            Ok(rules) => {
-                self.rules = rules;
-                self.selected_rule = 0;
-                self.rules_open = true;
-            }
-            Err(e) => self.notify(&format!("Failed to load rules: {e}")),
-        }
-    }
-
-    pub const fn close_rules_list(&mut self) {
-        self.rules_open = false;
-    }
-
-    /// Starts typing a rule spec (`n` in the rules popup); `commit_rule_input`/`cancel_rule_input`
-    /// ends it. See `parse_rule_spec` for the expected shape.
-    pub fn start_rule_input(&mut self) {
-        self.input_buffer.clear();
-        self.input_mode = InputMode::EmailRuleInput;
-    }
-
-    pub fn cancel_rule_input(&mut self) {
-        self.input_buffer.clear();
-        self.input_mode = InputMode::Normal;
-    }
-
-    /// Ends typing and, on a valid spec, saves the new rule and reloads the popup's list. An
-    /// unparseable spec or a database error reports a status message and adds nothing.
-    pub async fn commit_rule_input(&mut self) {
-        let typed = self.input_buffer.trim().to_string();
-        self.cancel_rule_input();
-        let Some((match_field, pattern, action)) = parse_rule_spec(&typed) else {
-            self.notify(
-                "Rule not understood (e.g. 'subject newsletter star', 'from noreply archive')",
-            );
-            return;
-        };
-        match email_store::create_rule(&self.db_pool, &match_field, &pattern, &action).await {
-            Ok(_) => self.open_rules_list().await,
-            Err(e) => self.notify(&format!("Failed to save rule: {e}")),
-        }
-    }
-
-    /// Deletes the selected rule from the DB and the open list, clamping the selection so it stays
-    /// in bounds — same shape as `delete_selected_draft`.
-    pub async fn delete_selected_rule(&mut self) {
-        let Some(rule) = self.rules.get(self.selected_rule) else {
-            return;
-        };
-        let id = rule.id;
-
-        if let Err(e) = email_store::delete_rule(&self.db_pool, id).await {
-            self.notify(&format!("Failed to delete rule: {e}"));
-            return;
-        }
-
-        self.rules.remove(self.selected_rule);
-        if self.selected_rule >= self.rules.len() && self.selected_rule > 0 {
-            self.selected_rule -= 1;
-        }
-    }
-
-    /// Applies every saved rule to messages not yet checked (`rule_applied = 0`), capped at
-    /// `RULE_CHECK_LIMIT` per pass — wired in after every sync (`apply_mail_sync`,
-    /// `apply_folder_sync`), like `run_email_triage`. `star`/`read` are applied inline and
-    /// awaited (pure local-DB work, no long-running I/O to keep off the render loop); `archive`/
-    /// `delete` (Slice 21) are spawned by `apply_rule_action` itself and only reported back later
-    /// over `archive_tx`/`delete_tx`, same as their manual (`a`/`d`) counterparts.
-    pub async fn run_email_rules(&mut self) {
-        let rules = email_store::list_rules(&self.db_pool)
-            .await
-            .unwrap_or_default();
-        if rules.is_empty() {
-            return;
-        }
-        let pending = email_store::pending_rule_check(&self.db_pool, RULE_CHECK_LIMIT)
-            .await
-            .unwrap_or_default();
-        for email in pending {
-            for rule in rules
-                .iter()
-                .filter(|r| match_rule(r, &email.subject, &email.from_addr))
-            {
-                self.apply_rule_action(&email, &rule.action).await;
-            }
-            if let Err(e) = email_store::mark_rule_checked(&self.db_pool, email.id).await {
-                tracing::warn!("[Email] rule check mark failed for {}: {e}", email.id);
-            }
-        }
-    }
-
-    /// Runs one rule's action against one email. `star`/`read` write straight to the DB and patch
-    /// the matching `App::emails` entry in memory (if loaded) — same reasoning as `apply_triage`,
-    /// avoids a full `refresh_emails` reload mid-pass. `archive`/`delete` (Slice 21) instead hand
-    /// off to `spawn_archive`/`spawn_delete`: a network call can't be awaited inline here without
-    /// stalling every other rule and email in the same sync pass, so their local-row cleanup
-    /// happens later, generically, via `apply_archive_result`/`apply_delete_result` — a rule match
-    /// is indistinguishable from a manual `a`/`d` press once spawned. Silently no-ops (skips this
-    /// action, still marks the email checked) when the account has no IMAP config or an invalid
-    /// UID, same as the manual paths' guard clauses minus the user-facing `notify`.
-    async fn apply_rule_action(&mut self, email: &EmailMessage, action: &str) {
-        match action {
-            "star" => {
-                if email_store::set_starred(&self.db_pool, email.id, true)
-                    .await
-                    .is_ok()
-                    && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
-                {
-                    e.is_starred = true;
-                }
-            }
-            "read" => {
-                if email_store::mark_read(&self.db_pool, email.id)
-                    .await
-                    .is_ok()
-                    && let Some(e) = self.emails.iter_mut().find(|e| e.id == email.id)
-                {
-                    e.is_read = true;
-                }
-            }
-            "archive" | "delete" => {
-                let Some(config) = EmailConfig::for_account(&email.account) else {
-                    return;
-                };
-                let Ok(uid) = u32::try_from(email.uid) else {
-                    return;
-                };
-                let folder = email.folder.clone();
-                if action == "archive" {
-                    self.spawn_archive(config, folder, uid, email.id);
-                } else {
-                    self.spawn_delete(config, folder, uid, email.id);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Spawns the server-delete-then-local-drop sequence for one message and reports over
     /// `delete_tx`, never awaited — shared by `delete_selected_email` (user-initiated, `d`) and
     /// `apply_rule_action`'s `"delete"` action (Slice 21), so a rule's network call can't freeze
     /// the TUI any more than a manual delete can.
-    fn spawn_delete(&self, config: EmailConfig, folder: String, uid: u32, email_id: i64) {
+    pub(super) fn spawn_delete(
+        &self,
+        config: EmailConfig,
+        folder: String,
+        uid: u32,
+        email_id: i64,
+    ) {
         let (db_pool, tx) = (self.db_pool.clone(), self.delete_tx.clone());
         tokio::spawn(async move {
             let source = ImapMailSource::new(config);
@@ -1565,7 +1363,13 @@ impl App {
     /// Spawns the server-archive-then-local-drop sequence for one message and reports over
     /// `archive_tx`, never awaited — shared by `archive_selected_email` (user-initiated, `a`) and
     /// `apply_rule_action`'s `"archive"` action (Slice 21), same reasoning as `spawn_delete`.
-    fn spawn_archive(&self, config: EmailConfig, folder: String, uid: u32, email_id: i64) {
+    pub(super) fn spawn_archive(
+        &self,
+        config: EmailConfig,
+        folder: String,
+        uid: u32,
+        email_id: i64,
+    ) {
         let (db_pool, tx) = (self.db_pool.clone(), self.archive_tx.clone());
         tokio::spawn(async move {
             let source = ImapMailSource::new(config);
@@ -1932,59 +1736,4 @@ fn snooze_to_local_morning(days_ahead: i64) -> Option<DateTime<Utc>> {
     let date = crate::clock::local_now().naive_local().date() + Duration::days(days_ahead);
     let naive = date.and_hms_opt(8, 0, 0)?;
     Some(resolve_local_datetime(naive))
-}
-
-/// Tests whether `rule` matches a message's subject or from-address.
-///
-/// `match_field` selects which (`"from_addr"`, else `"subject"`); the test itself is a
-/// case-insensitive substring, not a regex — keeps rule specs typeable in one line
-/// (see `parse_rule_spec`).
-#[must_use]
-pub fn match_rule(rule: &EmailRule, subject: &str, from_addr: &str) -> bool {
-    let haystack = if rule.match_field == "from_addr" {
-        from_addr
-    } else {
-        subject
-    };
-    haystack
-        .to_lowercase()
-        .contains(&rule.pattern.to_lowercase())
-}
-
-/// Parses a rule spec typed in the rules popup's `n` prompt: `<field> <pattern...> <action>`.
-///
-/// E.g. `subject newsletter star` or `from noreply archive`. `field` is `subject` or
-/// `from`/`sender` (mapped to the stored `from_addr`); `action` is `star`, `read`, `archive` or
-/// `delete` (Slice 21 added the latter two — see `apply_rule_action`); `pattern` is everything in
-/// between (may contain spaces). `None` for anything that doesn't fit this shape.
-#[must_use]
-pub fn parse_rule_spec(spec: &str) -> Option<(String, String, String)> {
-    let mut parts = spec.trim().splitn(2, char::is_whitespace);
-    let field = parts.next()?.to_lowercase();
-    let rest = parts.next()?.trim();
-
-    let match_field = match field.as_str() {
-        "subject" => "subject",
-        "from" | "sender" | "from_addr" => "from_addr",
-        _ => return None,
-    };
-
-    let split = rest.rfind(char::is_whitespace)?;
-    let (pattern, action) = (rest[..split].trim(), rest[split..].trim());
-    if pattern.is_empty() {
-        return None;
-    }
-    let action = match action.to_lowercase().as_str() {
-        "star" => "star",
-        "read" => "read",
-        "archive" => "archive",
-        "delete" => "delete",
-        _ => return None,
-    };
-
-    Some((
-        match_field.to_string(),
-        pattern.to_string(),
-        action.to_string(),
-    ))
 }

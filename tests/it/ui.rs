@@ -1,7 +1,81 @@
+use crate::app::{insert_email, test_pool};
 use chrono::{Duration, NaiveDate, NaiveTime};
 use ratatui::style::{Color, Modifier, Style};
-use triptych::app::ScheduleBlock;
+use ratatui::{Terminal, backend::TestBackend};
+use triptych::app::{App, ScheduleBlock, ViewMode};
 use triptych::ui::*;
+
+fn screen(terminal: &Terminal<TestBackend>) -> String {
+    let buf = terminal.backend().buffer();
+    (0..buf.area.height)
+        .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+        .map(|pos| buf[pos].symbol())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_long_email_list_scrolls_only_as_far_as_the_cursor_needs() {
+    let pool = test_pool().await;
+    // Newest first, so mail-00 heads the list and mail-39 ends it.
+    for uid in 0..40_i64 {
+        let age = 39 - uid;
+        let date = format!("2026-01-{:02}T{:02}:00:00Z", age / 24 + 1, age % 24);
+        insert_email(&pool, uid, &format!("mail-{uid:02}"), &date).await;
+    }
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.unwrap();
+    app.view_mode = ViewMode::Email;
+    let mut terminal = Terminal::new(TestBackend::new(130, 14)).unwrap();
+
+    app.selected_email = 39;
+    terminal.draw(|f| ui(f, &mut app)).unwrap();
+    let bottom = screen(&terminal);
+    assert!(bottom.contains("mail-39") && !bottom.contains("mail-00"));
+
+    // One step up stays inside the viewport: no scroll, so the last row is still shown.
+    app.selected_email = 38;
+    terminal.draw(|f| ui(f, &mut app)).unwrap();
+    assert!(screen(&terminal).contains("mail-39"));
+
+    app.selected_email = 0;
+    terminal.draw(|f| ui(f, &mut app)).unwrap();
+    let top = screen(&terminal);
+    assert!(top.contains("mail-00") && !top.contains("mail-39"));
+
+    // Rows past the viewport are never built: a jump to the middle shows neither end.
+    app.selected_email = 20;
+    terminal.draw(|f| ui(f, &mut app)).unwrap();
+    let middle = screen(&terminal);
+    assert!(
+        middle.contains("mail-20") && !middle.contains("mail-00") && !middle.contains("mail-39")
+    );
+}
+
+#[tokio::test]
+async fn the_selected_email_row_is_reversed_and_keeps_its_unread_bold() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "unread subject", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool).await;
+    app.refresh_emails().await.unwrap();
+    app.view_mode = ViewMode::Email;
+    let mut terminal = Terminal::new(TestBackend::new(130, 12)).unwrap();
+
+    terminal.draw(|f| ui(f, &mut app)).unwrap();
+
+    let buf = terminal.backend().buffer();
+    let (x, y) = (0..buf.area.height)
+        .find_map(|y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            let at = row.find("unread subject")?;
+            Some((u16::try_from(row[..at].chars().count()).unwrap(), y))
+        })
+        .expect("subject on screen");
+    let modifier = buf[(x, y)].style().add_modifier;
+    assert!(
+        modifier.contains(Modifier::BOLD | Modifier::REVERSED),
+        "{modifier:?}"
+    );
+}
 
 fn day(offset: i64) -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 3, 10).unwrap() + Duration::days(offset)

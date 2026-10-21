@@ -3,9 +3,7 @@ use sqlx::sqlite::SqlitePool;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:triptych.db".to_string());
-
-    let pool = SqlitePool::connect(&db_url).await?;
+    let pool = SqlitePool::connect(&triptych::app::db_url()).await?;
 
     println!("▸ Importing schedule template...");
 

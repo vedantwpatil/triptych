@@ -130,6 +130,19 @@ fn email_list_item(thread_sizes: &HashMap<i64, usize>, email: &EmailMessage) -> 
     ListItem::new(Line::from(spans))
 }
 
+/// First row to draw: the previous `offset`, moved only as far as keeping `selected` on screen needs.
+const fn scroll_offset(offset: usize, selected: usize, total: usize, visible: usize) -> usize {
+    let offset = if selected < offset {
+        selected
+    } else if selected >= offset + visible {
+        selected + 1 - visible
+    } else {
+        offset
+    };
+    let last = total.saturating_sub(visible);
+    if offset > last { last } else { offset }
+}
+
 pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
     f.render_widget(Clear, f.area());
 
@@ -141,17 +154,25 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
 
     app.list_rows = usize::from(chunks[0].height.saturating_sub(2));
     let thread_sizes = thread_counts(&app.emails);
+
+    // The list holds up to 1000 mails and is redrawn on every event, so only the visible slice is
+    // built. `email_list_state` keeps the scroll offset between frames (scroll just enough to keep
+    // the cursor in view); the widget gets the slice and a selection relative to it.
+    let total = app.emails.len();
+    let visible = app.list_rows.max(1);
+    let selected = app.selected_email.min(total.saturating_sub(1));
+    let offset = scroll_offset(app.email_list_state.offset(), selected, total, visible);
+    *app.email_list_state.offset_mut() = offset;
+
     let items: Vec<ListItem> = app
         .emails
         .iter()
+        .skip(offset)
+        .take(visible)
         .map(|email| email_list_item(&thread_sizes, email))
         .collect();
-
-    if app.emails.is_empty() {
-        app.email_list_state.select(None);
-    } else {
-        app.email_list_state.select(Some(app.selected_email));
-    }
+    let mut window_state = ratatui::widgets::ListState::default()
+        .with_selected((total > 0).then_some(selected.saturating_sub(offset)));
 
     let email_list = List::new(items)
         .block(
@@ -198,14 +219,12 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
                     .right_aligned(),
                 ),
         )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        // Reversed, not recoloured: a fg/bold override would erase the unread (bold) contrast and
+        // the per-span colours on exactly the row being read.
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
 
-    f.render_stateful_widget(email_list, chunks[0], &mut app.email_list_state);
+    f.render_stateful_widget(email_list, chunks[0], &mut window_state);
 
     if matches!(app.input_mode, InputMode::Search) {
         super::render_search_box(f, &app.input_buffer, app.edit_cursor, chunks[1]);
@@ -383,6 +402,7 @@ fn render_rules_popup(f: &mut Frame, app: &App) {
         Block::default()
             .borders(Borders::ALL)
             .title("Rules (j/k: move, n: new, d: delete, Esc: close)")
+            .title_bottom("New rules cover synced mail (not delete)")
             .style(Style::default().bg(Color::Black)),
     );
 

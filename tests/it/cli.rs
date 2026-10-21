@@ -417,8 +417,8 @@ fn daemon_start_status_stop_cleans_up_socket() {
 }
 
 /// Starts `triptych daemon` with stderr captured, then waits until it accepts connections.
-/// The socket exists once bound, but the daemon only accepts after preloading its cache, so a
-/// `status` round trip is the readiness signal.
+/// The socket exists once bound, before the accept loop runs, so a `status` round trip is the
+/// readiness signal.
 fn spawn_daemon(sb: &Sandbox) -> std::process::Child {
     let child = sb
         .cmd(&["daemon"])
@@ -449,16 +449,57 @@ fn daemon_adds_hand_back_the_real_row_ids() {
 }
 
 #[test]
+fn daemon_drops_a_client_that_connects_and_sends_nothing() {
+    let sb = Sandbox::new();
+    let child = spawn_daemon(&sb);
+
+    let mut idle = std::os::unix::net::UnixStream::connect(sb.socket_path()).expect("connect");
+    idle.set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout");
+    let mut reply = Vec::new();
+    // EOF (Ok) means the daemon hung up; a timeout here means it kept the connection open.
+    let read = std::io::Read::read_to_end(&mut idle, &mut reply);
+    // Still serving everyone else.
+    let status = stdout(&sb.run(&["status"]));
+    let _ = sb.run(&["stop"]);
+    let _ = child.wait_with_output();
+
+    assert!(
+        read.is_ok(),
+        "daemon kept an idle connection open: {read:?}"
+    );
+    assert!(status.contains("Daemon is running"), "{status}");
+}
+
+#[test]
 fn daemon_reports_how_many_cached_inputs_it_preloaded() {
     let sb = Sandbox::new();
     for input in ["alpha errand", "beta errand"] {
         let add = sb.run(&["add", input]);
         assert!(add.status.success(), "{}", stderr(&add));
     }
-    let child = spawn_daemon(&sb);
+    let mut child = spawn_daemon(&sb);
 
+    // The preload runs behind the accept loop, so wait for its line instead of assuming it is out.
+    let pipe = child.stderr.take().expect("piped stderr");
+    let (lines_tx, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufRead::lines(std::io::BufReader::new(pipe)).map_while(Result::ok) {
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut log = String::new();
+    while !log.contains("cache entries") {
+        let line = lines
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or_else(|_| panic!("no preload line from the daemon: {log}"));
+        log.push_str(&line);
+        log.push('\n');
+    }
     let _ = sb.run(&["stop"]);
-    let log = stderr(&child.wait_with_output().expect("collect daemon output"));
+    let _ = child.wait();
 
     assert!(log.contains("Loaded 2 cache entries"), "{log}");
 }

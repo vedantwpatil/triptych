@@ -16,6 +16,7 @@ mod calendar;
 mod calendar_todo;
 mod links;
 mod mail;
+mod mail_auto;
 mod model;
 mod motion;
 mod placement;
@@ -32,11 +33,12 @@ pub use calendar::*;
 pub use links::{OPEN_CMD_ENV, is_web_url, link_label, parse_links};
 pub use mail::{
     ArchiveResult, AttachmentSaveResult, CATEGORY_ORDER, Contact, DeleteResult, FolderListResult,
-    FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, attachment_filenames,
-    chain_references, compose_full_body, forward_subject, match_rule, merge_reply_all_cc,
-    next_category, normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original,
-    reply_subject, sanitize_filename, suggest_contacts, thread_count, thread_counts,
+    FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, attachment_filenames,
+    chain_references, compose_full_body, forward_subject, merge_reply_all_cc, next_category,
+    normalize_subject, parse_snooze_spec, quote_original, reply_subject, sanitize_filename,
+    suggest_contacts, thread_count, thread_counts,
 };
+pub use mail_auto::{TriageDone, match_rule, parse_rule_spec, rule_fires};
 pub use model::*;
 pub use motion::*;
 pub use tasks::*;
@@ -48,8 +50,8 @@ const DB_URL: &str = "sqlite:todo.db";
 
 /// Resolves the active database URL: `DATABASE_URL`, else `DB_URL`.
 ///
-/// Honoring the env var (as `src/bin/import_schedule.rs` does) lets tests and tooling point at an
-/// isolated database.
+/// Honoring the env var lets tests and tooling point at an isolated database; the app and
+/// `src/bin/import_schedule.rs` both resolve it here, so they share one default.
 #[must_use]
 pub fn db_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| DB_URL.to_string())

@@ -1734,6 +1734,19 @@ def _(c: Ctx):
     c.eq(c.db("select last_uid from email_sync_state"), [(30,)], "cursor at the newest uid")
 
 
+@scenario("imap_sync_in_chunks")
+def _(c: Ctx):
+    c.imap().add(count=250)
+    r = c.sync()
+    c.check("Synced 250 new email(s)" in r.out, f"chunks must add up to one report: {r.clean_out!r}")
+    c.eq(c.db("select min(uid), max(uid), count(*) from email_messages"), [(1, 250, 250)], "all 250 kept")
+    c.eq(c.db("select last_uid from email_sync_state"), [(250,)], "cursor at the newest uid")
+    log = c.sb.imap_log()
+    c.check("UID SEARCH UID 101:*" in log and "UID SEARCH UID 201:*" in log,
+            f"later chunks must resume from the cursor the previous chunk stored:\n{log}")
+    c.check("UID SEARCH UID 251:*" not in log, "a short last chunk must end the loop")
+
+
 @scenario("imap_incremental")
 def _(c: Ctx):
     mb = c.imap()
@@ -2189,9 +2202,20 @@ def _(c: Ctx):
     c.check(t.has("Person 2 <p2@ex.com>") and t.has("Person 0 <p0@ex.com>"), "suggestions not listed")
     t.press("C-n", "ENTER")
     c.check(t.has("Person 1 <p1@ex.com>") and not t.has("p2@ex.com"), "Ctrl-N + Enter did not accept the second contact")
-    t.type(", p0")
+    # Accepting leaves ", " so the next recipient can be typed straight away.
+    t.type("p0")
     t.press("ENTER")
-    c.check(t.has("Person 1 <p1@ex.com>, Person 0 <p0@ex.com>"), "second recipient not appended after the comma")
+    c.check(t.has("Person 1 <p1@ex.com>, Person 0 <p0@ex.com>,"), "second recipient not appended after the separator")
+    c.check(not t.has(", ,"), "accept left a doubled separator")
+
+
+@scenario("email_rules_popup_note")
+def _(c: Ctx):
+    c.seed_emails(1)
+    t = c.tui()
+    t.press("m", "R")
+    c.see("(no saved rules)")
+    c.see("New rules cover synced mail (not delete)", msg="rules popup does not say rules are retroactive")
 
 
 @scenario("email_compose_cancel")
@@ -2634,10 +2658,9 @@ def _(c: Ctx):
     mb = c.imap()
     mb.add_folder("Archive")  # SELECTable target for the archive rule's UID MOVE/COPY
     mb.add("Please Archive This")
-    mb.add("Please Delete This")
     t = c.tui()
     t.press("m")
-    c.wait_db("select count(*) from email_messages", [(2,)])
+    c.wait_db("select count(*) from email_messages", [(1,)])
 
     t.press("R")
     c.see("no saved rules")
@@ -2652,12 +2675,39 @@ def _(c: Ctx):
     c.see("delete", msg="delete rule not listed after save")
     t.press("ESC")
 
+    # The archive rule reaches the mail synced before it; a delete rule only sees mail arriving
+    # after it, so that one is added now.
+    mb.add("Please Delete This")
     t.press("s")
     c.wait_db(
         "select count(*) from email_messages",
         [(0,)],
         timeout=20,
     )
+
+
+@scenario("email_rule_delete_new_only")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Please Delete Old")
+    t = c.tui()
+    t.press("m")
+    c.wait_db("select count(*) from email_messages", [(1,)])
+
+    t.press("R")
+    t.press("n")
+    t.type("subject delete delete")
+    t.press("ENTER")
+    c.see("delete", msg="delete rule not listed after save")
+    t.press("ESC")
+
+    mb.add("Please Delete New")
+    t.press("s")
+    end = time.time() + 20
+    while time.time() < end and [m["uid"] for m in mb.load()["messages"]] != [1]:
+        t.pump(0.3)
+    c.eq([m["uid"] for m in mb.load()["messages"]], [1], "the new mail is deleted on the server")
+    c.wait_db("select subject from email_messages", [("Please Delete Old",)])
 
 
 # ---------------------------------------------------------------- vim motions

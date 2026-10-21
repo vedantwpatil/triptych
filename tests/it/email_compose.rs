@@ -1,6 +1,7 @@
+use crate::app::test_pool;
 use chrono::Utc;
 use triptych::app::{
-    ComposeField, ComposeState, chain_references, compose_full_body, forward_subject,
+    App, ComposeField, ComposeState, chain_references, compose_full_body, forward_subject,
     merge_reply_all_cc, quote_original, reply_subject, suggest_contacts,
 };
 use triptych::email::EmailMessage;
@@ -135,6 +136,21 @@ fn suggest_contacts_matches_name_or_address_at_last_fragment() {
     assert!(suggest_contacts(&contacts, "").is_empty());
     assert!(suggest_contacts(&contacts, "ann@x.com, ").is_empty());
     assert!(suggest_contacts(&contacts, "Ann Lee <ann@x.com>").is_empty());
+}
+
+#[tokio::test]
+async fn accepting_a_suggestion_leaves_a_separator_for_the_next_recipient() {
+    let mut app = App::new(test_pool().await).await;
+    app.contacts = vec![("bob@y.org".to_string(), Some("Bob".to_string()))];
+    let mut compose = ComposeState::blank("default".to_string());
+    compose.to = "ann@x.com, bo".to_string();
+    app.email_compose = Some(compose);
+
+    assert!(app.compose_accept_suggestion());
+
+    let to = app.email_compose.as_ref().unwrap().to.clone();
+    assert_eq!(to, "ann@x.com, Bob <bob@y.org>, ");
+    assert!(app.compose_suggestions().is_empty());
 }
 
 #[test]

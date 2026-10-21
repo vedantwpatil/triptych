@@ -37,7 +37,7 @@ characters; `--marks` also lists highlighted spans (the calendar cursor cell is 
 
 ## tui_suite.py: scenario suite
 
-185 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+188 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict] [--real-ollama]

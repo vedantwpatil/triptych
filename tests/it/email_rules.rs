@@ -1,5 +1,5 @@
 use chrono::Utc;
-use triptych::app::{match_rule, parse_rule_spec};
+use triptych::app::{match_rule, parse_rule_spec, rule_fires};
 use triptych::email::EmailRule;
 
 fn rule(match_field: &str, pattern: &str) -> EmailRule {
@@ -98,6 +98,18 @@ fn match_rule_tests_subject_case_insensitively() {
     let r = rule("subject", "Newsletter");
     assert!(match_rule(&r, "Weekly newsletter digest", "a@b.c"));
     assert!(!match_rule(&r, "Team sync", "a@b.c"));
+}
+
+#[test]
+fn a_delete_rule_does_not_fire_on_mail_synced_before_it() {
+    let mut r = rule("subject", "news");
+    r.action = "delete".into();
+    assert!(rule_fires(&r, "Newsletter", "a@b.c", true));
+    assert!(!rule_fires(&r, "Newsletter", "a@b.c", false));
+    assert!(!rule_fires(&r, "Team sync", "a@b.c", true));
+
+    r.action = "star".into();
+    assert!(rule_fires(&r, "Newsletter", "a@b.c", false));
 }
 
 #[test]

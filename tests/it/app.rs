@@ -903,7 +903,7 @@ async fn refresh_emails_keeps_the_cursor_on_its_message_when_newer_mail_arrives(
     assert_eq!(app.emails[app.selected_email].subject, "subject 2");
 }
 
-async fn insert_email(pool: &SqlitePool, uid: i64, subject: &str, date: &str) {
+pub async fn insert_email(pool: &SqlitePool, uid: i64, subject: &str, date: &str) {
     sqlx::query(
         "INSERT INTO email_messages (uid, message_id, from_addr, subject, date_utc) VALUES (?, ?, 'a@b.c', ?, ?)",
     )
@@ -1796,13 +1796,23 @@ async fn accept_meeting_invite_is_idempotent_once_already_converted() {
     assert_eq!(app.tasks.len(), 1, "must not create a second task");
 }
 
-async fn rule_applied(pool: &SqlitePool, email_id: i64) -> bool {
+/// 0 unchecked, 1 checked, 2 backlog (see `email::store::create_rule`).
+async fn rule_state(pool: &SqlitePool, email_id: i64) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT rule_applied FROM email_messages WHERE id = ?")
         .bind(email_id)
         .fetch_one(pool)
         .await
         .expect("read rule_applied")
-        == 1
+}
+
+async fn rule_applied(pool: &SqlitePool, email_id: i64) -> bool {
+    rule_state(pool, email_id).await == 1
+}
+
+async fn add_rule(app: &mut App, spec: &str) {
+    app.start_rule_input();
+    spec.clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
 }
 
 #[tokio::test]
@@ -1856,6 +1866,107 @@ async fn run_email_rules_stars_only_the_matching_email() {
     assert!(!by_subject("team sync").is_starred);
     assert!(rule_applied(&pool, by_subject("weekly newsletter").id).await);
     assert!(rule_applied(&pool, by_subject("team sync").id).await);
+}
+
+async fn next(app: &mut App) -> TriageDone {
+    tokio::time::timeout(std::time::Duration::from_secs(10), app.triage_rx.recv())
+        .await
+        .expect("triage report")
+        .expect("channel open")
+}
+
+#[tokio::test]
+async fn triage_drains_the_whole_backlog_and_only_then_frees_the_guard() {
+    let pool = test_pool().await;
+    for uid in 0..25 {
+        insert_email(
+            &pool,
+            uid,
+            &format!("newsletter {uid}"),
+            "2026-01-01T00:00:00Z",
+        )
+        .await;
+    }
+    let mut app = App::new(pool.clone()).await;
+    let unclassified = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM email_messages WHERE triage_focused IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    app.run_email_triage();
+    let mut reports = 0;
+    while unclassified().await > 0 || reports == 0 {
+        let done = next(&mut app).await;
+        app.apply_triage(done);
+        reports += 1;
+    }
+    // 25 rows at 10 per pass: three reports carry them, the fourth (empty) ends the drain.
+    assert!(reports >= 3, "{reports}");
+    assert_eq!(unclassified().await, 0);
+
+    let last = next(&mut app).await;
+    app.apply_triage(last);
+    app.run_email_triage();
+    let again = next(&mut app).await;
+    app.apply_triage(again);
+}
+
+#[tokio::test]
+async fn a_rule_added_later_also_covers_mail_that_was_already_checked() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "weekly newsletter", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+    app.start_rule_input();
+    "subject invoice read".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+    app.run_email_rules().await;
+    assert!(rule_applied(&pool, app.emails[0].id).await);
+    assert!(!app.emails[0].is_starred);
+
+    app.start_rule_input();
+    "subject newsletter star".clone_into(&mut app.input_buffer);
+    app.commit_rule_input().await;
+    app.run_email_rules().await;
+
+    assert!(app.emails[0].is_starred);
+}
+
+#[tokio::test]
+async fn a_delete_rule_leaves_mail_synced_before_it_in_the_backlog() {
+    let pool = test_pool().await;
+    insert_email(&pool, 1, "weekly newsletter", "2026-01-01T00:00:00Z").await;
+    let mut app = App::new(pool.clone()).await;
+    app.refresh_emails().await.expect("load emails");
+    let id = app.emails[0].id;
+
+    // First rule ever: unchecked mail must not be swept by a permanent delete.
+    add_rule(&mut app, "subject newsletter delete").await;
+    assert_eq!(
+        rule_state(&pool, id).await,
+        2,
+        "unchecked mail joins the backlog"
+    );
+    app.run_email_rules().await;
+    assert_eq!(
+        rule_state(&pool, id).await,
+        1,
+        "the backlog pass marks it checked"
+    );
+
+    // Checked mail stays checked when a delete rule is added, so it cannot reopen the mail.
+    add_rule(&mut app, "subject invoice delete").await;
+    assert_eq!(rule_state(&pool, id).await, 1);
+
+    // Any other rule reopens it, but only for the backlog pass.
+    add_rule(&mut app, "subject newsletter star").await;
+    assert_eq!(rule_state(&pool, id).await, 2);
+    app.run_email_rules().await;
+    assert_eq!(rule_state(&pool, id).await, 1);
+    assert!(app.emails[0].is_starred);
 }
 
 #[tokio::test]

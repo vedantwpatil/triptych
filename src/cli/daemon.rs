@@ -20,6 +20,8 @@ fn socket_path() -> PathBuf {
 
 /// Longest request or response accepted; anything bigger fails to parse rather than fill memory.
 const MAX_MESSAGE: u64 = 1 << 20;
+/// How long the daemon waits for a client to finish sending its request (clients send at once).
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// How long a client waits for the daemon. Covers a parse that waits out a cold model load (up to
 /// 90s, see `OLLAMA_LOAD_TIMEOUT_MS`) and still frees the CLI if the daemon is stuck.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -69,32 +71,43 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
         );
     });
 
-    // Preload cache from database
-    let cache_start = std::time::Instant::now();
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        r"
-        SELECT natural_language_input, COUNT(*) as count
-        FROM tasks
-        WHERE natural_language_input IS NOT NULL
-        GROUP BY natural_language_input
-        ORDER BY count DESC
-        LIMIT 100
-        ",
-    )
-    .fetch_all(&db)
-    .await?;
+    // Preload the cache from the database in the background too: each parse can wait on Ollama,
+    // and until the accept loop runs, clients (and `is_daemon_running`) would hang on the socket.
+    let (cache_db, cache_nlp) = (db.clone(), nlp.clone());
+    tokio::spawn(async move {
+        let cache_start = std::time::Instant::now();
+        let rows: Vec<(String, i64)> = match sqlx::query_as(
+            r"
+            SELECT natural_language_input, COUNT(*) as count
+            FROM tasks
+            WHERE natural_language_input IS NOT NULL
+            GROUP BY natural_language_input
+            ORDER BY count DESC
+            LIMIT 100
+            ",
+        )
+        .fetch_all(&cache_db)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("[Daemon] Cache preload failed: {e}");
+                return;
+            }
+        };
 
-    let mut loaded = 0;
-    for (input, _) in rows {
-        let _ = nlp.parse(&input).await;
-        loaded += 1;
-    }
+        let mut loaded = 0;
+        for (input, _) in rows {
+            let _ = cache_nlp.parse(&input).await;
+            loaded += 1;
+        }
 
-    eprintln!(
-        "[Daemon] Loaded {} cache entries in {:.2}s",
-        loaded,
-        cache_start.elapsed().as_secs_f64()
-    );
+        eprintln!(
+            "[Daemon] Loaded {} cache entries in {:.2}s",
+            loaded,
+            cache_start.elapsed().as_secs_f64()
+        );
+    });
     eprintln!("[Daemon] Ready! Listening for commands...");
 
     // Setup graceful shutdown
@@ -151,13 +164,16 @@ pub async fn start_daemon(db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
 
 /// Handle a single client connection
 async fn handle_client(mut stream: UnixStream, db: SqlitePool, nlp: Arc<NLPParser>) -> Result<()> {
-    // Read request: the client half-closes after writing, so EOF marks its end.
+    // Read request: the client half-closes after writing, so EOF marks its end. A client that
+    // connects and stays silent is dropped instead of holding this task forever.
     let mut buffer = Vec::new();
-    (&mut stream)
-        .take(MAX_MESSAGE)
-        .read_to_end(&mut buffer)
-        .await
-        .context("Failed to read from socket")?;
+    tokio::time::timeout(
+        READ_TIMEOUT,
+        (&mut stream).take(MAX_MESSAGE).read_to_end(&mut buffer),
+    )
+    .await
+    .context("Client sent no complete request in time")?
+    .context("Failed to read from socket")?;
 
     if buffer.is_empty() {
         return Ok(());

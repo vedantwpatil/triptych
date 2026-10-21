@@ -264,6 +264,11 @@ fn generate_message_id(domain: &str) -> String {
     format!("<{nanos:x}.{counter:x}@{domain}>")
 }
 
+/// A To/Cc field without the trailing `, ` that contact autofill leaves after an accepted entry.
+fn address_list(field: &str) -> &str {
+    field.trim_end_matches(|c: char| c.is_whitespace() || c == ',' || c == ';')
+}
+
 /// Builds the RFC 5322 message: headers, blank line, then the plain-text body. Not yet
 /// dot-stuffed - that happens once, in [`dot_stuff`], right before the wire write.
 #[must_use]
@@ -271,11 +276,11 @@ pub fn build_mime(config: &SmtpConfig, message: &OutgoingMessage) -> String {
     let mut headers = vec![
         format!("Date: {}", Utc::now().to_rfc2822()),
         format!("From: {}", config.from_addr),
-        format!("To: {}", message.to),
+        format!("To: {}", address_list(&message.to)),
     ];
 
-    if !message.cc.trim().is_empty() {
-        headers.push(format!("Cc: {}", message.cc));
+    if !address_list(&message.cc).is_empty() {
+        headers.push(format!("Cc: {}", address_list(&message.cc)));
     }
 
     headers.push(format!("Subject: {}", message.subject));

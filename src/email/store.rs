@@ -466,7 +466,9 @@ pub async fn list_rules(pool: &SqlitePool) -> Result<Vec<EmailRule>> {
     Ok(rules)
 }
 
-/// Adds one rule, returns its new id.
+/// Adds one rule, returns its new id. Also queues already-checked mail for a second look: the
+/// `rule_applied` flag means "checked against every current rule", so without this a later rule
+/// would only ever see mail that arrives after it.
 pub async fn create_rule(
     pool: &SqlitePool,
     match_field: &str,
@@ -482,6 +484,15 @@ pub async fn create_rule(
     .bind(Utc::now())
     .execute(pool)
     .await?;
+    // `rule_applied`: 0 unchecked (new mail), 1 checked, 2 backlog (synced before the latest
+    // rule: `run_email_rules` runs it through every rule except the permanent `delete`). A
+    // `delete` rule therefore only ever sees mail that arrives after it; mail still unchecked
+    // when it is made (the first rule's sweep) joins the backlog instead.
+    let from = i32::from(action != "delete");
+    sqlx::query("UPDATE email_messages SET rule_applied = 2 WHERE rule_applied = ?")
+        .bind(from)
+        .execute(pool)
+        .await?;
 
     Ok(result.last_insert_rowid())
 }
@@ -495,11 +506,15 @@ pub async fn delete_rule(pool: &SqlitePool, rule_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Emails not yet checked against `email_rules` (`rule_applied = 0`), most recent first, capped at
-/// `limit` — backs `App::run_email_rules`, the same pending-work shape as [`pending_triage`]. Only
-/// `subject`/`from_addr` are selected (plus the id), since those are the only fields any rule can
-/// currently match on.
-pub async fn pending_rule_check(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessage>> {
+/// Emails not yet checked against `email_rules` (`rule_applied = 0`, or 2 when `backlog`), most
+/// recent first, capped at `limit` — backs `App::run_email_rules`, the same pending-work shape as
+/// [`pending_triage`]. Only `subject`/`from_addr` are selected (plus the id), since those are the
+/// only fields any rule can currently match on.
+pub async fn pending_rule_check(
+    pool: &SqlitePool,
+    backlog: bool,
+    limit: i64,
+) -> Result<Vec<EmailMessage>> {
     let emails = sqlx::query_as::<_, EmailMessage>(
         r"
         SELECT id, uid, message_id, account, folder, from_addr, from_name, subject, date_utc,
@@ -508,11 +523,12 @@ pub async fn pending_rule_check(pool: &SqlitePool, limit: i64) -> Result<Vec<Ema
                meeting_title, meeting_start, meeting_end, meeting_location,
                EXISTS(SELECT 1 FROM email_attachments a WHERE a.email_id = email_messages.id) AS has_attachments
         FROM email_messages
-        WHERE rule_applied = 0
+        WHERE rule_applied = ?
         ORDER BY date_utc DESC
         LIMIT ?
         ",
     )
+    .bind(if backlog { 2 } else { 0 })
     .bind(limit)
     .fetch_all(pool)
     .await?;

@@ -114,6 +114,16 @@ fn the_message_has_its_headers_then_a_crlf_body() {
         header(&build_mime(&config(587), &with_cc), "Cc: "),
         Some("c@x.com")
     );
+
+    // Contact autofill leaves ", " after an accepted entry; it must not reach the headers.
+    let trailing = OutgoingMessage {
+        to: "Ann <a@x.com>, ".into(),
+        cc: "c@x.com; ".into(),
+        ..message()
+    };
+    let mime = build_mime(&config(587), &trailing);
+    assert_eq!(header(&mime, "To: "), Some("Ann <a@x.com>"));
+    assert_eq!(header(&mime, "Cc: "), Some("c@x.com"));
 }
 
 #[test]

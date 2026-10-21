@@ -4,8 +4,17 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+use super::client::SYNC_CHUNK;
 use super::store::{self, SyncCursor};
 use super::{EmailConfig, ImapMailSource, MailSource, message};
+
+/// Chunks one `sync_folder` call fetches before returning (`MAX_CHUNKS_PER_SYNC * SYNC_CHUNK`
+/// messages); a larger backlog resumes from the cursor on the next sync.
+const MAX_CHUNKS_PER_SYNC: usize = 20;
+
+/// Gap between two chunks of one folder, so a first sync is not a burst of logins (Gmail has
+/// throttled those).
+const CHUNK_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What one pass did.
 #[derive(Debug, Clone, Copy, Default)]
@@ -78,11 +87,38 @@ pub async fn sync_one_folder(
     sync_folder(pool, config, folder).await
 }
 
+/// Repeats [`sync_chunk`] while it comes back full, so the list fills a chunk at a time (the TUI
+/// tick reloads on each commit) and an error or timeout keeps every chunk already stored.
 async fn sync_folder(pool: &SqlitePool, config: &EmailConfig, folder: &str) -> Result<SyncReport> {
+    let mut total = SyncReport::default();
+    for chunk in 0..MAX_CHUNKS_PER_SYNC {
+        // shortcut: every chunk logs in again, so pace them instead of reusing one session;
+        // upgrade to a shared session if a server still throttles.
+        if chunk > 0 {
+            tokio::time::sleep(CHUNK_PAUSE).await;
+        }
+        let (report, fetched) = sync_chunk(pool, config, folder).await?;
+        total.new += report.new;
+        total.epoch_changed |= report.epoch_changed;
+        if fetched < SYNC_CHUNK {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// One connection: fetches the next `SYNC_CHUNK` messages after the cursor, stores them and moves
+/// the cursor. Returns the report and how many messages the server sent.
+async fn sync_chunk(
+    pool: &SqlitePool,
+    config: &EmailConfig,
+    folder: &str,
+) -> Result<(SyncReport, usize)> {
     let cursor = store::get_sync_cursor(pool, &config.account, folder).await?;
     let (uid_validity, raw_messages) = ImapMailSource::new(config.clone())
         .fetch_new(folder, cursor)
         .await?;
+    let fetched = raw_messages.len();
 
     let epoch_changed = match (cursor, uid_validity) {
         // `c.uid_validity` was itself stored from a `u32` (see `client.rs`), so this round-trip
@@ -92,10 +128,18 @@ async fn sync_folder(pool: &SqlitePool, config: &EmailConfig, folder: &str) -> R
     };
     let fetched_max_uid = raw_messages.iter().map(|(uid, _, _)| *uid).max();
 
+    // The cursor moves past an unparseable message for good, so say which one was dropped.
     let new_emails: Vec<_> = raw_messages
         .into_iter()
         .filter_map(|(uid, raw, header_only)| {
-            message::parse_raw(&config.account, uid, folder, &raw, header_only).ok()
+            message::parse_raw(&config.account, uid, folder, &raw, header_only)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        "[Mail:{}] skipping unparseable UID {uid} in {folder}: {e}",
+                        config.account
+                    );
+                })
+                .ok()
         })
         .collect();
     let new = store::insert_new(pool, &new_emails).await?;
@@ -119,5 +163,5 @@ async fn sync_folder(pool: &SqlitePool, config: &EmailConfig, folder: &str) -> R
         store::set_sync_cursor(pool, &config.account, folder, cursor).await?;
     }
 
-    Ok(SyncReport { new, epoch_changed })
+    Ok((SyncReport { new, epoch_changed }, fetched))
 }

@@ -125,14 +125,14 @@ Press `m`. Set up accounts first ([`SETUP.md`](./SETUP.md#email)). Sync runs in 
 | --------------------------- | ------------------------------------------------------------------------------------ |
 | `v` / `Esc`                 | Open / close a message                                                               |
 | `c`, `R`, `A`, `F`          | Compose; reply, reply-all, forward (in a message)                                    |
-| `Ctrl-N`/`Ctrl-P`, `Enter`  | In To/Cc: pick a suggested contact (from mail you have received), accept it as `Name <addr>` |
+| `Ctrl-N`/`Ctrl-P`, `Enter`  | In To/Cc: pick a suggested contact (from mail you have received), accept it as `Name <addr>, ` (ready for the next recipient) |
 | `Enter`                     | Turn the email into a task (finds a deadline in the text)                            |
 | `M`                         | Accept a meeting invite as a task                                                    |
 | `r`/`u`, `f`, `t`           | Read/unread, star, cycle color category                                              |
 | `a`, `d`                    | Archive; delete from the server for good (press `d` twice, any other key cancels)    |
 | `z`, `Z`, `x`               | Snooze, view snoozed, unsnooze (`x` says `Not snoozed` when there is nothing to clear) |
 | `D`                         | Drafts                                                                               |
-| `R`                         | Rules: `n` new, e.g. `subject newsletter archive` (`star`/`read`/`archive`/`delete`) |
+| `R`                         | Rules: `n` new, e.g. `subject newsletter archive` (`star`/`read`/`archive`/`delete`); a new rule also runs over mail already synced, except `delete`, which only acts on mail that arrives after it |
 | `A`,`F`,`I`,`H`,`U`,`S`,`@` | Filters: account, folder, focused/other, attachments, unread, starred, domain        |
 | `B`                         | Browse server folders                                                                |
 | `o`                         | Toggle priority/date sort                                                            |

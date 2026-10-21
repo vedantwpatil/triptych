@@ -18,8 +18,13 @@ use super::tls::{build_root_store, ensure_crypto_provider};
 const INITIAL_SYNC_DAYS: i64 = 180;
 
 /// First-sync cap inside that window: keep only the most recent N messages, since full-body
-/// IMAP fetches of a huge inbox can be slow and memory-heavy (and one sync is all-or-nothing).
+/// IMAP fetches of a huge inbox can be slow and memory-heavy.
 const INITIAL_SYNC_LIMIT: usize = 1000;
+
+/// Most messages one `fetch_new` call downloads (the oldest after the cursor). `sync_folder` stores
+/// each chunk and advances the cursor before asking for the next, so a first sync of
+/// `INITIAL_SYNC_LIMIT` fills the list piece by piece, and a stall or timeout keeps what landed.
+pub const SYNC_CHUNK: usize = 100;
 
 /// Messages larger than this skip the full `RFC822` fetch (headers + body + every
 /// MIME part, attachments included) and get `RFC822.HEADER` only instead — enough
@@ -342,6 +347,9 @@ impl ImapMailSource {
             if is_first_sync && sorted.len() > INITIAL_SYNC_LIMIT {
                 sorted = sorted.split_off(sorted.len() - INITIAL_SYNC_LIMIT);
             }
+            // Ascending, so this keeps the oldest: the cursor (highest UID fetched) then never
+            // skips past a message this chunk left behind.
+            sorted.truncate(SYNC_CHUNK);
             let uid_set = sorted
                 .iter()
                 .map(u32::to_string)
