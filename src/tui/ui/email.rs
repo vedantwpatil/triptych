@@ -3,7 +3,7 @@
 use super::centered_rect;
 use crate::app::{
     App, ComposeField, InputMode, Summary, before_cursor, compose_full_body, cursor_col,
-    thread_count,
+    thread_count, thread_counts,
 };
 use crate::email::{EmailMessage, priority};
 use ratatui::{
@@ -13,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use std::collections::HashMap;
 
 /// Maps a [`crate::app::CATEGORY_ORDER`] colour name to a named ANSI colour (Slice 22) — no
 /// `Color::Rgb`/`Indexed`, so the terminal's own theme applies, same convention as `src/urgency.rs`.
@@ -40,7 +41,7 @@ fn capitalize(s: &str) -> String {
 /// One row of the email list: account/date/sender, `[folder]` tag when not `INBOX` (Slice 13),
 /// priority badge, star, `[category]` tag (Slice 22), thread-count badge, subject (bold if
 /// unread), `[attach]`/`[invite]`/`[task]` tags.
-fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListItem<'static> {
+fn email_list_item(thread_sizes: &HashMap<i64, usize>, email: &EmailMessage) -> ListItem<'static> {
     let from = email.from_name.as_deref().unwrap_or(&email.from_addr);
     let date_text = email
         .date_utc
@@ -95,7 +96,7 @@ fn email_list_item(all_emails: &[EmailMessage], email: &EmailMessage) -> ListIte
             Style::default().fg(category_color(category)),
         ));
     }
-    let count = thread_count(all_emails, email.id);
+    let count = thread_sizes.get(&email.id).copied().unwrap_or(1);
     if count > 1 {
         spans.push(Span::styled(
             format!("[{count}] "),
@@ -139,10 +140,11 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     app.list_rows = usize::from(chunks[0].height.saturating_sub(2));
+    let thread_sizes = thread_counts(&app.emails);
     let items: Vec<ListItem> = app
         .emails
         .iter()
-        .map(|email| email_list_item(&app.emails, email))
+        .map(|email| email_list_item(&thread_sizes, email))
         .collect();
 
     if app.emails.is_empty() {
@@ -155,8 +157,8 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Email (m/Esc: todo, Tab: next view, j/k: move, /: search, v: view, c: compose, s: sync, o: order, Enter: to task, M: accept meeting, r: read, u: unread, f: star, t: category, d: delete, a: archive, D: drafts, A: account filter, F: folder filter, I: focus filter, H: attachment filter, U: unread filter, S: starred filter, @: domain filter, B: browse folders, R: rules, z: snooze, Z: snoozed view, x: unsnooze)")
-                .title_top(
+                .title("Email (j/k: move, v: view, c: compose, d: delete, /: search, ?: help)")
+                .title_bottom(
                     Line::from(format!(
                         "sorted by {}{}{}{}{}{}{}{}{} ",
                         app.email_sort.label(),
@@ -170,22 +172,28 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
                             "  ·  focus: {}",
                             if focused { "Focused" } else { "Other" }
                         )),
-                        app.attachment_filter.map_or_else(String::new, |has_attach| format!(
-                            "  ·  attach: {}",
-                            if has_attach { "Yes" } else { "No" }
-                        )),
+                        app.attachment_filter
+                            .map_or_else(String::new, |has_attach| format!(
+                                "  ·  attach: {}",
+                                if has_attach { "Yes" } else { "No" }
+                            )),
                         app.unread_filter.map_or_else(String::new, |unread| format!(
                             "  ·  unread: {}",
                             if unread { "Yes" } else { "No" }
                         )),
-                        app.starred_filter.map_or_else(String::new, |starred| format!(
-                            "  ·  starred: {}",
-                            if starred { "Yes" } else { "No" }
-                        )),
+                        app.starred_filter
+                            .map_or_else(String::new, |starred| format!(
+                                "  ·  starred: {}",
+                                if starred { "Yes" } else { "No" }
+                            )),
                         app.domain_filter
                             .as_deref()
                             .map_or_else(String::new, |d| format!("  ·  domain: {d}")),
-                        if app.show_snoozed { "  ·  snoozed view" } else { "" }
+                        if app.show_snoozed {
+                            "  ·  snoozed view"
+                        } else {
+                            ""
+                        }
                     ))
                     .right_aligned(),
                 ),
@@ -505,10 +513,8 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(
-                    "{} (Esc/v: close, j/k/gg/G: scroll, R: reply, A: reply-all, F: forward, f: star, u: unread, t: category, d: delete, a: archive, s: save attachments, M: accept meeting)",
-                    email.subject
-                ))
+                .title(email.subject.as_str())
+                .title_bottom("Esc/v: close, R: reply, A: all, F: fwd, ?: help")
                 .style(Style::default().bg(Color::Black)),
         )
         .wrap(Wrap { trim: false });
@@ -588,10 +594,12 @@ fn render_compose_popup(f: &mut Frame, app: &App) {
     };
     let body = Paragraph::new(body_text)
         .style(body_style)
-        .block(Block::default().borders(Borders::ALL).title(format!(
-            "Body — {} (Tab: next field, Ctrl-S: send, Ctrl-D: save draft, Ctrl-N/P + Enter: pick contact, Esc: cancel)",
-            compose.account
-        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Body — {}", compose.account))
+                .title_bottom("Ctrl-S: send, Ctrl-D: draft, Tab: field, Esc: cancel"),
+        )
         .wrap(Wrap { trim: false });
     f.render_widget(body, chunks[3]);
 

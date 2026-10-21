@@ -70,6 +70,14 @@ pub struct Task {
     pub recurrence: Option<String>,
 }
 
+/// A deleted task row with the one column `Task` leaves out, so `u` can put it back as it was.
+#[derive(Clone, FromRow, Debug)]
+pub struct DeletedTask {
+    #[sqlx(flatten)]
+    pub task: Task,
+    pub natural_language_input: Option<String>,
+}
+
 pub(super) const TASK_COLUMNS: &str = "id, description, completed, item_order, scheduled_at, deadline, duration_minutes, priority, tags, task_category, links, recurrence";
 
 /// A concrete occurrence of a recurring schedule block on a specific date

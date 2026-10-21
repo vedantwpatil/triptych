@@ -131,8 +131,63 @@ async fn deleting_a_range_reports_how_many_went() {
 
     app.delete_selected_tasks().await.unwrap();
 
-    assert_eq!(status(&app), "Deleted 2 task(s)");
+    assert_eq!(status(&app), "Deleted 2 task(s) (u: undo)");
     assert_eq!(task_count(&pool).await, 1);
+}
+
+#[tokio::test]
+async fn deleting_one_task_names_it_and_undo_brings_it_back_unchanged() {
+    let pool = test_pool().await;
+    let id = insert_task(&pool, "write report").await;
+    sqlx::query(
+        "UPDATE tasks SET priority = 2, tags = '[\"work\"]', deadline = '2030-01-02T03:04:05Z', \
+         natural_language_input = 'write report friday' WHERE id = ?",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.unwrap();
+
+    app.delete_task().await.unwrap();
+    assert_eq!(status(&app), "Deleted: write report (u: undo)");
+    assert_eq!(task_count(&pool).await, 0);
+
+    app.undo_delete().await.unwrap();
+    let row: (i64, i32, String, String, String) =
+        sqlx::query_as("SELECT id, priority, tags, deadline, natural_language_input FROM tasks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row.0, id);
+    assert_eq!(row.1, 2);
+    assert_eq!(row.2, "[\"work\"]");
+    assert!(row.3.starts_with("2030-01-02"), "{}", row.3);
+    assert_eq!(row.4, "write report friday");
+    assert_eq!(app.tasks.len(), 1);
+}
+
+#[tokio::test]
+async fn undo_restores_a_whole_deleted_range_once() {
+    let pool = test_pool().await;
+    for (i, name) in (0_i64..).zip(["a", "b", "c"]) {
+        insert_ordered(&pool, name, i).await;
+    }
+    let mut app = App::new(pool.clone()).await;
+    app.load_tasks().await.unwrap();
+    app.toggle_visual();
+    app.selected = 2;
+    app.delete_selected_tasks().await.unwrap();
+    assert_eq!(task_count(&pool).await, 0);
+
+    app.undo_delete().await.unwrap();
+    assert_eq!(status(&app), "Restored 3 task(s)");
+    assert_eq!(task_count(&pool).await, 3);
+
+    app.undo_delete().await.unwrap();
+    assert_eq!(status(&app), "Nothing to undo");
+    assert_eq!(task_count(&pool).await, 3);
 }
 
 #[tokio::test]
@@ -152,7 +207,10 @@ async fn deleting_a_range_says_how_many_canvas_rows_stayed() {
 
     app.delete_selected_tasks().await.unwrap();
 
-    assert_eq!(status(&app), "Deleted 1 task(s), kept 1 from Canvas");
+    assert_eq!(
+        status(&app),
+        "Deleted 1 task(s), kept 1 from Canvas (u: undo)"
+    );
     assert_eq!(task_count(&pool).await, 1);
 }
 

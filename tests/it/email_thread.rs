@@ -1,5 +1,5 @@
 use chrono::Utc;
-use triptych::app::{normalize_subject, thread_count};
+use triptych::app::{normalize_subject, thread_count, thread_counts};
 use triptych::email::EmailMessage;
 
 fn mail(id: i64, subject: &str) -> EmailMessage {
@@ -100,6 +100,34 @@ fn thread_count_links_siblings_through_an_unfetched_ancestor() {
 
     assert_eq!(thread_count(&emails, 1), 2);
     assert_eq!(thread_count(&emails, 2), 2);
+}
+
+#[test]
+fn thread_counts_sizes_every_email_in_one_pass() {
+    let emails = vec![
+        mail(1, "plans"),
+        EmailMessage {
+            references_header: Some("<m1@example.com>".into()),
+            ..mail(2, "unrelated subject")
+        },
+        mail(3, "lunch?"),
+        mail(4, "Re: lunch?"),
+        mail(5, ""),
+        mail(6, ""),
+        mail(7, "solo"),
+    ];
+
+    let counts = thread_counts(&emails);
+
+    for (id, size) in [(1, 2), (2, 2), (3, 2), (4, 2), (5, 1), (6, 1), (7, 1)] {
+        assert_eq!(counts[&id], size, "email {id}");
+        assert_eq!(
+            thread_count(&emails, id),
+            size,
+            "email {id} via thread_count"
+        );
+    }
+    assert_eq!(counts.len(), emails.len());
 }
 
 #[test]

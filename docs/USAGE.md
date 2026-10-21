@@ -3,7 +3,8 @@
 Everyday use of Triptych: one TUI with three views (todo, calendar, email) plus a CLI. First-time
 install and configuration is in [`SETUP.md`](./SETUP.md). Planned features: [`roadmap.md`](./roadmap.md).
 
-Start the TUI with `triptych` (no arguments). `Tab`/`Shift+Tab` cycle views; `q` quits.
+Start the TUI with `triptych` (no arguments). `Tab`/`Shift+Tab` cycle views; `q` quits. `?` lists
+the keys of the current view; any key closes it.
 
 ## Todo list
 
@@ -17,7 +18,8 @@ deadline. Finished tasks sink to the bottom. Badges: `[LOW]`, `[HIGH]`, `[URGENT
 | `a`                                         | Add a task in plain language                           |
 | `r`/`R`                                     | Reword the selected task (keeps its date and priority) |
 | `Enter`                                     | Toggle done (a repeating task adds its next copy)      |
-| `x`/`d`                                     | Delete (a selection if one is active)                  |
+| `x`/`d`                                     | Delete (a selection if one is active); says what went  |
+| `u`                                         | Undo the last delete (one step, same ids)              |
 | `v`/`V`                                     | Select rows; `j`/`k` extend, `Esc` cancels             |
 | `s`                                         | Auto-schedule onto the calendar                        |
 | `o` / `O`                                   | Open the task's first link / list all its links        |
@@ -82,7 +84,8 @@ Canvas deadlines only refresh while the TUI runs (or after `triptych canvas sync
 
 ## Calendar
 
-Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks. Load blocks from TOML
+Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks; the cursor starts on
+today at the current hour (7am before, 10pm after the grid). Load blocks from TOML
 with `triptych schedule import file.toml` (`--clear` replaces existing).
 
 | Key                      | Action                                              |
@@ -126,8 +129,8 @@ Press `m`. Set up accounts first ([`SETUP.md`](./SETUP.md#email)). Sync runs in 
 | `Enter`                     | Turn the email into a task (finds a deadline in the text)                            |
 | `M`                         | Accept a meeting invite as a task                                                    |
 | `r`/`u`, `f`, `t`           | Read/unread, star, cycle color category                                              |
-| `a`, `d`                    | Archive, delete                                                                      |
-| `z`, `Z`, `x`               | Snooze, view snoozed, unsnooze                                                       |
+| `a`, `d`                    | Archive; delete from the server for good (press `d` twice, any other key cancels)    |
+| `z`, `Z`, `x`               | Snooze, view snoozed, unsnooze (`x` says `Not snoozed` when there is nothing to clear) |
 | `D`                         | Drafts                                                                               |
 | `R`                         | Rules: `n` new, e.g. `subject newsletter archive` (`star`/`read`/`archive`/`delete`) |
 | `A`,`F`,`I`,`H`,`U`,`S`,`@` | Filters: account, folder, focused/other, attachments, unread, starred, domain        |

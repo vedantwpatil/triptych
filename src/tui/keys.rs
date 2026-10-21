@@ -17,6 +17,10 @@ pub enum KeyOutcome {
     Quit,
 }
 
+fn set_status(app: &mut App, msg: &str) {
+    app.status_message = Some((msg.to_string(), std::time::Instant::now()));
+}
+
 fn set_error(app: &mut App, e: impl std::fmt::Display) {
     app.status_message = Some((format!("Error: {e}"), std::time::Instant::now()));
 }
@@ -29,6 +33,13 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
     if ctrl && key.code == KeyCode::Char('c') {
         return KeyOutcome::Quit;
     }
+    if std::mem::take(&mut app.help_open) {
+        return KeyOutcome::Continue;
+    }
+    if app.armed_key.is_some_and(|c| key.code != KeyCode::Char(c)) {
+        app.armed_key = None;
+        app.status_message = None;
+    }
     match edit_for(key) {
         Some(edit) if type_into(app, edit) => return KeyOutcome::Continue,
         Some(_) => {}
@@ -37,6 +48,10 @@ pub async fn handle_key_event(app: &mut App, key: KeyEvent) -> KeyOutcome {
     }
     match app.input_mode {
         InputMode::Normal => {
+            if key.code == KeyCode::Char('?') && !ctrl {
+                app.help_open = true;
+                return KeyOutcome::Continue;
+            }
             if handle_motion(app, key) {
                 return KeyOutcome::Continue;
             }
@@ -247,6 +262,11 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
+        KeyCode::Char('u') => {
+            if let Err(e) = app.undo_delete().await {
+                set_error(app, e);
+            }
+        }
         KeyCode::Char('s') => {
             if let Err(e) = app.auto_schedule_task().await {
                 set_error(app, e);
@@ -418,10 +438,9 @@ async fn handle_block_form_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Tab => app.block_form.next_field(),
         KeyCode::BackTab => app.block_form.prev_field(),
+        KeyCode::Enter if app.block_form.title.is_empty() => set_status(app, "Title required"),
         KeyCode::Enter => {
-            if !app.block_form.title.is_empty()
-                && let Err(e) = app.create_schedule_block().await
-            {
+            if let Err(e) = app.create_schedule_block().await {
                 set_error(app, e);
             }
         }
@@ -548,7 +567,7 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
             }
         }
         KeyCode::Char('c') => app.start_compose_new(),
-        KeyCode::Char('d') => app.delete_selected_email(),
+        KeyCode::Char('d') => app.confirm_delete_selected_email(),
         KeyCode::Char('a') => app.archive_selected_email(),
         KeyCode::Char('M') => {
             if let Err(e) = app.accept_meeting_invite().await {
@@ -704,7 +723,7 @@ async fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
                 set_error(app, e);
             }
         }
-        KeyCode::Char('d') => app.delete_selected_email(),
+        KeyCode::Char('d') => app.confirm_delete_selected_email(),
         KeyCode::Char('a') => app.archive_selected_email(),
         KeyCode::Char('s') => app.save_selected_attachments(),
         KeyCode::Char('M') => {

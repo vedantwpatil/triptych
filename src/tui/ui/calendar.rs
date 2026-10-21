@@ -162,8 +162,10 @@ pub(super) fn render_calendar_view(f: &mut Frame, app: &App) {
     // instructions so the pending action is always visible, not just in the
     // fading status line.
     let title = app.held_task.map_or_else(
-        || "Weekly Calendar (t: todo, T: todo panel, Tab: next view, h/l/j/k: move, H/L: week, n: block, s: schedule, a: add task, m: move task, u: unschedule, e: deadline, [/]: cycle stacked task, d: delete block, q: quit)".to_string(),
-        |task_id| format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel"),
+        || "Weekly Calendar (hjkl: move, n: block, s: schedule, t: todo, ?: help)".to_string(),
+        |task_id| {
+            format!("Moving task #{task_id} - h/l/j/k: move cursor, m: drop here, Esc: cancel")
+        },
     );
 
     let table = Table::new(rows, widths)

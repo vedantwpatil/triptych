@@ -17,6 +17,15 @@ use crate::nlp::ParsedItem;
 /// Hour rows in the calendar grid (07:00 through 22:00).
 const CALENDAR_ROWS: usize = 16;
 
+/// The grid cell for `now`: (weekday with Monday = 0, hour row), the row clamped to the grid's
+/// 07:00 to 22:00 span. This is where the calendar's cursor starts.
+#[must_use]
+pub fn calendar_cursor_at(now: DateTime<chrono::Local>) -> (usize, usize) {
+    let day = usize::try_from(now.weekday().num_days_from_monday()).unwrap_or(0);
+    let row = usize::try_from(now.hour().saturating_sub(7)).unwrap_or(0);
+    (day, row.min(CALENDAR_ROWS - 1))
+}
+
 /// A task occupying a calendar cell, resolved from the current week's cached data.
 #[derive(Debug)]
 pub struct CellTask {

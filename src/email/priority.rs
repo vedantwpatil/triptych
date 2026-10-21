@@ -111,7 +111,14 @@ fn normalize(text: &str) -> String {
 }
 
 fn has_any(text: &str, words: &[&str]) -> bool {
-    words.iter().any(|w| text.contains(&format!(" {w} ")))
+    let mut needle = String::new();
+    words.iter().any(|w| {
+        needle.clear();
+        needle.push(' ');
+        needle.push_str(w);
+        needle.push(' ');
+        text.contains(&needle)
+    })
 }
 
 /// Higher means more worth reading first. Each keyword group counts once, however many of its words appear.

@@ -196,7 +196,7 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
     let title = if app.visual_anchor.is_some() {
         "-- VISUAL -- (j/k/5j/gg/G: extend, d/x: delete, v/Esc: cancel)"
     } else {
-        "To-Do (q: quit, c: calendar, m: email, Tab: next view, a: add, x/d: delete, v: select, s: schedule, j/k: move, /: search, ENTER: toggle, o/O: links)"
+        "To-Do (a: add, x: delete, Enter: done, c: calendar, q: quit, ?: help)"
     };
     let tasks_list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(title))

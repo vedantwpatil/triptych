@@ -1308,9 +1308,19 @@ async fn snoozing_an_email_hides_it_until_unsnoozed_or_it_lapses() {
         subjects(&app).is_empty(),
         "unsnoozed email still in snoozed view"
     );
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.as_str()),
+        Some("Snooze cleared")
+    );
 
     app.toggle_show_snoozed().await.expect("toggle back");
     assert_eq!(subjects(&app), ["notes"]);
+
+    app.unsnooze_selected_email().await.expect("unsnooze again");
+    assert_eq!(
+        app.status_message.as_ref().map(|(m, _)| m.as_str()),
+        Some("Not snoozed")
+    );
 }
 
 #[tokio::test]

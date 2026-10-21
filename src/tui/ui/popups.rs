@@ -165,7 +165,7 @@ pub(super) fn render_task_picker(f: &mut Frame, app: &App) {
 }
 
 pub(super) fn render_calendar_task_input(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 25, f.area());
+    let area = centered_rect(70, 25, f.area());
     f.render_widget(Clear, area);
 
     let date = app.selected_cell_date();
@@ -196,12 +196,12 @@ pub(super) fn render_calendar_task_input(f: &mut Frame, app: &App) {
 }
 
 pub(super) fn render_deadline_input(f: &mut Frame, app: &App) {
-    let area = centered_rect(50, 25, f.area());
+    let area = centered_rect(70, 25, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("New deadline - day name or 'tomorrow' (Enter: save, Esc: cancel)")
+        .title("Deadline: day name or 'tomorrow' (Enter: save, Esc: cancel)")
         .style(Style::default().bg(Color::Black));
 
     let inner = block.inner(area);
@@ -220,11 +220,11 @@ pub(super) fn render_deadline_input(f: &mut Frame, app: &App) {
 
 /// Full details of every task in the selected calendar cell; `stack_index` is the cursor.
 pub(super) fn render_cell_detail(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, f.area());
+    let area = centered_rect(70, 50, f.area());
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Cell (j/k: select, m: move, u: unschedule, e: deadline, Esc: close)")
+        .title("Cell (m: move, u: unschedule, e: deadline, Esc: close)")
         .style(Style::default().bg(Color::Black));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -263,7 +263,14 @@ pub(super) fn render_cell_detail(f: &mut Frame, app: &App) {
                     task.deadline
                         .map(|d| crate::urgency::deadline_badge(d, now)),
                 )
-                .chain(task.tags.clone());
+                .chain(
+                    task.tags
+                        .as_deref()
+                        .and_then(|t| serde_json::from_str::<Vec<String>>(t).ok())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|t| format!("#{t}")),
+                );
             let meta = std::iter::once(format!("    {kind}"))
                 .chain(badges)
                 .collect::<Vec<_>>()

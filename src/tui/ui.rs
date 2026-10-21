@@ -4,6 +4,7 @@ mod calendar;
 mod calendar_todo;
 mod email;
 mod grid;
+mod help;
 mod popups;
 mod todo;
 
@@ -23,6 +24,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         ViewMode::TodoList => todo::render_todo_view(f, app),
         ViewMode::Calendar => calendar::render_calendar_view(f, app),
         ViewMode::Email => email::render_email_view(f, app),
+    }
+    if app.help_open {
+        help::render_help_popup(f, app);
     }
 }
 

@@ -317,9 +317,10 @@ impl App {
                 .retain(|e| e.snoozed_until.is_none_or(|t| t <= now));
         }
         if self.email_sort == EmailSort::Priority {
-            // Stable, so the newest-first order from `get_recent` breaks ties.
+            // Stable, so the newest-first order from `get_recent` breaks ties. Cached: `score`
+            // allocates, and a plain `sort_by_key` would call it on every comparison.
             self.emails
-                .sort_by_key(|e| std::cmp::Reverse(priority::score(e)));
+                .sort_by_cached_key(|e| std::cmp::Reverse(priority::score(e)));
         }
 
         // Keep the cursor on the same message when newer mail is inserted above it.
@@ -633,10 +634,16 @@ impl App {
         let Some(email) = self.emails.get(self.selected_email) else {
             return Ok(());
         };
+        if email.snoozed_until.is_none_or(|t| t <= crate::clock::now()) {
+            self.notify("Not snoozed");
+            return Ok(());
+        }
         email_store::clear_snooze(&self.db_pool, email.id)
             .await
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        self.refresh_emails().await
+        self.refresh_emails().await?;
+        self.notify("Snooze cleared");
+        Ok(())
     }
 
     /// Toggles between the normal inbox and the snoozed-only view (`Z` in the email list).
@@ -1500,6 +1507,18 @@ impl App {
         });
     }
 
+    /// `d` in the email list or popup. The server delete is permanent, so the first press arms it
+    /// and says so; the second runs `delete_selected_email`. Any other key disarms (see
+    /// `handle_key_event`).
+    pub fn confirm_delete_selected_email(&mut self) {
+        if self.armed_key.take() == Some('d') {
+            self.delete_selected_email();
+        } else if self.emails.get(self.selected_email).is_some() {
+            self.armed_key = Some('d');
+            self.notify("Delete permanently from the server? Press d again");
+        }
+    }
+
     /// Deletes the selected email: server first (`UID STORE +FLAGS.SILENT (\Deleted)` then
     /// `EXPUNGE`, spawned and never awaited — an unreachable IMAP server must not freeze the TUI,
     /// same reasoning as `start_email_sync`), local row only on that success (see
@@ -1838,10 +1857,13 @@ pub fn normalize_subject(subject: &str) -> String {
 /// email into one giant false thread.
 #[must_use]
 pub fn thread_count(emails: &[EmailMessage], email_id: i64) -> usize {
-    let Some(target) = emails.iter().find(|e| e.id == email_id) else {
-        return 0;
-    };
+    thread_counts(emails).get(&email_id).copied().unwrap_or(0)
+}
 
+/// [`thread_count`] for every email at once, keyed by id, in one pass over `emails`. The list
+/// view needs all of them per frame; asking per row rebuilt the whole forest n times.
+#[must_use]
+pub fn thread_counts(emails: &[EmailMessage]) -> HashMap<i64, usize> {
     let mut forest = MsgIdForest::default();
     for e in emails {
         if let Some(refs) = &e.references_header {
@@ -1850,23 +1872,32 @@ pub fn thread_count(emails: &[EmailMessage], email_id: i64) -> usize {
             }
         }
     }
-    let target_root = forest.find(&target.message_id);
-    let header_count = emails
+    let roots: Vec<String> = emails.iter().map(|e| forest.find(&e.message_id)).collect();
+    let subjects: Vec<String> = emails
         .iter()
-        .filter(|e| forest.find(&e.message_id) == target_root)
-        .count();
-    if header_count > 1 {
-        return header_count;
-    }
-
-    let key = normalize_subject(&target.subject);
-    if key.is_empty() {
-        return 1;
+        .map(|e| normalize_subject(&e.subject))
+        .collect();
+    let mut by_root: HashMap<&str, usize> = HashMap::new();
+    let mut by_subject: HashMap<&str, usize> = HashMap::new();
+    for (root, subject) in roots.iter().zip(&subjects) {
+        *by_root.entry(root).or_default() += 1;
+        *by_subject.entry(subject).or_default() += 1;
     }
     emails
         .iter()
-        .filter(|e| normalize_subject(&e.subject) == key)
-        .count()
+        .zip(roots.iter().zip(&subjects))
+        .map(|(e, (root, subject))| {
+            let header_count = by_root.get(root.as_str()).copied().unwrap_or(1);
+            let count = if header_count > 1 {
+                header_count
+            } else if subject.is_empty() {
+                1
+            } else {
+                by_subject.get(subject.as_str()).copied().unwrap_or(1)
+            };
+            (e.id, count)
+        })
+        .collect()
 }
 
 /// Parses a snooze spec typed after `z` in the email list into an absolute UTC instant.

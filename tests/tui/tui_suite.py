@@ -136,6 +136,7 @@ class Ctx:
     def cal(self) -> td.Term:
         self.t.press("c")
         self.see("Weekly Calendar")
+        self.t.press("0", "g", "g")  # the cursor starts on the current hour; scenarios count from Mon 07am
         return self.t
 
     def cursor(self) -> str:
@@ -824,7 +825,24 @@ def _(c: Ctx):
     victim = c.tasks()[sel()]["description"]
     t.press("x")
     c.check(victim not in c.descs() and len(c.descs()) == 2, f"x did not delete {victim!r}: {c.descs()}")
-    c.check(not t.has(victim), "deleted task still on screen")
+    c.check(not any(victim in l for l in lines()), "deleted task still in the list")
+    c.see(f"Deleted: {victim}")
+
+
+@scenario("todo_delete_undo")
+def _(c: Ctx):
+    for s in ("alpha", "bravo", "charlie"):
+        c.cli("add", s)
+    t = c.tui()
+    before = c.descs()
+    t.press("u")
+    c.see("Nothing to undo")
+    t.press("j", "x")
+    c.eq(len(c.descs()), 2, "rows after x")
+    c.see("(u: undo)")
+    t.press("u")
+    c.see("Restored 1 task")
+    c.eq(c.descs(), before, "u did not put the task back in its place")
 
 
 @scenario("todo_visual_delete")
@@ -1346,7 +1364,7 @@ def _(c: Ctx):
     t.type("due soon")
     t.press("ENTER")
     t.press("e")
-    c.see("New deadline")
+    c.see("Deadline: day name")
     t.type("tomorrow")
     t.press("ENTER")
     c.see("Deadline updated")
@@ -1371,7 +1389,7 @@ def _(c: Ctx):
     t = bad_deadline(c)
     c.see("parse deadline", timeout=45, msg="no 'Couldn't parse deadline' status (waited out the UI freeze)")
     c.check(c.tasks()[0]["deadline"] is None, "unparseable deadline stored")
-    c.check(t.has("Weekly Calendar") and not t.has("New deadline"), "popup not closed after submit")
+    c.check(t.has("Weekly Calendar") and not t.has("Deadline: day name"), "popup not closed after submit")
 
 
 @scenario("cal_deadline_no_freeze")
@@ -1407,11 +1425,11 @@ def _(c: Ctx):
     for _ in range(2):
         t.press("s", "ENTER")
     t.press("ENTER")
-    c.check(t.has("Cell (j/k") and t.has("one") and t.has("two"), "cell detail popup lists both tasks")
+    c.check(t.has("Cell (m") and t.has("one") and t.has("two"), "cell detail popup lists both tasks")
     t.press("j", "u")
     c.check(len([r for r in c.tasks() if r["scheduled_at"]]) == 1, "u in popup unschedules the selected task")
     t.press("ESC")
-    c.check(not t.has("Cell (j/k"), "Esc closes the popup")
+    c.check(not t.has("Cell (m"), "Esc closes the popup")
 
 
 @scenario("cal_cell_detail_block")
@@ -1423,7 +1441,7 @@ def _(c: Ctx):
     t = c.tui()
     c.cal()
     t.press("j", "j", "v")
-    c.check(t.has("Cell (j/k") and t.has("CS 457-A") and t.has("No tasks"), "v shows the block in the cell popup")
+    c.check(t.has("Cell (m") and t.has("CS 457-A") and t.has("No tasks"), "v shows the block in the cell popup")
 
 
 @scenario("cal_toml_block_protected")
@@ -1892,6 +1910,9 @@ def _(c: Ctx):
     t.press("m")
     c.see("Delete me")
     t.press("d")
+    c.see("Press d again")
+    c.eq(c.db("select count(*) from email_messages"), [(1,)], "one d must not delete")
+    t.press("d")
     c.see("Deleted", 5)
     c.check(not t.has("Delete me"), "deleted email still shown in the list")
     c.wait_db("select count(*) from email_messages", [(0,)])
@@ -1908,7 +1929,7 @@ def _(c: Ctx):
     c.wait_db("select count(*) from email_messages", [(1,)])
     t.press("m", "v")
     c.see("Esc/v: close")
-    t.press("d")
+    t.press("d", "d")
     c.see("Deleted", 5)
     c.see("Esc/v: close", gone=True, msg="detail popup did not close after a successful delete")
     c.wait_db("select count(*) from email_messages", [(0,)])
@@ -2067,7 +2088,10 @@ def _(c: Ctx):
     t = c.tui()
     c.wait_db("select count(*) from email_messages", [(1,)])
     t.press("m")
-    c.see("s: sync", msg="title does not advertise the s key")
+    t.press("?")
+    c.see("s sync", msg="help does not list the s key")
+    t.press("ESC")
+    c.see("s sync", gone=True, msg="help still open after a key")
     t.pump(2.0)  # let the sync started by entering the view finish
     mb.add("Second mail")
     t.press("s")
@@ -2273,7 +2297,7 @@ def _(c: Ctx):
 
     # Save a draft, back out to the list, then a second draft.
     t.press("m", "c")
-    c.see("Ctrl-D: save draft")
+    c.see("Ctrl-D: draft")
     t.type("nobody@example.com")
     t.press("TAB", "TAB")
     t.type("First draft")
@@ -2293,7 +2317,7 @@ def _(c: Ctx):
     c.see("Drafts (", msg="drafts popup did not open")
     c.check(t.has("Second draft"), "drafts popup missing the newer draft's subject")
     t.press("ENTER")
-    c.see("Ctrl-D: save draft", msg="Enter on a draft did not reopen compose")
+    c.see("Ctrl-D: draft", msg="Enter on a draft did not reopen compose")
     c.check(t.has("second@example.com") and t.has("Second draft"), "resumed draft lost its content")
     t.press("C-s", settle=1.0)
     c.see("Sent")
@@ -2948,6 +2972,76 @@ def select(patterns: str | None) -> list[str]:
         return list(SCENARIOS)
     pats = patterns.split(",")
     return [n for n in SCENARIOS if any(fnmatch.fnmatch(n, p) or n.startswith(p) for p in pats)]
+
+
+@scenario("cal_cell_detail_tags")
+def _(c: Ctx):
+    c.cli("add", "tagged #work")
+    t = c.tui()
+    c.cal()
+    t.press("s", "ENTER", "ENTER")
+    c.see("#work", msg="tag not shown as #work in the cell popup")
+    c.check(not t.has('["work"]'), "cell popup shows raw JSON tags")
+
+
+@scenario("cal_starts_at_now")
+def _(c: Ctx):
+    t = c.tui()
+    t.press("c")
+    c.see("Weekly Calendar")
+    now = NOW.astimezone()
+    hour = min(max(now.hour, 7), 22)
+    c.eq(c.cursor(), f"{now:%a} " + f"{datetime(2000, 1, 1, hour):%I%p}".lower(), "calendar cursor on entry")
+
+
+@scenario("cal_block_title_required")
+def _(c: Ctx):
+    t = c.tui()
+    c.cal()
+    t.press("n", "ENTER")
+    c.see("Title required")
+    c.eq(c.blocks(), [], "blocks after Enter on an empty title")
+
+
+@scenario("help_popup")
+def _(c: Ctx):
+    t = c.tui()
+    t.press("a")
+    t.type("why?")
+    c.see("Keys:", gone=True, msg="? typed into the add prompt opened help")
+    c.see("why?")
+    t.press("ESC")
+    t.press("?")
+    c.see("Keys: To-Do")
+    c.see("u undo delete")
+    t.press("q")
+    c.see("Keys:", gone=True, msg="a key did not close help")
+    c.see("To-Do (", msg="the key that closed help was also acted on (q quit?)")
+    t.press("c", "?")
+    c.see("Keys: Calendar")
+    t.press("ESC")
+    c.see("Weekly Calendar", msg="Esc that closed help also left the calendar")
+    t.press("TAB", "?")
+    c.see("Keys: Email")
+    c.see("d delete (twice)")
+
+
+@scenario("email_delete_disarms")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Keep me")
+    t = c.tui()
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    t.press("m")
+    c.see("Keep me")
+    t.press("d")
+    c.see("Press d again")
+    t.press("j")
+    c.see("Press d again", gone=True, msg="another key did not disarm the delete")
+    t.press("d")
+    c.see("Press d again")
+    t.pump(1.0)
+    c.eq(c.db("select count(*) from email_messages"), [(1,)], "d, other key, d must not delete")
 
 
 def main() -> int:

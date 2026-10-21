@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::{
     App,
-    model::{EnhancedTaskInfo, InputMode, TASK_COLUMNS, Task},
+    model::{DeletedTask, EnhancedTaskInfo, InputMode, TASK_COLUMNS, Task},
 };
 use crate::{
     nlp::{ParsedItem, Priority},
@@ -387,20 +387,94 @@ impl App {
             return Ok(());
         }
 
-        let task_id = self.tasks[self.selected].id;
+        let Task {
+            id, description, ..
+        } = self.tasks[self.selected].clone();
 
-        let deleted = sqlx::query("DELETE FROM tasks WHERE id = ? AND external_id IS NULL")
-            .bind(task_id)
-            .execute(&self.db_pool)
-            .await?
-            .rows_affected();
-        if deleted == 0 {
-            self.status_message = Some((CANVAS_PROTECTED.to_string(), std::time::Instant::now()));
+        let msg = if self.delete_task_rows(&[id]).await? == 0 {
+            CANVAS_PROTECTED.to_string()
+        } else {
+            format!("Deleted: {description} (u: undo)")
+        };
+        self.load_tasks().await?;
+        self.status_message = Some((msg, std::time::Instant::now()));
+        self.on_task_changed().await
+    }
+
+    /// Deletes the non-Canvas tasks among `ids` in one transaction and keeps their rows in
+    /// `deleted_tasks` for `undo_delete`. Returns how many were deleted; when none were, the
+    /// previous undo buffer is left alone.
+    async fn delete_task_rows(&mut self, ids: &[i64]) -> Result<usize, sqlx::Error> {
+        let select = format!(
+            "SELECT {TASK_COLUMNS}, natural_language_input FROM tasks WHERE id = ? AND external_id IS NULL"
+        );
+        let mut gone = Vec::new();
+        let mut tx = self.db_pool.begin().await?;
+        for id in ids {
+            let row: Option<DeletedTask> = sqlx::query_as(&select)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            if let Some(row) = row {
+                sqlx::query("DELETE FROM tasks WHERE id = ?")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                gone.push(row);
+            }
+        }
+        tx.commit().await?;
+        let deleted = gone.len();
+        if deleted > 0 {
+            self.deleted_tasks = gone;
+        }
+        Ok(deleted)
+    }
+
+    /// Puts back the tasks removed by the last delete (`u` in the todo list), with their ids, so
+    /// scheduled cells and ordering return as they were. The deadline-alert tier resets to 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a database query fails.
+    pub async fn undo_delete(&mut self) -> Result<(), sqlx::Error> {
+        let rows = std::mem::take(&mut self.deleted_tasks);
+        if rows.is_empty() {
+            self.status_message = Some(("Nothing to undo".to_string(), std::time::Instant::now()));
             return Ok(());
         }
+        let mut tx = self.db_pool.begin().await?;
+        for DeletedTask {
+            task,
+            natural_language_input,
+        } in &rows
+        {
+            sqlx::query(
+                "INSERT INTO tasks (id, description, completed, item_order, scheduled_at, deadline, \
+                 duration_minutes, priority, tags, task_category, links, recurrence, \
+                 natural_language_input) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(task.id)
+            .bind(&task.description)
+            .bind(task.completed)
+            .bind(task.item_order)
+            .bind(task.scheduled_at)
+            .bind(task.deadline)
+            .bind(task.duration_minutes)
+            .bind(task.priority)
+            .bind(&task.tags)
+            .bind(&task.task_category)
+            .bind(&task.links)
+            .bind(&task.recurrence)
+            .bind(natural_language_input)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         self.load_tasks().await?;
-        self.on_task_changed().await?;
-        Ok(())
+        let msg = format!("Restored {} task(s)", rows.len());
+        self.status_message = Some((msg, std::time::Instant::now()));
+        self.on_task_changed().await
     }
 
     /// Todo rows covered by the visual selection, or `None` when not selecting.
@@ -437,24 +511,15 @@ impl App {
             .map(|t| t.id)
             .collect();
 
-        let mut deleted = 0;
-        let mut tx = self.db_pool.begin().await?;
-        for id in &ids {
-            deleted += sqlx::query("DELETE FROM tasks WHERE id = ? AND external_id IS NULL")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-        }
-        tx.commit().await?;
+        let deleted = self.delete_task_rows(&ids).await?;
 
         self.selected = *range.start();
         self.load_tasks().await?;
-        let kept = ids.len() as u64 - deleted;
+        let kept = ids.len() - deleted;
         let msg = if kept == 0 {
-            format!("Deleted {deleted} task(s)")
+            format!("Deleted {deleted} task(s) (u: undo)")
         } else {
-            format!("Deleted {deleted} task(s), kept {kept} from Canvas")
+            format!("Deleted {deleted} task(s), kept {kept} from Canvas (u: undo)")
         };
         self.status_message = Some((msg, std::time::Instant::now()));
         self.on_task_changed().await

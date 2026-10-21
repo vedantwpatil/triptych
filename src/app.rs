@@ -25,6 +25,7 @@ mod search;
 mod tasks;
 mod textedit;
 mod time;
+mod watch;
 
 pub use allocation::*;
 pub use calendar::*;
@@ -34,13 +35,14 @@ pub use mail::{
     FolderSyncResult, MailSync, SendResult, Summary, SummaryDone, TriageDone, attachment_filenames,
     chain_references, compose_full_body, forward_subject, match_rule, merge_reply_all_cc,
     next_category, normalize_subject, parse_rule_spec, parse_snooze_spec, quote_original,
-    reply_subject, sanitize_filename, suggest_contacts, thread_count,
+    reply_subject, sanitize_filename, suggest_contacts, thread_count, thread_counts,
 };
 pub use model::*;
 pub use motion::*;
 pub use tasks::*;
 pub use textedit::{Edit, apply as apply_edit, before_cursor, cursor_col};
 pub use time::*;
+pub use watch::DbWatch;
 
 const DB_URL: &str = "sqlite:todo.db";
 
@@ -121,6 +123,12 @@ pub struct App {
     /// Deadline allocations this week; minutes is `allocated_minutes`.
     pub cached_task_allocations: Vec<CellEntry>,
     pub status_message: Option<(String, std::time::Instant)>,
+    /// The `?` key reference is showing; any key closes it.
+    pub help_open: bool,
+    /// Key that must be pressed again to confirm (permanent email delete); any other key disarms it.
+    pub armed_key: Option<char>,
+    /// Tasks removed by the last delete, put back by `u` in the todo list.
+    pub deleted_tasks: Vec<DeletedTask>,
     /// Task picked up from the calendar with `m`, awaiting a drop cell.
     pub held_task: Option<i64>,
     /// Task whose deadline is being edited via `CalendarInputMode::DeadlineInput`.
@@ -284,6 +292,9 @@ impl App {
             cached_scheduled_tasks: Vec::new(),
             cached_task_allocations: Vec::new(),
             status_message: None,
+            help_open: false,
+            armed_key: None,
+            deleted_tasks: Vec::new(),
             held_task: None,
             deadline_edit_task_id: None,
             deadline_tx,
@@ -347,6 +358,7 @@ impl App {
     }
 
     pub async fn toggle_to_calendar(&mut self) {
+        self.status_message = None;
         self.view_mode = ViewMode::Calendar;
         self.stack_index = 0;
         self.calendar_input_mode = CalendarInputMode::Navigate;
@@ -355,12 +367,14 @@ impl App {
     }
 
     pub async fn toggle_to_todo(&mut self) {
+        self.status_message = None;
         self.view_mode = ViewMode::TodoList;
         self.held_task = None;
         let _ = self.load_tasks().await;
     }
 
     pub async fn toggle_to_email(&mut self) {
+        self.status_message = None;
         self.view_mode = ViewMode::Email;
         self.email_detail_open = false;
         self.start_email_sync(false);
@@ -395,7 +409,8 @@ impl App {
     ///
     /// Returns an error if the database cannot be created, opened or migrated.
     pub async fn build() -> Result<Self, sqlx::Error> {
-        let app = Self::new(open_pool().await?).await;
+        let mut app = Self::new(open_pool().await?).await;
+        (app.selected_day, app.selected_time_slot) = calendar_cursor_at(crate::clock::local_now());
 
         if app.nlp_parser.is_ollama_available() {
             tracing::info!("NLP parsing ready");

@@ -3,7 +3,7 @@
 mod keys;
 pub mod ui;
 
-use crate::app::{App, InputMode, ViewMode};
+use crate::app::{App, DbWatch, InputMode, ViewMode};
 use crate::sync::{SyncConfig, SyncDaemon};
 use crossterm::{
     event::{Event, EventStream},
@@ -77,6 +77,8 @@ where
     // Email view is open so new messages show up without leaving and re-entering. Skipped while
     // the body popup is open: `get_recent` rows carry no `body_text`, so a reload would blank it.
     let mut mail_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    // The tick only reloads when the DB actually changed (no probe: always reload).
+    let mut watch = DbWatch::new(&app.db_pool).await.ok();
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
@@ -149,10 +151,16 @@ where
 
             // Background syncs write mail and Canvas tasks straight to the DB; pick them up.
             _ = mail_tick.tick(), if refresh_due(&app) => {
-                if app.view_mode == ViewMode::Email {
-                    let _ = app.refresh_emails().await;
-                } else {
-                    let _ = app.reload_tasks_keep_selection().await;
+                let changed = match watch.as_mut() {
+                    Some(w) => w.changed().await,
+                    None => true,
+                };
+                if changed {
+                    if app.view_mode == ViewMode::Email {
+                        let _ = app.refresh_emails().await;
+                    } else {
+                        let _ = app.reload_tasks_keep_selection().await;
+                    }
                 }
             }
 

@@ -14,6 +14,7 @@ mod app;
 mod calendar_edges;
 mod canvas;
 mod cli;
+mod db_watch;
 mod email_attachments;
 mod email_compose;
 mod email_config;

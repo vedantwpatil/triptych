@@ -1,7 +1,7 @@
 //! Calendar week, cell and schedule-block boundaries that mutation testing showed no other test pins down.
-use chrono::{Datelike, Duration, NaiveDate, NaiveTime};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone};
 use sqlx::SqlitePool;
-use triptych::app::{App, CalendarInputMode, resolve_local_datetime};
+use triptych::app::{App, CalendarInputMode, calendar_cursor_at, resolve_local_datetime};
 use triptych::clock::local_now;
 
 use crate::app::{insert_task, test_pool};
@@ -251,6 +251,17 @@ async fn the_cursor_date_is_the_viewed_weeks_day_column() {
     assert!(monday <= today && today < monday + Duration::days(7));
     app.calendar_week_offset = Some(1);
     assert_eq!(app.selected_cell_date(), monday + Duration::days(7));
+}
+
+#[test]
+fn the_cursor_starts_on_the_current_hour_clamped_to_the_grid() {
+    let at = |d, h, m| Local.with_ymd_and_hms(2026, 6, d, h, m, 0).unwrap();
+    // 2026-06-10 is a Wednesday.
+    assert_eq!(calendar_cursor_at(at(10, 14, 30)), (2, 7));
+    assert_eq!(calendar_cursor_at(at(10, 7, 0)), (2, 0));
+    assert_eq!(calendar_cursor_at(at(10, 22, 59)), (2, 15));
+    assert_eq!(calendar_cursor_at(at(13, 5, 0)), (5, 0));
+    assert_eq!(calendar_cursor_at(at(14, 23, 30)), (6, 15));
 }
 
 #[tokio::test]
