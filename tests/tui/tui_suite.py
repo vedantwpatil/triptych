@@ -249,7 +249,7 @@ def _(c: Ctx):
     c.check(any("gym" in l and "[URGENT↑]" in l for l in lines), f"due-soon task not escalated: {lines!r}")
     c.check(any("someday" in l and "[LOW]" in l for l in lines), f"undated task changed: {lines!r}")
     c.cli("done", "1")
-    c.check(any("gym" in l and "[LOW]" in l for l in c.cli("list").out.splitlines()), "done task still escalated")
+    c.check(any("gym" in l and "[LOW]" in l for l in c.cli("list", "--all").out.splitlines()), "done task still escalated")
 
 
 @scenario("cli_list_empty")
@@ -264,7 +264,8 @@ def _(c: Ctx):
         c.cli("add", t)
     r = c.cli("done", "1")
     c.check(r.rc == 0 and "Marked task as done" in r.out, f"done: {r.out!r}")
-    c.check("✓" in c.cli("list").out, "list shows no ✓ for done task")
+    c.check("✓" not in c.cli("list").out, "plain list shows a done task")
+    c.check("✓" in c.cli("list", "--all").out, "list --all shows no ✓ for done task")
     r = c.cli("done", "99")
     c.check(r.rc != 0 and "not found" in r.err, f"done missing id: rc={r.rc} err={r.clean_err!r}")
     r = c.cli("clear")

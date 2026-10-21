@@ -164,7 +164,7 @@ The title bar adds `· account:`, `· folder:`, `· focus:`, `· attach:`, `· u
 ```bash
 triptych daemon &                 # optional: instant one-shot commands
 triptych add "Buy milk tomorrow 4pm #home"
-triptych list                     # also: done <id>, rm <id>, clear
+triptych list [--all]             # open tasks; --all/-a adds completed. Also: done <id>, rm <id>, clear
 triptych canvas sync
 triptych notify check | install | uninstall   # deadline alerts without the TUI
 triptych email sync [--backfill] | list   # --backfill re-pulls the last 6 months

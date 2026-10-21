@@ -75,7 +75,7 @@ triptych daemon &
 
 # Task operations
 triptych add "Buy groceries tomorrow at 4pm #personal"
-triptych list
+triptych list          # open tasks; `triptych list --all` includes completed
 triptych done 42
 triptych rm 42
 triptych clear

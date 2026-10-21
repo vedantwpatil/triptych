@@ -54,15 +54,21 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             }
         }
 
-        Commands::List => {
+        Commands::List { all } => {
             // List command logic (unchanged)
             match app.get_enhanced_task_list().await {
                 Ok(enhanced_tasks) => {
+                    let visible: Vec<_> = enhanced_tasks
+                        .iter()
+                        .filter(|e| all || !e.task.completed)
+                        .collect();
                     if enhanced_tasks.is_empty() {
                         println!("∅ No tasks yet! Add one with: triptych add \"Your task\"");
+                    } else if visible.is_empty() {
+                        println!("∅ No open tasks (`triptych list --all` shows completed)");
                     } else {
                         println!("▸ Current Tasks:");
-                        for enhanced in &enhanced_tasks {
+                        for enhanced in &visible {
                             let task = &enhanced.task;
                             let status = if task.completed { "✓" } else { "○" };
                             let mut indicators = Vec::new();

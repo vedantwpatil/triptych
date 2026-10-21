@@ -28,6 +28,9 @@ When this file passes about 100 lines, move the oldest changelog entries to the 
 
 ## Changelog
 
+- 2026-10-21 (`list --all`): `triptych list` now hides completed tasks; `--all`/`-a` shows them
+  (`Commands::List { all }`, filtered in `cli/commands.rs`; `load_tasks` and the TUI are unchanged).
+  Tests: `list_hides_completed_tasks_unless_all`, `list_with_only_completed_tasks_points_at_all`.
 - 2026-10-21 (audit fixes): from a repo-wide read; each item has a test.
   - Rules: a `delete` rule acts only on mail that arrives after it (also the first rule; it used to
     sweep every stored message, a permanent server delete). `rule_applied` is 0 new, 1 checked,

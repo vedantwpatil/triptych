@@ -17,8 +17,12 @@ pub enum Commands {
     /// Add a new task
     Add { description: String },
 
-    /// List all tasks
-    List,
+    /// List open tasks (`--all` includes completed ones)
+    List {
+        /// Include completed tasks
+        #[arg(short, long)]
+        all: bool,
+    },
 
     /// Mark a task as done
     Done { id: i64 },

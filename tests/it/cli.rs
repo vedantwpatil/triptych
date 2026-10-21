@@ -210,9 +210,37 @@ fn repeating_task_lists_its_rule_and_done_adds_the_next_one() {
     let done = sb.run(&["done", &id.to_string()]);
     assert!(done.status.success(), "done failed: {}", stderr(&done));
 
-    let after = stdout(&sb.run(&["list"]));
+    let after = stdout(&sb.run(&["list", "--all"]));
     assert_eq!(after.matches("water plants").count(), 2, "{after}");
     assert_eq!(after.matches("[↻ fri]").count(), 2, "{after}");
+}
+
+#[test]
+fn list_hides_completed_tasks_unless_all() {
+    let sb = Sandbox::new();
+    let add = sb.run(&["add", "Buy milk"]);
+    let id = extract_id(&stdout(&add)).expect("task id in add output");
+    sb.run(&["add", "Walk dog"]);
+    assert!(sb.run(&["done", &id.to_string()]).status.success());
+
+    let open = stdout(&sb.run(&["list"]));
+    assert!(!open.contains("Buy milk"), "completed task listed: {open}");
+    assert!(open.contains("Walk dog"), "open task missing: {open}");
+
+    let all = stdout(&sb.run(&["list", "-a"]));
+    assert!(all.contains("Buy milk"), "--all missing completed: {all}");
+    assert!(all.contains("Walk dog"), "--all missing open: {all}");
+}
+
+#[test]
+fn list_with_only_completed_tasks_points_at_all() {
+    let sb = Sandbox::new();
+    let add = sb.run(&["add", "Buy milk"]);
+    let id = extract_id(&stdout(&add)).expect("task id in add output");
+    assert!(sb.run(&["done", &id.to_string()]).status.success());
+
+    let out = stdout(&sb.run(&["list"]));
+    assert!(out.contains("No open tasks"), "{out}");
 }
 
 #[test]
