@@ -1,7 +1,7 @@
 # Embedded LLM runtime (proposal)
 
 Status: proposal, nothing built. Related: [`../src/nlp/CLAUDE.md`](../src/nlp/CLAUDE.md) (the parse
-pipeline this plugs into), [`DEVELOPMENT.md`](./DEVELOPMENT.md) (latency baseline, KI-19/20/21),
+pipeline this plugs into), [`DEVELOPMENT-ARCHIVE.md`](./DEVELOPMENT-ARCHIVE.md) (latency baseline, KI-19/20/21),
 [`roadmap.md`](./roadmap.md).
 
 ## Why

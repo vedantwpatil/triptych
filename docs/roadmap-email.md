@@ -1,6 +1,6 @@
 # Email Client — Slice 1 (IMAP fetch → store → view → convert-to-task)
 
-See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues and the changelog, and
+See [`DEVELOPMENT.md`](./DEVELOPMENT.md) for known issues and recent changes ([`DEVELOPMENT-ARCHIVE.md`](./DEVELOPMENT-ARCHIVE.md) for the per-slice history), and
 [`roadmap.md`](./roadmap.md) for the overall feature roadmap. Further email ideas (not a
 goal) live in [`roadmap-outlook.md`](./roadmap-outlook.md).
 
@@ -667,7 +667,7 @@ unread -> starred -> domain -> snooze chain. Title bar gained `@: domain filter`
 Not bound to `G`: `src/app/motion.rs`'s vim-motion layer claims `G` (bottom-of-list, paired with
 `gg`) ahead of every per-view key handler in the email list (`src/tui/CLAUDE.md`'s "Motions run
 first" rule), so a `G` binding here would never fire — caught by a failing TUI scenario before
-shipping (see `docs/DEVELOPMENT.md`'s Slice 25 entry). `@` was free (checked via `grep -n
+shipping (see `docs/DEVELOPMENT-ARCHIVE.md`'s Slice 25 entry). `@` was free (checked via `grep -n
 "MotionKey::Char\|Char('@')" src/app/motion.rs src/tui/keys.rs`) and reads naturally for "domain".
 
 New `tests/it/app.rs` case `cycle_domain_filter_walks_every_domain_then_back_to_merged` covers the
