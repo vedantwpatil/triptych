@@ -2,7 +2,7 @@
 
 Local stand-ins the scenario suite and `tuidrive.py` start inside a sandbox, so email sync and AI
 summaries can be tested without a real account or model. Driver usage: [`TUI_DRIVER.md`](./TUI_DRIVER.md);
-code: [`../tests/tui/`](../tests/tui/CLAUDE.md); features they cover: [`DEVELOPMENT-ARCHIVE.md`](./DEVELOPMENT-ARCHIVE.md).
+code: [`../tests/tui/`](../tests/tui/CLAUDE.md); features they cover: [`development/email-sync.md`](./development/email-sync.md), [`development/email-messages.md`](./development/email-messages.md), [`development/email-triage.md`](./development/email-triage.md).
 
 ## Email and IMAP
 
