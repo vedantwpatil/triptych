@@ -7,6 +7,16 @@ Related: [`testing.md`](./testing.md), [`../roadmap.md`](../roadmap.md).
 
 ## Changelog
 
+- 2026-10-22 (binary size): release `triptych` went from 21.0 MiB to 9.3 MiB, found with
+  `cargo bloat --release --bin triptych --crates` (without `--bin` it analyses `import_schedule`).
+  - `[profile.release]` (`Cargo.toml`): `strip`, `lto = "fat"`, `codegen-units = 1` (21.0 to 12.6 MiB),
+    `opt-level = "s"` (to 9.9). The file was 2x its `.text`: symbols and debug names were shipped.
+  - `reqwest` without `http2` drops `h2` and hyper's HTTP/2 path (to 9.3). Ollama (localhost) and the
+    Canvas feed work over HTTP/1.1; `canvas sync` against an https host still negotiates TLS.
+  - Not done: `panic = "abort"` (to 8.6) turns a panic in a background worker into a process exit;
+    dropping `tracing-subscriber`'s `env-filter` (about 0.3 MiB of regex) loses `RUST_LOG` directives;
+    `aws_lc_sys` (0.7 MiB) and `ring` are two crypto providers pulled by rustls and sqlx.
+  - Check: `cargo test` 365 passed, clippy and fmt clean; the release binary ran `add`/`list`.
 - 2026-10-21 (audit fixes, module split): `src/app/mail_auto.rs` now holds triage and rules, moved out of
   `mail.rs` (2,026 to 1,739 lines).
 - 2026-10-20 (audit fixes, KI-26..KI-32): a read-through of the repo found one data-loss bug and

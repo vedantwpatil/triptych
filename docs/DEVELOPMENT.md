@@ -57,6 +57,9 @@ feature file below, then leave one line here under Recent changes.
 - 2026-10-21 (UX fixes, perf): `?` help, delete undo, confirmed email delete, `DbWatch` reload.
   [`tui-ux.md`](./development/tui-ux.md).
 
+- 2026-10-22 (binary size): release build 21.0 to 9.3 MiB (`[profile.release]`, reqwest without `http2`).
+  [`code-health.md`](./development/code-health.md).
+
 ## Known Issues
 
 ### Open
