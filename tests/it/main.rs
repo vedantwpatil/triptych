@@ -23,6 +23,7 @@ mod email_priority;
 mod email_rules;
 mod email_smtp;
 mod email_thread;
+mod jobs;
 mod links;
 mod motion;
 mod nlp_llm;

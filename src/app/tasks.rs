@@ -95,6 +95,8 @@ pub struct NewTask<'a> {
     /// `None` uses the default for the title's category.
     pub duration_minutes: Option<i32>,
     pub recurrence: Option<Recurrence>,
+    /// JSON list of URLs for `o`/`O` (see `app::links`).
+    pub links: Option<&'a str>,
 }
 
 /// Inserts `task` and returns its id. The one `tasks` INSERT for the TUI/CLI path and the daemon, so
@@ -115,8 +117,8 @@ pub async fn insert_task_row(pool: &SqlitePool, task: &NewTask<'_>) -> Result<i6
         .unwrap_or_else(|| default_duration_for_category(category));
 
     Ok(sqlx::query(
-        "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence) \
-         VALUES (?, ?, COALESCE(?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks)), ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO tasks (description, completed, item_order, priority, natural_language_input, tags, scheduled_at, deadline, duration_minutes, task_category, recurrence, links) \
+         VALUES (?, ?, COALESCE(?, (SELECT COALESCE(MAX(item_order), -1) + 1 FROM tasks)), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(task.title)
     .bind(false)
@@ -129,6 +131,7 @@ pub async fn insert_task_row(pool: &SqlitePool, task: &NewTask<'_>) -> Result<i6
     .bind(duration_minutes)
     .bind(category)
     .bind(task.recurrence.map(Recurrence::key))
+    .bind(task.links)
     .execute(pool)
     .await?
     .last_insert_rowid())
@@ -358,6 +361,7 @@ impl App {
                 deadline,
                 duration_minutes,
                 recurrence,
+                links: None,
             },
         )
         .await?;

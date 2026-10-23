@@ -12,6 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 
 use crate::email::store::{self, UnreadMail};
+use crate::jobs::Profile;
 use crate::nlp::ollama_client::bulk_mail_heuristic;
 
 /// Env var: `0`/`false`/`off`/`no` disables alerts.
@@ -159,14 +160,31 @@ pub async fn new_mail_alert(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Option<Alert>> {
     let mail = store::unread_after(pool, account, after_id).await?;
-    Ok(mail_alert(&mail, now))
+    Ok(mail_alert(&mail, &Profile::load(), now))
 }
 
-fn mail_alert(mail: &[UnreadMail], now: DateTime<Utc>) -> Option<Alert> {
+/// One alert for the `Company - Role` labels of newly shortlisted postings (`jobs::scan`), or `None`
+/// when there are none.
+#[must_use]
+pub fn shortlist_alert(labels: &[String]) -> Option<Alert> {
+    let title = match labels.len() {
+        0 => return None,
+        1 => "1 job to apply to".to_string(),
+        n => format!("{n} jobs to apply to"),
+    };
+    Some(Alert {
+        title,
+        body: list_body(labels.iter().map(String::as_str)),
+    })
+}
+
+/// Job-digest mail is left to [`shortlist_alert`], so it never alerts as plain mail.
+fn mail_alert(mail: &[UnreadMail], jobs: &Profile, now: DateTime<Utc>) -> Option<Alert> {
     let fresh: Vec<&UnreadMail> = mail
         .iter()
         .filter(|m| {
-            now - m.date_utc <= Duration::hours(MAIL_MAX_AGE_HOURS)
+            !jobs.is_sender(&m.from_addr)
+                && now - m.date_utc <= Duration::hours(MAIL_MAX_AGE_HOURS)
                 && bulk_mail_heuristic(&m.subject, m.snippet.as_deref().unwrap_or_default())
                     .is_none()
         })

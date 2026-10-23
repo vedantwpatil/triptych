@@ -18,8 +18,9 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
             r"
             INSERT OR IGNORE INTO email_messages
                 (uid, message_id, account, folder, from_addr, from_name, subject, date_utc, snippet, body_text,
-                 to_addrs, cc_addrs, references_header, meeting_title, meeting_start, meeting_end, meeting_location)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 to_addrs, cc_addrs, references_header, meeting_title, meeting_start, meeting_end, meeting_location,
+                 links)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(email.uid)
@@ -39,6 +40,7 @@ pub async fn insert_new(pool: &SqlitePool, emails: &[NewEmail]) -> Result<u64> {
         .bind(email.meeting_start)
         .bind(email.meeting_end)
         .bind(&email.meeting_location)
+        .bind(&email.links)
         .execute(&mut *tx)
         .await?;
 

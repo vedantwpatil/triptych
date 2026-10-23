@@ -114,6 +114,8 @@ pub struct NewEmail {
     pub meeting_start: Option<DateTime<Utc>>,
     pub meeting_end: Option<DateTime<Utc>>,
     pub meeting_location: Option<String>,
+    /// JSON of the HTML body's anchors (`email::links`); `None` when it has none.
+    pub links: Option<String>,
 }
 
 /// Comma-joins every address in a `To`/`Cc` header, dropping addresses with no
@@ -199,6 +201,14 @@ pub fn parse_raw(
         )
     };
 
+    let links = if header_only {
+        None
+    } else {
+        message
+            .body_html(0)
+            .and_then(|html| super::links::to_json(&super::links::anchors(&html)))
+    };
+
     Ok(NewEmail {
         uid: i64::from(uid),
         message_id,
@@ -218,6 +228,7 @@ pub fn parse_raw(
         meeting_start: invite.as_ref().map(|i| i.start),
         meeting_end: invite.as_ref().and_then(|i| i.end),
         meeting_location: invite.and_then(|i| i.location),
+        links,
     })
 }
 

@@ -8,6 +8,7 @@ pub mod canvas;
 mod cli;
 pub mod clock;
 pub mod email;
+pub mod jobs;
 pub mod logging;
 pub mod migrations;
 pub mod nlp;

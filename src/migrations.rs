@@ -505,6 +505,38 @@ pub async fn run_email_migration(pool: &SqlitePool) -> Result<()> {
         tracing::info!("  ✓ Added category column to email_messages");
     }
 
+    // JSON `[{text, href}]` of the message's HTML anchors (`email::links`); read by `jobs::scan`.
+    if !column_exists(pool, "email_messages", "links").await? {
+        sqlx::query("ALTER TABLE email_messages ADD COLUMN links TEXT")
+            .execute(pool)
+            .await?;
+        tracing::info!("  ✓ Added links column to email_messages");
+    }
+
+    // Job postings parsed from digest mail (`jobs::scan`). `key` is the dedupe and the tombstone: a
+    // deleted task is never recreated because its posting row stays. Lives here because the postings
+    // come from email rows.
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS job_postings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email_id INTEGER NOT NULL,
+            key TEXT NOT NULL UNIQUE,
+            company TEXT NOT NULL,
+            role TEXT NOT NULL,
+            url TEXT,
+            score INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            task_id INTEGER,
+            status TEXT NOT NULL,
+            applied_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    ",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::debug!("[Migration] Email schema ready ✓");
     Ok(())
 }

@@ -1164,3 +1164,60 @@ fn notify_install_refuses_without_a_database() {
     assert!(stderr(&out).contains('✗'), "{}", stderr(&out));
     assert!(!sb.path("Library").exists(), "wrote a plist anyway");
 }
+
+#[test]
+fn jobs_turns_a_digest_into_apply_tasks_and_lists_the_postings() {
+    let sb = Sandbox::new();
+    // Any command creates the sandbox db and runs migrations.
+    assert!(sb.run(&["list"]).status.success());
+
+    let body = [
+        "Hey there! Your daily update:",
+        "Link to Simplify",
+        "Acme Corp:Software Engineer Intern",
+        "Globex: Hardware Validation Intern",
+        "See more details by visiting the repo: Summer2026-Internships",
+    ]
+    .join("\n");
+    let rt = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    rt.block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", sb.db_path().display()))
+            .await
+            .expect("connect to sandbox db");
+        sqlx::query(
+            "INSERT INTO email_messages (uid, message_id, account, folder, from_addr, subject, date_utc, body_text) \
+             VALUES (1, 'digest-1', 'default', 'INBOX', 'noreply@swelist.com', '2 New Internships', ?, ?)",
+        )
+        .bind(Utc::now() - chrono::Duration::hours(1))
+        .bind(body)
+        .execute(&pool)
+        .await
+        .expect("insert digest");
+        pool.close().await;
+    });
+
+    let out = sb.run(&["jobs"]);
+    assert!(out.status.success(), "jobs failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("Acme Corp - Software Engineer Intern  [new]"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Globex"),
+        "skipped posting shown without --all: {text}"
+    );
+    assert!(text.contains("1 new task(s)"), "{text}");
+
+    assert!(stdout(&sb.run(&["list"])).contains("Apply: Acme Corp - Software Engineer Intern"));
+    let all = sb.run(&["jobs", "--all"]);
+    assert!(
+        stdout(&all).contains("Globex - Hardware Validation Intern  [skipped]"),
+        "{}",
+        stdout(&all)
+    );
+    assert!(
+        stdout(&all).contains("0 new task(s)"),
+        "a second run adds nothing"
+    );
+}

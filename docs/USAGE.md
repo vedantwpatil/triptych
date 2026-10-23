@@ -88,6 +88,18 @@ While the TUI is open, each background mail sync that stores unread mail posts o
 (sender and subject, three listed, then `+N more`). Bulk mail (newsletters, receipts, ...) and mail more
 than 6 hours old are skipped, so a first sync never floods. Same switch and notifier as deadline alerts.
 
+## Job digests
+
+Daily digest mail from `noreply@swelist.com` is scored against a resume-derived profile (role words that
+raise or lower a fit, and excludes such as PhD or "Sophomore Only"). Each good fit becomes a todo task
+`Apply: Company - Role` with the apply link when the mail has one (`o` opens it), and one notification
+lists the new ones. At most 10 tasks per digest; digests older than 14 days are ignored. A posting is
+scored once, and a task you delete stays deleted.
+
+`triptych jobs` runs the same scan on mail already synced and lists the postings, best first
+(`--all`/`-a` adds the skipped ones with the words that decided them). Tune the profile with a TOML file
+(`TRIPTYCH_JOBS_PROFILE`, see [`SETUP.md`](./SETUP.md)).
+
 ## Calendar
 
 Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks; the cursor starts on

@@ -1,6 +1,7 @@
 pub(crate) mod client;
 pub mod config;
 pub(crate) mod drafts;
+pub mod links;
 pub mod message;
 pub mod priority;
 pub mod smtp;

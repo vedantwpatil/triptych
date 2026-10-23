@@ -6,7 +6,7 @@ use tokio::time::Duration;
 use crate::email::{
     EmailConfig, IdleOutcome, ImapMailSource, MailSource, store as email_store, sync::sync_account,
 };
-use crate::notify;
+use crate::{jobs, notify};
 
 /// How long one IDLE call blocks before giving up and running a sync pass anyway, in case the
 /// server never pushes anything unsolicited (some don't, silently) — comfortably under the
@@ -104,14 +104,27 @@ async fn sync_pass(db: &SqlitePool, config: &EmailConfig) {
             return;
         }
     };
-    let (true, Some(before)) = (report.new > 0 && notify::enabled(), before) else {
+    if report.new == 0 {
         return;
-    };
-    match notify::new_mail_alert(db, &config.account, before, crate::clock::now()).await {
-        Ok(Some(alert)) => {
-            notify::send(&alert).await;
+    }
+    let alerts = notify::enabled();
+    if let (true, Some(before)) = (alerts, before) {
+        match notify::new_mail_alert(db, &config.account, before, crate::clock::now()).await {
+            Ok(Some(alert)) => {
+                notify::send(&alert).await;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("[Mail] new-mail alert failed for '{}': {e}", config.account);
+            }
         }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("[Mail] new-mail alert failed for '{}': {e}", config.account),
+    }
+    match jobs::scan(db, &jobs::Profile::load(), crate::clock::now()).await {
+        Ok(found) => {
+            if let (true, Some(alert)) = (alerts, notify::shortlist_alert(&found)) {
+                notify::send(&alert).await;
+            }
+        }
+        Err(e) => tracing::warn!("[Jobs] scan failed: {e}"),
     }
 }

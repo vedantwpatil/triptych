@@ -828,6 +828,33 @@ def _(c: Ctx):
     c.t.press("q")
 
 
+@scenario("jobs_digest_to_task")
+def _(c: Ctx):
+    body = "\r\n".join([
+        "Hey there! Here is your daily update of tech internships from swelist: ...",
+        "Link to Simplify",
+        "Acme Corp:Software Engineer Intern - Summer 2027",
+        "Globex: Hardware Validation Intern",
+        "See more details by visiting the repo: Summer2026-Internships",
+        "Click here to Unsubscribe",
+    ])
+    c.imap().add("2 New Internships Posted Today", sender="SWE List <noreply@swelist.com>", body=body)
+    log = c.sb.dir / "alerts.log"
+    script = c.sb.dir / "alert.sh"
+    script.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> "' + str(log) + '"\n')
+    script.chmod(0o755)
+    c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"TRIPTYCH_NOTIFY_CMD": str(script)}), 42, 130)
+    c.t.spawn()
+    c.check(c.t.wait_for("Apply: Acme Corp", 20), "the shortlisted posting never reached the list")
+    c.eq([r[0] for r in c.db("select description from tasks")],
+         ["Apply: Acme Corp - Software Engineer Intern - Summer 2027"], "tasks")
+    c.check("Globex" not in c.t.text(), "skipped posting shown")
+    text = log.read_text() if log.exists() else ""
+    c.check("1 job to apply to|Acme Corp - Software Engineer Intern" in text, f"no shortlist alert: {text!r}")
+    c.check("New email" not in text, f"digest alerted as plain mail: {text!r}")
+    c.t.press("q")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):

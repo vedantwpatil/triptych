@@ -242,6 +242,7 @@ async fn add_task_to_db(db: &SqlitePool, nlp: &Arc<NLPParser>, description: &str
             deadline,
             duration_minutes,
             recurrence: parse_result.recurrence,
+            links: None,
         },
     )
     .await?)

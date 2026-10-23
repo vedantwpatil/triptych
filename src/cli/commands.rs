@@ -6,7 +6,7 @@ use crate::canvas;
 use crate::cli::{CanvasCommands, Commands, EmailCommands, NotifyCommands, ScheduleCommands};
 use crate::email::{EmailConfig, store, sync::sync_account};
 use crate::migrations::run_calendar_migration;
-use crate::{notify, urgency};
+use crate::{jobs, notify, urgency};
 
 // One match arm per CLI subcommand - splitting it up would scatter each
 // subcommand's handling across functions without reducing complexity.
@@ -248,6 +248,21 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
             },
         },
 
+        Commands::Jobs { all } => {
+            let new = jobs::scan(&app.db_pool, &jobs::Profile::load(), crate::clock::now())
+                .await
+                .map_err(|e| e.to_string())?;
+            let rows = jobs::list(&app.db_pool, all)
+                .await
+                .map_err(|e| e.to_string())?;
+            if rows.is_empty() {
+                println!("∅ No job postings yet! They come from digest mail: triptych email sync");
+            }
+            for (score, company, role, status, reason) in rows {
+                println!("{score:>3}  {company} - {role}  [{status}] {reason}");
+            }
+            println!("✓ {} new task(s)", new.len());
+        }
         Commands::Canvas(CanvasCommands::Sync) => {
             let Some(url) = canvas::feed_url_from_env() else {
                 eprintln!(

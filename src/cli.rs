@@ -24,6 +24,13 @@ pub enum Commands {
         all: bool,
     },
 
+    /// Triage job-digest mail into `Apply:` tasks and list the postings (`--all` adds skipped ones)
+    Jobs {
+        /// Include postings that were not shortlisted
+        #[arg(short, long)]
+        all: bool,
+    },
+
     /// Mark a task as done
     Done { id: i64 },
 
