@@ -899,6 +899,152 @@ def _(c: Ctx):
     t.press("q")
 
 
+FAKEAPPLY = Path(__file__).resolve().parent / "fakeapply.py"
+
+
+def _apply_tui(c: Ctx, url: str, cmd: bool = True, **env: str) -> Path:
+    """Seeds one `Apply: Acme - Engineer` posting with `url` and opens the TUI with the fake apply
+    sidecar (unless `cmd` is False). Returns the file the sidecar logs every received line to."""
+    c.tui()  # creates the schema
+    c.t.press("q")
+    c.db("insert into tasks(description, completed, item_order, priority, links) "
+         "values ('Apply: Acme - Engineer', 0, 1, 1, ?)", (json.dumps([url]),))
+    c.db("insert into job_postings(email_id, key, company, role, url, score, reason, task_id, status) "
+         "values (0, 'acme|engineer', 'Acme', 'Engineer', ?, 3, '+engineer', 1, 'new')", (url,))
+    log = c.sb.dir / "apply.log"
+    extra = {"FAKEAPPLY_LOG": str(log), **env}
+    if cmd:
+        extra["TRIPTYCH_APPLY_CMD"] = f"{sys.executable} {FAKEAPPLY}"
+    c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env(extra), 42, 130)
+    c.t.spawn()
+    c.check(c.t.wait_for("Apply: Acme", 10), "seeded posting not listed")
+    return log
+
+
+def _sent(log: Path) -> list[str]:
+    """The commands the fake sidecar has received so far."""
+    return [json.loads(l)["cmd"] for l in log.read_text().splitlines()] if log.exists() else []
+
+
+def _await_sent(c: Ctx, log: Path, cmd: str, timeout: float = 5) -> bool:
+    end = time.time() + timeout
+    while time.time() < end and cmd not in _sent(log):
+        c.t.pump(0.3)
+    return c.check(cmd in _sent(log), f"sidecar never received {cmd!r}: {_sent(log)}")
+
+
+def _opener(c: Ctx):
+    """A TRIPTYCH_OPEN_CMD script that records the links it is given; returns it and a reader."""
+    log = c.sb.dir / "opened.log"
+    script = c.sb.dir / "open.sh"
+    script.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "' + str(log) + '"\n')
+    script.chmod(0o755)
+
+    def opened() -> list[str]:
+        """The links seen so far; waits briefly because the app never waits for the opener."""
+        end = time.time() + 5
+        while time.time() < end and not log.exists():
+            c.t.pump(0.2)
+        return log.read_text().splitlines() if log.exists() else []
+
+    return str(script), opened
+
+
+@scenario("apply_review_submit")
+def _(c: Ctx):
+    log = _apply_tui(c, "https://boards.example/acme/1", TRIPTYCH_APPLY_SUBMIT="1")
+    c.t.press("A")
+    c.check(c.t.wait_for("Apply (y: submit", 10), "review popup never opened")
+    c.check("Filled (3): First name, Last name, Email" in c.t.text(), "filled fields not shown")
+    c.eq(c.db("select status from job_postings"), [("filled",)], "status while in review")
+    c.t.press("y")
+    c.check(c.t.wait_for("Applied: Acme - Engineer", 10), "no confirmation after y")
+    c.eq(c.db("select status, applied_at is not null from job_postings"), [("applied", 1)], "posting after submit")
+    c.eq(c.db("select completed from tasks"), [(1,)], "task not ticked off")
+    c.eq(_sent(log)[:2], ["fill", "submit"], "commands the sidecar received")
+    c.t.press("q")
+
+
+@scenario("apply_submit_off_by_default")
+def _(c: Ctx):
+    log = _apply_tui(c, "https://boards.example/acme/1")
+    c.t.press("A")
+    c.check(c.t.wait_for("Apply (y: submit", 10), "review popup never opened")
+    c.check("Submit is off" in c.t.text(), "popup does not say submitting is off")
+    c.t.press("y")
+    c.check(c.t.wait_for("to allow it", 5), "y gave no reason")
+    c.check("submit" not in _sent(log), "submit reached the sidecar while off")
+    c.t.press("n")
+    c.check(c.t.wait_for("Apply (y: submit", 5, gone=True), "n did not close the popup")
+    c.eq(c.db("select status from job_postings"), [("new",)], "status after cancel")
+    _await_sent(c, log, "abort")
+    c.t.press("q")
+
+
+@scenario("apply_unanswered_recheck")
+def _(c: Ctx):
+    log = _apply_tui(c, "https://boards.example/unanswered/1", TRIPTYCH_APPLY_SUBMIT="1")
+    c.t.press("A")
+    c.check(c.t.wait_for("Required, answer in the browser (1)", 10), "open required field not listed")
+    c.check("Why do you want to work here?" in c.t.text(), "field label missing")
+    c.t.press("y")
+    c.check(c.t.wait_for("required field(s) open", 5), "y not refused with a field open")
+    c.check("submit" not in _sent(log), "submit sent with a required field open")
+    Path(str(log) + ".answered").write_text("")
+    c.t.press("r")
+    c.check(c.t.wait_for("No required field left open", 10), "recheck did not clear the field")
+    c.t.press("y")
+    c.check(c.t.wait_for("Applied: Acme", 10), "no submit after the recheck")
+    c.eq(_sent(log)[:3], ["fill", "recheck", "submit"], "commands the sidecar received")
+    c.t.press("q")
+
+
+@scenario("apply_daily_cap")
+def _(c: Ctx):
+    log = _apply_tui(c, "https://boards.example/acme/1", TRIPTYCH_APPLY_MAX_PER_DAY="1")
+    when = (NOW - timedelta(hours=1)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    c.db("insert into job_postings(email_id, key, company, role, score, reason, status, applied_at) "
+         "values (0, 'other|x', 'Other', 'X', 3, '', 'applied', ?)", (when,))
+    c.t.press("A")
+    c.check(c.t.wait_for("Daily limit reached", 5), "cap not reported")
+    c.check(not log.exists(), "the sidecar started past the daily cap")
+    c.eq(c.db("select status from job_postings where company = 'Acme'"), [("new",)], "status after refusal")
+    c.t.press("q")
+
+
+@scenario("apply_unsupported_opens")
+def _(c: Ctx):
+    script, opened = _opener(c)
+    _apply_tui(c, "https://boards.example/unsupported/1", TRIPTYCH_OPEN_CMD=script)
+    c.t.press("A")
+    c.check(c.t.wait_for("not supported", 10), "unsupported site not reported")
+    c.eq(opened(), ["https://boards.example/unsupported/1"], "the link should open instead")
+    c.check(c.t.wait_for("Apply (", 3, gone=True), "popup still open")
+    c.eq(c.db("select status from job_postings"), [("new",)], "status after unsupported")
+    c.t.press("q")
+
+
+@scenario("apply_error_marks_failed")
+def _(c: Ctx):
+    _apply_tui(c, "https://boards.example/error/1")
+    c.t.press("A")
+    c.check(c.t.wait_for("Apply failed: form not found", 10), "error not reported")
+    c.check(c.t.wait_for("Apply (", 3, gone=True), "popup still open")
+    c.eq(c.db("select status from job_postings"), [("failed",)], "status after error")
+    c.t.press("q")
+
+
+@scenario("apply_no_cmd_opens_link")
+def _(c: Ctx):
+    script, opened = _opener(c)
+    log = _apply_tui(c, "https://boards.example/acme/1", cmd=False, TRIPTYCH_OPEN_CMD=script)
+    c.t.press("A")
+    c.eq(opened(), ["https://boards.example/acme/1"], "A without TRIPTYCH_APPLY_CMD should open the link")
+    c.check("Apply (" not in c.t.text(), "popup opened without a sidecar command")
+    c.check(not log.exists(), "a sidecar ran without a command")
+    c.t.press("q")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):

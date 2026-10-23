@@ -149,6 +149,10 @@ where
                 app.apply_triage(done);
             }
 
+            Some(done) = app.apply_rx.recv() => {
+                app.apply_apply_result(done).await;
+            }
+
             // Background syncs write mail and Canvas tasks straight to the DB; pick them up.
             _ = mail_tick.tick(), if refresh_due(&app) => {
                 let changed = match watch.as_mut() {

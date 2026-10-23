@@ -45,8 +45,8 @@ feature file below, then leave one line here under Recent changes.
 
 ## Recent changes
 
-- 2026-10-23 (job triage): SWE List digests scored by rules (Ollama for the undecided) into `Apply:` tasks, `triptych jobs`.
-  [`jobs.md`](./development/jobs.md).
+- 2026-10-23 (job triage, apply): SWE List digests scored (rules, Ollama for the undecided) into `Apply:` tasks;
+  `A` drives a browser sidecar, approval-gated ([`APPLY.md`](./APPLY.md), [`jobs.md`](./development/jobs.md)).
 - 2026-10-23 (new-mail alerts): grouped desktop alert per background mail sync (unread, non-bulk, under 6h).
   [`canvas-notify.md`](./development/canvas-notify.md).
 - 2026-10-22 (docs): the changelog, Known Issue entries and the old archive moved into

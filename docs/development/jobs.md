@@ -7,6 +7,18 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 
 ## Changelog
 
+- 2026-10-23 (apply flow): `A` on an `Apply:` task runs the sidecar named by `TRIPTYCH_APPLY_CMD` (setup:
+  [`../APPLY.md`](../APPLY.md)); unset, or no `job_postings` row, it opens the link like `o`. `src/app/apply.rs`
+  spawns it (`tokio::process`, `kill_on_drop`), talks line-delimited JSON (protocol in the file header) and
+  reports over `apply_rx`, which `run_app` drains into `apply_apply_result`; a key handler never waits on
+  it. `ApplySession` in `App.apply` routes keys to a review popup (`handle_apply_key`: `y`, `r`, `n`/`Esc`).
+  Rust holds the guardrails: `y` needs `TRIPTYCH_APPLY_SUBMIT=1` and no open required field, a rolling-24h
+  cap (`TRIPTYCH_APPLY_MAX_PER_DAY`, 5) counts `job_postings.applied_at`, `applied` postings are refused,
+  and sidecar text is cleaned and capped in `parse_event`. Statuses added: `filling`, `filled`, `applied`
+  (also ticks the task), `failed`; cancel returns to `new`. `unsupported` opens the link. Esc is refused
+  while submitting, since the click may already have happened. `tools/apply/apply.py` (Playwright,
+  Greenhouse/Lever/Ashby) fills only the applicant file's fields and the resume. Tests: `tests/it/apply.rs`,
+  seven `apply_*` suite scenarios against `tests/tui/fakeapply.py`, `tools/apply/test_apply.py`.
 - 2026-10-23 (model rating): a posting whose rule score lands in `score::LLM_BAND` (-1 to 1: no word hit,
   or up and down cancelling) and is not excluded is rated 0-10 by Ollama's main model
   (`NLPParser::job_fit`, title and company only; the prompt carries the profile's `up`/`down` words and
@@ -49,5 +61,13 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
   say for those postings. The real model's quality on titles alone is unmeasured: only the fake has run.
 - Open: the cap drops a good posting for good (its `skipped` row is a tombstone). `triptych jobs --all`
   shows it with `(over cap)`.
+- Open: the Playwright adapters have never run against a live form (no saved Greenhouse, Lever or Ashby
+  page, no Chromium installed here); label matching, the required-field scan and the confirmation text
+  are guesses until `tools/apply/test_apply.py` runs its browser part and one real `A` run is checked.
+- Open: `TRIPTYCH_APPLY_CMD` is split on whitespace (no quoted paths), and killing the TUI abruptly can
+  leave the sidecar's browser open, and so can quitting mid-review (`kill_on_drop` kills the sidecar,
+  not the Chromium it started); `n`/`Esc` closes it cleanly.
+- Open: the daily cap is checked only when `A` is pressed, so it counts finished applications, not the
+  one in review. One session at a time makes that safe.
 - Open: `scan` runs on any sync that stores mail, not only digest mail; it is cheap (a key lookup per
   line) but not free.

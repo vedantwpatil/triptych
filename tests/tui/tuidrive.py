@@ -124,7 +124,7 @@ class Sandbox:
         return (self.dir / "ctl.sock").exists() and request(self.name, {"op": "status"}, quiet=True) is not None
 
     def env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_")) and k not in ("TRIPTYCH_OLLAMA_URL", "CANVAS_ICS_URL")}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("IMAP_", "SMTP_", "TRIPTYCH_APPLY_")) and k not in ("TRIPTYCH_OLLAMA_URL", "CANVAS_ICS_URL", "TRIPTYCH_APPLICANT")}
         env.update(
             DATABASE_URL=f"sqlite:{self.db_path}",
             TRIPTYCH_SOCKET_PATH=str(self.sock_path),

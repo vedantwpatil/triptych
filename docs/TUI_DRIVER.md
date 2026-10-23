@@ -8,7 +8,7 @@ pty so an agent or human can drive and inspect the TUI without a terminal. See
 
 Every session/scenario gets a throwaway sandbox dir with its own `todo.db`, socket and log
 (`DATABASE_URL`, `TRIPTYCH_SOCKET_PATH`, `TRIPTYCH_LOG_PATH`). The driver strips `IMAP_*`/`SMTP_*`,
-sets `TRIPTYCH_EMAIL_ENABLED=false`, `TRIPTYCH_NOTIFY_CMD=true` and `TRIPTYCH_OPEN_CMD=true` (no real alerts or browser; `start --env TRIPTYCH_OPEN_CMD=<script>` records opened links), strips `TRIPTYCH_OLLAMA_URL` and refuses `--env` overrides of the
+sets `TRIPTYCH_EMAIL_ENABLED=false`, `TRIPTYCH_NOTIFY_CMD=true` and `TRIPTYCH_OPEN_CMD=true` (no real alerts or browser; `start --env TRIPTYCH_OPEN_CMD=<script>` records opened links), strips `TRIPTYCH_OLLAMA_URL`, `TRIPTYCH_APPLICANT` and `TRIPTYCH_APPLY_*` (auto-apply stays off unless a scenario sets `TRIPTYCH_APPLY_CMD` to the fake sidecar) and refuses `--env` overrides of the
 three path vars. Email sync and summaries only reach the sandbox's own fakes ([`TUI_FAKES.md`](./TUI_FAKES.md)). Never run the binary by hand against the real `todo.db` / `$TMPDIR/triptych.sock`.
 
 ## tuidrive.py: interactive driver
@@ -37,7 +37,7 @@ characters; `--marks` also lists highlighted spans (the calendar cursor cell is 
 
 ## tui_suite.py: scenario suite
 
-192 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+199 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict] [--real-ollama]

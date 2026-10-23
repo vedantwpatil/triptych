@@ -12,6 +12,7 @@ use sqlx::{
 };
 
 mod allocation;
+mod apply;
 mod calendar;
 mod calendar_todo;
 mod links;
@@ -29,6 +30,7 @@ mod time;
 mod watch;
 
 pub use allocation::*;
+pub use apply::{ApplyEvent, ApplyResult, ApplySession, ApplyStage, parse_event, submit_enabled};
 pub use calendar::*;
 pub use links::{OPEN_CMD_ENV, is_web_url, link_label, parse_links};
 pub use mail::{
@@ -192,6 +194,11 @@ pub struct App {
     pub links: Vec<String>,
     pub links_open: bool,
     pub selected_link: usize,
+    /// The job application in flight (`A` on an `Apply:` task); its popup owns the keys while set.
+    pub apply: Option<ApplySession>,
+    apply_tx: tokio::sync::mpsc::UnboundedSender<ApplyResult>,
+    /// Events from the apply sidecar; drained by `run_app`.
+    pub apply_rx: tokio::sync::mpsc::UnboundedReceiver<ApplyResult>,
     pub emails: Vec<crate::email::EmailMessage>,
     /// `None` shows every configured account's mail merged (the default); `Some(label)` restricts
     /// `refresh_emails` to that one account. Cycled with `A` in the email list.
@@ -266,6 +273,7 @@ impl App {
         let (triage_tx, triage_rx) = tokio::sync::mpsc::unbounded_channel();
         let (folder_list_tx, folder_list_rx) = tokio::sync::mpsc::unbounded_channel();
         let (folder_sync_tx, folder_sync_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (apply_tx, apply_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             db_pool: pool,
@@ -333,6 +341,9 @@ impl App {
             links: Vec::new(),
             links_open: false,
             selected_link: 0,
+            apply: None,
+            apply_tx,
+            apply_rx,
             selected_rule: 0,
             emails: Vec::new(),
             account_filter: None,

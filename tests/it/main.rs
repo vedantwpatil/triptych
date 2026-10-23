@@ -11,6 +11,7 @@
 
 mod allocation_edges;
 mod app;
+mod apply;
 mod calendar_edges;
 mod canvas;
 mod cli;

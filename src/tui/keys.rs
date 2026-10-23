@@ -184,7 +184,12 @@ const fn motion_key(key: KeyEvent) -> MotionKey {
 /// not while one of its forms is open, and not while the drafts list popup is — that one owns `j`/`k`
 /// directly, same as `CalendarInputMode::TaskPicker`).
 fn motions_active(app: &App) -> bool {
-    if app.drafts_open || app.folder_browser_open || app.rules_open || app.links_open {
+    if app.drafts_open
+        || app.folder_browser_open
+        || app.rules_open
+        || app.links_open
+        || app.apply.is_some()
+    {
         return false;
     }
     app.view_mode != ViewMode::Calendar || app.calendar_input_mode == CalendarInputMode::Navigate
@@ -236,6 +241,9 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     if app.links_open {
         return handle_links_key(app, code);
     }
+    if app.apply.is_some() {
+        return handle_apply_key(app, code).await;
+    }
     // Motions never reach here (see `handle_motion`), so any other key but a delete or a `v` toggle
     // ends visual selection; Esc only ends it.
     if app.visual_anchor.is_some() && !matches!(code, KeyCode::Char('v' | 'V' | 'd' | 'D' | 'x')) {
@@ -279,6 +287,7 @@ async fn handle_todo_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         }
         KeyCode::Char('o') => app.open_first_link(),
         KeyCode::Char('O') => app.open_links_popup(),
+        KeyCode::Char('A') => app.start_apply().await,
         KeyCode::Char('/') => app.start_search(),
         KeyCode::Char('n') => app.search_step(true).await,
         KeyCode::Char('N') => app.search_step(false).await,
@@ -301,6 +310,19 @@ fn handle_links_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::Char('k') | KeyCode::Up => app.selected_link = app.selected_link.saturating_sub(1),
         KeyCode::Enter => app.open_selected_link(),
         KeyCode::Char(c @ '1'..='9') => app.open_link_number(usize::from(c as u8 - b'0')),
+        _ => {}
+    }
+    KeyOutcome::Continue
+}
+
+/// Keys while a job application is open (`A` on an `Apply:` task): it owns the keyboard, so even
+/// `q` does nothing. In the review stage `y` submits (guarded in `App::submit_apply`), `r` makes the
+/// sidecar rescan the page, `n`/`Esc` cancel.
+async fn handle_apply_key(app: &mut App, code: KeyCode) -> KeyOutcome {
+    match code {
+        KeyCode::Char('y') => app.submit_apply(),
+        KeyCode::Char('r') => app.recheck_apply(),
+        KeyCode::Char('n') | KeyCode::Esc => app.cancel_apply().await,
         _ => {}
     }
     KeyOutcome::Continue

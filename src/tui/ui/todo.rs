@@ -1,7 +1,9 @@
 //! The todo list view.
 
 use super::centered_rect;
-use crate::app::{App, InputMode, cursor_col, link_label, parse_links};
+use crate::app::{
+    App, ApplySession, ApplyStage, InputMode, cursor_col, link_label, parse_links, submit_enabled,
+};
 use crate::canvas::split_course;
 use crate::urgency;
 use chrono::NaiveTime;
@@ -10,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 /// Todo badge style by effective priority.
@@ -247,6 +249,72 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
     if app.links_open {
         render_links_popup(f, app);
     }
+    if let Some(session) = &app.apply {
+        render_apply_popup(f, session);
+    }
+}
+
+/// The job application popup (`A`): progress while the sidecar works, then the review to approve.
+fn render_apply_popup(f: &mut Frame, session: &ApplySession) {
+    let area = centered_rect(80, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines = vec![Line::from(Span::styled(
+        session.label.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    let hint = match &session.stage {
+        ApplyStage::Working => {
+            lines.push(Line::from("Working in the browser..."));
+            "Esc: cancel"
+        }
+        ApplyStage::Submitting => {
+            lines.push(Line::from("Submitting..."));
+            "wait"
+        }
+        ApplyStage::Review {
+            ats,
+            filled,
+            unanswered,
+            screenshot,
+        } => {
+            lines.push(Line::from(format!("Site: {ats}")));
+            lines.push(Line::from(format!(
+                "Filled ({}): {}",
+                filled.len(),
+                filled.join(", ")
+            )));
+            if unanswered.is_empty() {
+                lines.push(Line::styled(
+                    "No required field left open",
+                    Style::default().fg(Color::Green),
+                ));
+            } else {
+                lines.push(Line::styled(
+                    format!("Required, answer in the browser ({}):", unanswered.len()),
+                    Style::default().fg(Color::Yellow),
+                ));
+                lines.extend(unanswered.iter().map(|q| Line::from(format!("  ▲ {q}"))));
+            }
+            if let Some(path) = screenshot {
+                lines.push(Line::from(format!("Screenshot: {path}")));
+            }
+            if !submit_enabled() {
+                lines.push(Line::styled(
+                    "Submit is off: set TRIPTYCH_APPLY_SUBMIT=1",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            "y: submit, r: recheck, n: cancel"
+        }
+    };
+    let popup = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Apply ({hint})"))
+            .style(Style::default().bg(Color::Black)),
+    );
+    f.render_widget(popup, area);
 }
 
 /// The links popup (`O`): one numbered row per link of the selected task.

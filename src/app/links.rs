@@ -78,7 +78,7 @@ impl App {
         self.status_message = Some((message, Instant::now()));
     }
 
-    fn open_link(&mut self, url: &str) {
+    pub(super) fn open_link(&mut self, url: &str) {
         let message = match open_url(url) {
             Ok(()) => format!("Opened {}", link_label(url, 60)),
             Err(e) => format!("Error: cannot open link: {e}"),

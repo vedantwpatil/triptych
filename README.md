@@ -150,7 +150,7 @@ Import with `triptych schedule import schedule.toml`.
 - Canvas assignment sync (`CANVAS_ICS_URL`)
 - Deadline alerts, also with the TUI closed (`triptych notify install`, macOS)
 - New-mail alerts while the TUI is open (unread, non-bulk mail)
-- Job-digest triage: SWE List postings scored against your profile become `Apply:` tasks (`triptych jobs`)
+- Job-digest triage: SWE List postings scored against your profile become `Apply:` tasks (`triptych jobs`); `A` fills the application in a browser and submits only after you approve (`docs/APPLY.md`)
 - Recurring tasks: `water plants every friday`, finishing one adds the next (`docs/USAGE.md`)
 - To-do panel inside the calendar (`T`): schedule or complete tasks without leaving the grid
 - Email: multi-account IMAP with IDLE, SMTP reply/forward, archive/delete/snooze, Focused/Other

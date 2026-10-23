@@ -102,6 +102,11 @@ down it keeps its rule score.
 (`--all`/`-a` adds the skipped ones with the words that decided them). Tune the profile with a TOML file
 (`TRIPTYCH_JOBS_PROFILE`, see [`SETUP.md`](./SETUP.md)).
 
+`A` on an `Apply:` task fills the application in a browser and shows what it filled and which required
+fields are still empty; `y` submits, `r` rechecks after you answer them, `n`/`Esc` cancels. Needs
+`TRIPTYCH_APPLY_CMD`, and `y` needs `TRIPTYCH_APPLY_SUBMIT=1` ([`APPLY.md`](./APPLY.md)). Without the
+command, `A` opens the link like `o`.
+
 ## Calendar
 
 Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks; the cursor starts on

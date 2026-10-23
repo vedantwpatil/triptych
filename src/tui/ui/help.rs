@@ -15,6 +15,7 @@ Select    v range (j/k extend, d delete, Esc cancel)
 Plan      s auto-schedule
 Find      / search  n/N next/previous
 Links     o open first  O list (Enter or 1-9 opens)
+Apply     A fill a job application (y submit, r recheck, n cancel)
 Views     c calendar  m email  Tab/Shift-Tab cycle  q quit";
 
 const CALENDAR: &str = "\

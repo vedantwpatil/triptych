@@ -80,3 +80,14 @@ In a scenario: `ol = c.sb.ollama()` (`down=True` for a dead port), `ol.set_mode(
 gets summarized. A background triage pass runs after every mail sync (`apply_mail_sync`/`apply_folder_sync`),
 so any scenario with `c.sb.ollama()` active and mail synced will see triage requests logged too —
 account for that in request-count assertions rather than assuming only summary/parse traffic.
+
+## Fake apply sidecar
+
+`tests/tui/fakeapply.py` speaks the auto-apply protocol (header of [`src/app/apply.rs`](../src/app/apply.rs))
+without a browser. It is not a server: a scenario sets `TRIPTYCH_APPLY_CMD="<python> <path>/fakeapply.py"`
+(the command is split on spaces, so no spaces in the path) and `FAKEAPPLY_LOG`, and the app spawns it. The
+posting URL picks the behaviour: `unsupported` and `error` answer that event, `unanswered` leaves one
+required field open until `<FAKEAPPLY_LOG>.answered` exists (`recheck` re-reads it), anything else fills
+cleanly. Every received line is appended to `FAKEAPPLY_LOG`, so a scenario asserts what the app sent (a
+refused `submit` never arrives). In `tui_suite.py`, `_apply_tui(c, url, **env)` seeds a task and posting,
+starts the TUI with the fake and returns the log path; `_sent(log)` lists the commands received.

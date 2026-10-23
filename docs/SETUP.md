@@ -13,8 +13,7 @@ cargo build --release          # binary: target/release/triptych
 ollama pull qwen2.5:7b         # optional: LLM fallback for natural-language input
 ```
 
-Without Ollama, task input still works through the regex parser; only fuzzy phrases lose parsing.
-`cargo run` works everywhere below in place of `triptych`.
+Without Ollama, task input still works through the regex parser; only fuzzy phrases lose parsing. `cargo run` works everywhere below in place of `triptych`.
 
 ## First run
 
@@ -37,6 +36,7 @@ Every variable is optional.
 | `TRIPTYCH_NOTIFY` | `0`/`false`/`off`/`no` turns deadline and new-mail alerts off | on |
 | `TRIPTYCH_NOTIFY_CMD` | Program run as `cmd <title> <body>` instead of the system notifier | `osascript` (macOS), `notify-send` (Linux) |
 | `TRIPTYCH_JOBS_PROFILE` | TOML file overriding the job-digest profile: `senders`, `up`, `down`, `exclude` (word lists), `shortlist_at`, `max_age_days`, `max_per_digest`; omitted fields keep the defaults | built-in resume profile |
+| `TRIPTYCH_APPLY_CMD`, `TRIPTYCH_APPLICANT`, `TRIPTYCH_APPLY_SUBMIT`, `TRIPTYCH_APPLY_MAX_PER_DAY` | Auto-apply browser flow: [`APPLY.md`](./APPLY.md) | unset (off) |
 | `TRIPTYCH_NOW` | RFC 3339 instant that freezes the app's clock (tests only; leave unset) | system clock |
 | `TRIPTYCH_OPEN_CMD` | Program run as `cmd <url>` to open a task link | `open` (macOS), `xdg-open` (Linux) |
 | `TRIPTYCH_EMAIL_ENABLED` | `true` starts background mail sync | off |
