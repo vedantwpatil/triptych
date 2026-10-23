@@ -6,6 +6,7 @@ use triptych::email::links::{Link, anchors, from_json, to_json};
 use triptych::jobs::digest::{Posting, parse_digest};
 use triptych::jobs::score::{Profile, score};
 use triptych::jobs::{list, scan};
+use triptych::nlp::ollama_client::JobFit;
 use triptych::notify::{new_mail_alert, shortlist_alert};
 
 const SENDER: &str = "noreply@swelist.com";
@@ -59,6 +60,46 @@ fn posting(role: &str) -> Posting {
         role: role.into(),
         url: None,
     }
+}
+
+#[test]
+fn only_postings_the_rules_cannot_decide_go_to_the_model() {
+    let p = Profile::default();
+    let needs = |role: &str| score(&posting(role), &p).needs_llm();
+    assert!(needs("Associate Engineer"), "no word hit");
+    assert!(needs("Software Test Engineer"), "up and down cancel out");
+    assert!(!needs("Software Engineer Intern"), "clear fit");
+    assert!(!needs("Hardware Validation Intern"), "clear miss");
+    assert!(
+        !needs("Associate PhD Intern"),
+        "excluded, however it scores"
+    );
+}
+
+#[test]
+fn a_rating_moves_the_score_by_its_distance_from_five() {
+    let p = Profile::default();
+    let rate = |role: &str, fit: i32| {
+        let mut v = score(&posting(role), &p);
+        v.apply_fit(&JobFit {
+            fit,
+            reason: "infra work".into(),
+        });
+        v
+    };
+    let good = rate("Associate Engineer", 8);
+    assert_eq!((good.score, good.reason.as_str()), (3, "llm:8 infra work"));
+    assert!(good.shortlisted(&p));
+    assert!(
+        !rate("Associate Engineer", 5).shortlisted(&p),
+        "5 is neutral"
+    );
+    assert!(!rate("Associate Engineer", 2).shortlisted(&p));
+    // The rule evidence survives: a -1 posting rated 6 only reaches 0.
+    let kept = rate("Software Test Engineer", 6);
+    assert_eq!(kept.score, 0);
+    assert!(!kept.shortlisted(&p));
+    assert_eq!(kept.reason, "+software -test llm:6 infra work");
 }
 
 async fn seed(
@@ -170,7 +211,7 @@ async fn scan_makes_tasks_for_good_fits_once_and_never_recreates_deleted_ones() 
     }]);
     seed(&pool, SENDER, &digest(&POSTINGS), links.as_deref(), now).await;
 
-    let made = scan(&pool, &Profile::default(), now).await.unwrap();
+    let made = scan(&pool, &Profile::default(), now, None).await.unwrap();
     assert_eq!(
         made,
         [
@@ -199,7 +240,7 @@ async fn scan_makes_tasks_for_good_fits_once_and_never_recreates_deleted_ones() 
     assert_eq!(all[4].1, "Globex", "worst last");
 
     assert!(
-        scan(&pool, &Profile::default(), now)
+        scan(&pool, &Profile::default(), now, None)
             .await
             .unwrap()
             .is_empty()
@@ -209,7 +250,7 @@ async fn scan_makes_tasks_for_good_fits_once_and_never_recreates_deleted_ones() 
         .await
         .unwrap();
     assert!(
-        scan(&pool, &Profile::default(), now)
+        scan(&pool, &Profile::default(), now, None)
             .await
             .unwrap()
             .is_empty()
@@ -247,7 +288,7 @@ async fn scan_caps_tasks_per_digest_and_ignores_stale_digests_and_other_senders(
     )
     .await;
 
-    let made = scan(&pool, &capped, now).await.unwrap();
+    let made = scan(&pool, &capped, now, None).await.unwrap();
     assert_eq!(made, ["Acme Corp - Software Engineer Intern - Summer 2027"]);
     let over: Vec<(String, String)> =
         sqlx::query_as("SELECT status, reason FROM job_postings WHERE company = 'Initech'")

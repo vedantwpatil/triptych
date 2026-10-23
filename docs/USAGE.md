@@ -94,7 +94,9 @@ Daily digest mail from `noreply@swelist.com` is scored against a resume-derived 
 raise or lower a fit, and excludes such as PhD or "Sophomore Only"). Each good fit becomes a todo task
 `Apply: Company - Role` with the apply link when the mail has one (`o` opens it), and one notification
 lists the new ones. At most 10 tasks per digest; digests older than 14 days are ignored. A posting is
-scored once, and a task you delete stays deleted.
+scored once, and a task you delete stays deleted. A title the rules cannot call (no matching word, or
+good and bad words cancelling) is rated 0-10 by your local Ollama model, up to 30 per scan; with Ollama
+down it keeps its rule score.
 
 `triptych jobs` runs the same scan on mail already synced and lists the postings, best first
 (`--all`/`-a` adds the skipped ones with the words that decided them). Tune the profile with a TOML file

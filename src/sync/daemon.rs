@@ -35,7 +35,7 @@ impl SyncDaemon {
         if config.cache_preload_enabled {
             let shutdown_rx = shutdown_tx.subscribe();
             let db_clone = db.clone();
-            let nlp = nlp_parser;
+            let nlp = nlp_parser.clone();
 
             tasks.push(tokio::spawn(async move {
                 cache::preload_cache(db_clone, nlp, shutdown_rx).await
@@ -81,7 +81,7 @@ impl SyncDaemon {
             let db_clone = db;
 
             tasks.push(tokio::spawn(async move {
-                mail::mail_sync_worker(db_clone, shutdown_rx).await
+                mail::mail_sync_worker(db_clone, nlp_parser, shutdown_rx).await
             }));
         }
 

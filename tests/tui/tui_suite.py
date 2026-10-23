@@ -855,6 +855,50 @@ def _(c: Ctx):
     c.t.press("q")
 
 
+@scenario("jobs_llm_band")
+def _(c: Ctx):
+    ol = c.sb.ollama()
+    body = "\r\n".join([
+        "Hey there! Here is your daily update of tech internships from swelist: ...",
+        "Link to Simplify",
+        "Acme Corp: Associate Engineer Intern",
+        "Globex: Associate Technician Intern",
+        "Initech: Hardware Validation Intern",
+        "See more details by visiting the repo: Summer2026-Internships",
+    ])
+    c.imap().add("3 New Internships Posted Today", sender="SWE List <noreply@swelist.com>", body=body)
+    t = c.tui()
+    c.check(t.wait_for("Apply: Acme Corp", 20), "the model-approved posting never reached the list")
+    c.eq([r[0] for r in c.db("select description from tasks")],
+         ["Apply: Acme Corp - Associate Engineer Intern"], "tasks")
+    c.eq(len(ol.job_requests()), 2, "only the two undecided postings go to the model")
+    why = dict(c.db("select company, reason from job_postings"))
+    c.check("llm:8 fake high" in why["Acme Corp"], f"Acme reason: {why}")
+    c.check("llm:2 fake low" in why["Globex"], f"Globex reason: {why}")
+    c.check("llm:" not in why["Initech"], f"a clear miss was rated: {why}")
+    t.press("q")
+
+
+@scenario("jobs_llm_down_keeps_rules")
+def _(c: Ctx):
+    c.sb.ollama(down=True)
+    body = "\r\n".join([
+        "Hey there! Here is your daily update of tech internships from swelist: ...",
+        "Link to Simplify",
+        "Acme Corp: Associate Engineer Intern",
+        "Initech: Software Engineer Intern",
+        "See more details by visiting the repo: Summer2026-Internships",
+    ])
+    c.imap().add("2 New Internships Posted Today", sender="SWE List <noreply@swelist.com>", body=body)
+    t = c.tui()
+    c.check(t.wait_for("Apply: Initech", 20), "the rule-approved posting never reached the list")
+    c.eq([r[0] for r in c.db("select description from tasks")],
+         ["Apply: Initech - Software Engineer Intern"], "undecided posting needs the model")
+    why = dict(c.db("select company, reason from job_postings"))
+    c.check("llm:" not in why["Acme Corp"], f"rated without a model: {why}")
+    t.press("q")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):

@@ -38,14 +38,14 @@ feature file below, then leave one line here under Recent changes.
 | [`email-triage.md`](./development/email-triage.md) | LLM triage and summaries, rules, categories, filters, search, email to task |
 | [`canvas-notify.md`](./development/canvas-notify.md) | Canvas assignment sync, deadline alerts, LaunchAgent |
 | [`cli-daemon.md`](./development/cli-daemon.md) | One-shot commands, Unix-socket daemon, database path |
-| [`jobs.md`](./development/jobs.md) | Job-digest triage: parsing, rule scoring, `Apply:` tasks |
+| [`jobs.md`](./development/jobs.md) | Job-digest triage: parsing, rule and model scoring, `Apply:` tasks |
 | [`tui-ux.md`](./development/tui-ux.md) | Key help, confirmations, undo, 80x24 layout, reload tick |
 | [`testing.md`](./development/testing.md) | Test suites, pty driver, fakes, mutation survivors, coverage |
 | [`code-health.md`](./development/code-health.md) | Module splits, lint and idiom passes, audits, docs refreshes |
 
 ## Recent changes
 
-- 2026-10-23 (job triage): SWE List digests scored by rules into `Apply:` tasks, `triptych jobs`.
+- 2026-10-23 (job triage): SWE List digests scored by rules (Ollama for the undecided) into `Apply:` tasks, `triptych jobs`.
   [`jobs.md`](./development/jobs.md).
 - 2026-10-23 (new-mail alerts): grouped desktop alert per background mail sync (unread, non-bulk, under 6h).
   [`canvas-notify.md`](./development/canvas-notify.md).

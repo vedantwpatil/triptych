@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -6,6 +8,7 @@ use tokio::time::Duration;
 use crate::email::{
     EmailConfig, IdleOutcome, ImapMailSource, MailSource, store as email_store, sync::sync_account,
 };
+use crate::nlp::NLPParser;
 use crate::{jobs, notify};
 
 /// How long one IDLE call blocks before giving up and running a sync pass anyway, in case the
@@ -21,6 +24,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// would delay every other account's sync just as long.
 pub async fn mail_sync_worker(
     db: SqlitePool,
+    nlp: Arc<NLPParser>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
     let configs = EmailConfig::all_from_env();
@@ -37,6 +41,7 @@ pub async fn mail_sync_worker(
             tokio::spawn(account_sync_loop(
                 db.clone(),
                 config,
+                nlp.clone(),
                 shutdown_rx.resubscribe(),
             ))
         })
@@ -60,11 +65,12 @@ pub async fn mail_sync_worker(
 async fn account_sync_loop(
     db: SqlitePool,
     config: EmailConfig,
+    nlp: Arc<NLPParser>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
     let source = ImapMailSource::new(config.clone());
 
-    sync_pass(&db, &config).await;
+    sync_pass(&db, &config, &nlp).await;
 
     loop {
         tokio::select! {
@@ -86,16 +92,16 @@ async fn account_sync_loop(
                     }
                 }
 
-                sync_pass(&db, &config).await;
+                sync_pass(&db, &config, &nlp).await;
             }
         }
     }
 }
 
-/// One ambient sync pass, then a desktop alert for the unread mail it stored. `include_archive:
-/// false` — see `sync_account`'s doc for why the background worker must never sweep the archive
-/// folder on its own.
-async fn sync_pass(db: &SqlitePool, config: &EmailConfig) {
+/// One ambient sync pass, then a desktop alert for the unread mail it stored and a job-digest scan
+/// (`nlp` rates the postings the rules cannot decide). `include_archive: false` — see
+/// `sync_account`'s doc for why the background worker must never sweep the archive folder on its own.
+async fn sync_pass(db: &SqlitePool, config: &EmailConfig, nlp: &NLPParser) {
     let before = email_store::max_id(db).await.ok();
     let report = match sync_account(db, config, false).await {
         Ok(report) => report,
@@ -119,7 +125,7 @@ async fn sync_pass(db: &SqlitePool, config: &EmailConfig) {
             }
         }
     }
-    match jobs::scan(db, &jobs::Profile::load(), crate::clock::now()).await {
+    match jobs::scan(db, &jobs::Profile::load(), crate::clock::now(), Some(nlp)).await {
         Ok(found) => {
             if let (true, Some(alert)) = (alerts, notify::shortlist_alert(&found)) {
                 notify::send(&alert).await;

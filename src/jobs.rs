@@ -10,15 +10,57 @@ use sqlx::SqlitePool;
 
 use crate::app::{NewTask, insert_task_row};
 use crate::email::links;
+use crate::nlp::NLPParser;
 
 pub mod digest;
 pub mod score;
 
-use digest::parse_digest;
+use digest::{Posting, parse_digest};
 pub use score::Profile;
+use score::Verdict;
+
+/// Most model ratings one scan asks for; later postings keep their rule score.
+const LLM_CAP: usize = 30;
+
+/// The model's part in one scan: the client (gone after its first failure), what is left of the
+/// budget, and the candidate words the prompt carries.
+struct Rater<'a> {
+    nlp: Option<&'a NLPParser>,
+    budget: usize,
+    likes: String,
+    dislikes: String,
+}
+
+impl Rater<'_> {
+    /// Rates the postings the rules cannot decide, best effort. Ollama being down must not stop the
+    /// scan, so the first failure ends the model's part and the rest keep their rule score.
+    async fn rate(&mut self, fresh: &mut [(Posting, Verdict)]) {
+        for (posting, verdict) in fresh.iter_mut().filter(|(_, v)| v.needs_llm()) {
+            let Some(model) = self.nlp else { return };
+            if self.budget == 0 {
+                return;
+            }
+            self.budget -= 1;
+            match model
+                .job_fit(&posting.company, &posting.role, &self.likes, &self.dislikes)
+                .await
+            {
+                Ok(fit) => verdict.apply_fit(&fit),
+                Err(e) => {
+                    // shortcut: no retry, so a posting stored unrated keeps its rule score for good
+                    tracing::warn!("[Jobs] model rating failed, rules only from here: {e}");
+                    self.nlp = None;
+                }
+            }
+        }
+    }
+}
 
 /// Scans recent digests for postings not seen before, stores every one, and makes a task for each
 /// good fit. Returns `Company - Role` for the tasks created.
+///
+/// Postings the rules cannot decide ([`score::LLM_BAND`]) are rated by `nlp` when given. The first
+/// failed rating (Ollama down) turns the model off for the rest of the scan.
 ///
 /// # Errors
 ///
@@ -27,7 +69,14 @@ pub async fn scan(
     pool: &SqlitePool,
     profile: &Profile,
     now: DateTime<Utc>,
+    nlp: Option<&NLPParser>,
 ) -> anyhow::Result<Vec<String>> {
+    let mut rater = Rater {
+        nlp,
+        budget: LLM_CAP,
+        likes: profile.up.join(", "),
+        dislikes: profile.down.join(", "),
+    };
     let cutoff = now - Duration::days(profile.max_age_days);
     let mut known: HashSet<String> = sqlx::query_scalar("SELECT key FROM job_postings")
         .fetch_all(pool)
@@ -57,6 +106,7 @@ pub async fn scan(
                     (p, verdict)
                 })
                 .collect();
+            rater.rate(&mut fresh).await;
             // Best first, so the cap keeps the strongest; the sort is stable, so ties stay in body order.
             fresh.sort_by_key(|(_, v)| Reverse(v.score));
 

@@ -1,4 +1,4 @@
-use crate::nlp::ollama_client::{OllamaClient, OllamaError, bulk_mail_heuristic};
+use crate::nlp::ollama_client::{JobFit, OllamaClient, OllamaError, bulk_mail_heuristic};
 use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use crate::recurrence;
@@ -308,6 +308,25 @@ impl NLPParser {
             return Ok(focused);
         }
         self.triage_client.triage(subject, snippet).await
+    }
+
+    /// Rates a job posting 0-10 for the candidate (see [`OllamaClient::job_fit`]). Uses the main
+    /// model, not `triage_client`: judging a title needs `parse`'s accuracy more than triage does.
+    /// Same not-sticky-availability shape as [`Self::summarize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request times out or fails, or the model returns unusable output.
+    pub async fn job_fit(
+        &self,
+        company: &str,
+        role: &str,
+        likes: &str,
+        dislikes: &str,
+    ) -> Result<JobFit, OllamaError> {
+        self.ollama_client
+            .job_fit(company, role, likes, dislikes)
+            .await
     }
 
     pub const fn is_ollama_available(&self) -> bool {

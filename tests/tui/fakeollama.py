@@ -5,8 +5,9 @@ Serves what src/nlp/ollama_client.rs calls: GET /api/tags, GET /api/ps (the mode
 POST /api/generate. A prompt that asks for a summary gets "Fake summary of: <subject>"; a triage
 prompt (Focused Inbox classification) gets `{"focused": true}` unless the subject or snippet
 contains a bulk-mail keyword ("newsletter", "receipt", "notification", "unsubscribe"), which gets
-`{"focused": false}` instead, so a scenario can control the split just by wording the subject; an
-empty prompt (the model warm-up) gets an empty reply; anything else (a task parse) gets `{}`, which
+`{"focused": false}` instead, so a scenario can control the split just by wording the subject; a
+job-fit prompt (digest posting rating) gets `{"fit": 8, ...}` unless the fenced `<posting>` contains
+"technician", which gets `{"fit": 2, ...}`; an empty prompt (the model warm-up) gets an empty reply; anything else (a task parse) gets `{}`, which
 the parser rejects, so it falls back to regex. The mode file (`Ollama.set_mode`) can switch generate
 to HTTP 500 while running. Every request is appended to DIR/requests.log as one JSON line.
 
@@ -50,6 +51,9 @@ class Ollama:
     def triage_requests(self) -> list[dict]:
         return [r for r in self.requests() if r["kind"] == "triage"]
 
+    def job_requests(self) -> list[dict]:
+        return [r for r in self.requests() if r["kind"] == "job"]
+
 
 _BULK_KEYWORDS = ("newsletter", "receipt", "notification", "unsubscribe")
 
@@ -61,6 +65,8 @@ def _kind(prompt: str) -> str:
         return "summary"
     if prompt.startswith("Classify the email"):
         return "triage"
+    if prompt.startswith("Rate from 0 (poor) to 10"):
+        return "job"
     return "parse"
 
 
@@ -111,6 +117,12 @@ def make_handler(d: Path):
                 haystack = (fenced.group(1) if fenced else prompt).lower()
                 focused = not any(kw in haystack for kw in _BULK_KEYWORDS)
                 self._send(200, {"response": json.dumps({"focused": focused})})
+            elif kind == "job":
+                # The instructions name example roles too, so match only the fenced posting.
+                fenced = re.search(r"<posting>\n(.*)</posting>", prompt, re.S)
+                low = "technician" in (fenced.group(1) if fenced else "").lower()
+                reply = {"fit": 2 if low else 8, "reason": "fake low" if low else "fake high"}
+                self._send(200, {"response": json.dumps(reply)})
             elif kind == "warm":
                 self._send(200, {"response": "", "done": True})
             else:

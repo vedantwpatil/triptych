@@ -38,6 +38,30 @@ fn unparseable_timestamp_is_dropped() {
 }
 
 #[test]
+fn job_fit_reply_is_clamped_and_cleaned() {
+    let fit = |json: &str| OllamaClient::parse_job_fit(json);
+    let noisy = fit(r#"{"fit": 11, "reason": "  great\n\u001b[31m match  "}"#).unwrap();
+    assert_eq!(noisy.fit, 10);
+    assert_eq!(noisy.reason, "great [31m match", "one line, no escape byte");
+    assert_eq!(fit(r#"{"fit": -3}"#).unwrap().fit, 0);
+    assert_eq!(fit(r#"{"fit": 4}"#).unwrap().reason, "");
+    let long = format!(r#"{{"fit": 5, "reason": "{}"}}"#, "x".repeat(300));
+    assert_eq!(fit(&long).unwrap().reason.chars().count(), 80);
+    for bad in [r#"{"fit": "high"}"#, r#"{"fit": 7.5}"#, r"{}", "not json"] {
+        assert!(fit(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn job_prompt_fences_the_posting_as_untrusted_data() {
+    let prompt = OllamaClient::build_job_prompt("Acme", "Backend Intern", "backend, ml", "sales");
+    assert!(prompt.ends_with("<posting>\nAcme: Backend Intern\n</posting>"));
+    assert!(prompt.contains("backend, ml") && prompt.contains("sales"));
+    assert!(prompt.contains("untrusted data"));
+    assert!(prompt.contains(r#"{"fit": 5, "reason": "a few words"}"#));
+}
+
+#[test]
 fn llm_task_keeps_a_deadline_without_offset() {
     let json = r#"{"type":"task","title":"Finish the proposal","datetime":null,"tags":[],"priority":"medium","deadline":"2026-10-31T23:59:59","duration_minutes":180}"#;
     let Ok(ParsedItem::Task(task)) = OllamaClient::parse_response(json) else {

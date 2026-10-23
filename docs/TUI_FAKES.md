@@ -65,8 +65,9 @@ reaches it through `TRIPTYCH_OLLAMA_URL`, which `Sandbox.env()` sets only when t
 Summary prompts answer `Fake summary of: <subject>`; triage prompts (Focused Inbox classification,
 Slice 17) answer `{"focused": true}` unless the subject or snippet contains a bulk-mail keyword
 ("newsletter", "receipt", "notification", "unsubscribe"), which flips it to `false` — word a
-scenario's subject to control which side of the split a message lands on; an empty prompt is a
-warm-up, anything else gets `{}`.
+scenario's subject to control which side of the split a message lands on; a job-fit prompt (digest
+posting rating) answers `{"fit": 8, ...}` unless the fenced `<posting>` contains "technician" (`fit` 2);
+an empty prompt is a warm-up, anything else gets `{}`.
 
 ```
 python3 tests/tui/tuidrive.py start --ollama        # session with a fake Ollama
@@ -75,7 +76,7 @@ python3 tests/tui/tuidrive.py ollama log            # requests received
 ```
 
 In a scenario: `ol = c.sb.ollama()` (`down=True` for a dead port), `ol.set_mode(..)`, `ol.summary_requests()`,
-`ol.triage_requests()`. Start it before `c.tui()`, and in any scenario that opens a long email: its body
+`ol.triage_requests()`, `ol.job_requests()`. Start it before `c.tui()`, and in any scenario that opens a long email: its body
 gets summarized. A background triage pass runs after every mail sync (`apply_mail_sync`/`apply_folder_sync`),
 so any scenario with `c.sb.ollama()` active and mail synced will see triage requests logged too —
 account for that in request-count assertions rather than assuming only summary/parse traffic.

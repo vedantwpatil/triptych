@@ -249,9 +249,15 @@ pub async fn handle_cli_command(app: &mut App, command: Commands) -> Result<(), 
         },
 
         Commands::Jobs { all } => {
-            let new = jobs::scan(&app.db_pool, &jobs::Profile::load(), crate::clock::now())
-                .await
-                .map_err(|e| e.to_string())?;
+            let nlp = app.nlp_parser_ref();
+            let new = jobs::scan(
+                &app.db_pool,
+                &jobs::Profile::load(),
+                crate::clock::now(),
+                Some(&nlp),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             let rows = jobs::list(&app.db_pool, all)
                 .await
                 .map_err(|e| e.to_string())?;

@@ -1,9 +1,12 @@
 //! Rule scoring of a posting against the resume-derived [`Profile`]. Roles are matched as whole
 //! words, so `ml` does not hit `html`.
 
+use std::ops::RangeInclusive;
+
 use serde::Deserialize;
 
 use super::digest::Posting;
+use crate::nlp::ollama_client::JobFit;
 
 /// What counts as a fit. The defaults come from the resume; `TRIPTYCH_JOBS_PROFILE` points at a TOML
 /// file that overrides any field (omitted fields keep the default).
@@ -110,10 +113,29 @@ pub struct Verdict {
     pub reason: String,
 }
 
+/// Rule scores in this range are too close to call (no word hit, or up and down cancelling), so
+/// the model gets a say.
+pub const LLM_BAND: RangeInclusive<i32> = -1..=1;
+
 impl Verdict {
     #[must_use]
     pub const fn shortlisted(&self, profile: &Profile) -> bool {
         !self.hard_no && self.score >= profile.shortlist_at
+    }
+
+    /// True when the rules cannot decide: not excluded, and scored inside [`LLM_BAND`].
+    #[must_use]
+    pub fn needs_llm(&self) -> bool {
+        !self.hard_no && LLM_BAND.contains(&self.score)
+    }
+
+    /// Folds in a model rating. `fit` (0-10) moves the score by `fit - 5`: 5 changes nothing and
+    /// the rule evidence still counts, so one wrong rating cannot override a clear rule hit.
+    pub fn apply_fit(&mut self, fit: &JobFit) {
+        self.score += fit.fit - 5;
+        self.reason = format!("{} llm:{} {}", self.reason, fit.fit, fit.reason)
+            .trim()
+            .to_string();
     }
 }
 
