@@ -82,6 +82,12 @@ With the TUI closed, `triptych notify install` (macOS) keeps them coming through
 [`SETUP.md`](./SETUP.md#desktop-alerts). `triptych notify check` sends whatever is due right now and exits.
 Canvas deadlines only refresh while the TUI runs (or after `triptych canvas sync`).
 
+## New-mail alerts
+
+While the TUI is open, each background mail sync that stores unread mail posts one grouped notification
+(sender and subject, three listed, then `+N more`). Bulk mail (newsletters, receipts, ...) and mail more
+than 6 hours old are skipped, so a first sync never floods. Same switch and notifier as deadline alerts.
+
 ## Calendar
 
 Press `c`. A 7-day grid (7am-11pm) shows schedule blocks and scheduled tasks; the cursor starts on

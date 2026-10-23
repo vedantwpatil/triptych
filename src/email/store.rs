@@ -168,6 +168,46 @@ pub async fn get_recent(pool: &SqlitePool, limit: i64) -> Result<Vec<EmailMessag
     Ok(emails)
 }
 
+/// An unread message, reduced to what a new-mail alert needs.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UnreadMail {
+    pub from_name: Option<String>,
+    pub from_addr: String,
+    pub subject: String,
+    pub snippet: Option<String>,
+    pub date_utc: DateTime<Utc>,
+}
+
+/// The highest stored email id, 0 when there is none. Ids only grow (`AUTOINCREMENT`), so mail stored
+/// after this call has a greater id: [`unread_after`] uses it to find what one sync pass added.
+pub async fn max_id(pool: &SqlitePool) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM email_messages")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+/// Unread mail of `account` stored after `after_id` (see [`max_id`]), newest first.
+pub async fn unread_after(
+    pool: &SqlitePool,
+    account: &str,
+    after_id: i64,
+) -> Result<Vec<UnreadMail>> {
+    Ok(sqlx::query_as(
+        r"
+        SELECT from_name, from_addr, subject, snippet, date_utc
+        FROM email_messages
+        WHERE id > ? AND account = ? AND is_read = 0
+        ORDER BY date_utc DESC
+        ",
+    )
+    .bind(after_id)
+    .bind(account)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// One email's attachment metadata (no bytes — see `MailSource::fetch_attachments`), in
 /// `part_index` order. Populated into `App`'s per-email cache when its detail popup opens
 /// (mirrors `get_body`'s on-demand load), not carried by `get_recent`'s list rows.

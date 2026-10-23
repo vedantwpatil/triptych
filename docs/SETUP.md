@@ -34,7 +34,7 @@ Every variable is optional.
 | `TRIPTYCH_SOCKET_PATH` | Unix socket of the CLI daemon | `$TMPDIR/triptych.sock` |
 | `TRIPTYCH_LOG_PATH` | Log file (never stdout) | `$TMPDIR/triptych.log` |
 | `CANVAS_ICS_URL` | Canvas calendar feed; enables assignment sync | unset (off) |
-| `TRIPTYCH_NOTIFY` | `0`/`false`/`off`/`no` turns deadline alerts off | on |
+| `TRIPTYCH_NOTIFY` | `0`/`false`/`off`/`no` turns deadline and new-mail alerts off | on |
 | `TRIPTYCH_NOTIFY_CMD` | Program run as `cmd <title> <body>` instead of the system notifier | `osascript` (macOS), `notify-send` (Linux) |
 | `TRIPTYCH_NOW` | RFC 3339 instant that freezes the app's clock (tests only; leave unset) | system clock |
 | `TRIPTYCH_OPEN_CMD` | Program run as `cmd <url>` to open a task link | `open` (macOS), `xdg-open` (Linux) |

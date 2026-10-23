@@ -44,6 +44,8 @@ feature file below, then leave one line here under Recent changes.
 
 ## Recent changes
 
+- 2026-10-23 (new-mail alerts): grouped desktop alert per background mail sync (unread, non-bulk, under 6h).
+  [`canvas-notify.md`](./development/canvas-notify.md).
 - 2026-10-22 (docs): the changelog, Known Issue entries and the old archive moved into
   [`development/`](./development/) by feature; no entry was dropped.
 - 2026-10-21 (`list --all`): `triptych list` hides completed tasks; `--all`/`-a` shows them.

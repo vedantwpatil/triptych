@@ -11,6 +11,9 @@ pub mod agent;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 
+use crate::email::store::{self, UnreadMail};
+use crate::nlp::ollama_client::bulk_mail_heuristic;
+
 /// Env var: `0`/`false`/`off`/`no` disables alerts.
 pub const NOTIFY_ENV: &str = "TRIPTYCH_NOTIFY";
 /// Env var: program run as `<cmd> <title> <body>` instead of the platform default.
@@ -18,6 +21,9 @@ pub const NOTIFY_CMD_ENV: &str = "TRIPTYCH_NOTIFY_CMD";
 
 /// Longest list of task names in one alert body.
 const MAX_LISTED: usize = 3;
+
+/// Mail older than this never alerts, so a first sync of old mail does not flood the desktop.
+const MAIL_MAX_AGE_HOURS: i64 = 6;
 
 /// One notification to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,21 +127,74 @@ async fn claim_alerts(
         .rev()
         .filter(|(items, _)| !items.is_empty())
         .map(|(items, title)| {
-            let mut lines: Vec<String> = items
-                .iter()
-                .take(MAX_LISTED)
-                .map(|(line, _)| line.clone())
-                .collect();
-            if items.len() > MAX_LISTED {
-                lines.push(format!("+{} more", items.len() - MAX_LISTED));
-            }
             let alert = Alert {
                 title: title.to_string(),
-                body: lines.join("\n"),
+                body: list_body(items.iter().map(|(line, _)| line.as_str())),
             };
             (alert, items.into_iter().map(|(_, claim)| claim).collect())
         })
         .collect())
+}
+
+/// Up to [`MAX_LISTED`] lines, then `+N more`.
+fn list_body<'a>(lines: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let total = lines.len();
+    let mut out: Vec<String> = lines.take(MAX_LISTED).map(str::to_string).collect();
+    if total > MAX_LISTED {
+        out.push(format!("+{} more", total - MAX_LISTED));
+    }
+    out.join("\n")
+}
+
+/// One grouped alert for the unread, non-bulk mail of `account` stored after `after_id` (a
+/// [`store::max_id`] taken before the sync pass), or `None` when there is nothing worth showing.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
+pub async fn new_mail_alert(
+    pool: &SqlitePool,
+    account: &str,
+    after_id: i64,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<Alert>> {
+    let mail = store::unread_after(pool, account, after_id).await?;
+    Ok(mail_alert(&mail, now))
+}
+
+fn mail_alert(mail: &[UnreadMail], now: DateTime<Utc>) -> Option<Alert> {
+    let fresh: Vec<&UnreadMail> = mail
+        .iter()
+        .filter(|m| {
+            now - m.date_utc <= Duration::hours(MAIL_MAX_AGE_HOURS)
+                && bulk_mail_heuristic(&m.subject, m.snippet.as_deref().unwrap_or_default())
+                    .is_none()
+        })
+        .collect();
+    if fresh.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = fresh
+        .iter()
+        .map(|m| {
+            let who = m
+                .from_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&m.from_addr);
+            format!("{who}: {}", m.subject)
+        })
+        .collect();
+    let title = if fresh.len() == 1 {
+        "New email".to_string()
+    } else {
+        format!("{} new emails", fresh.len())
+    };
+    Some(Alert {
+        title,
+        body: list_body(lines.iter().map(String::as_str)),
+    })
 }
 
 /// What one [`check_once`] pass did.

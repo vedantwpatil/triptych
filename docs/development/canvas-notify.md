@@ -7,6 +7,14 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 
 ## Changelog
 
+- 2026-10-23 (new-mail alerts): `account_sync_loop` now runs `sync_pass`: `store::max_id` before the
+  sync, and when `report.new > 0` and `notify::enabled()`, `notify::new_mail_alert` (unread mail of that
+  account stored after that id, newest first) shown with `notify::send`. One grouped alert, three listed
+  then `+N more`; bulk mail (`bulk_mail_heuristic`) and mail over 6h old (`MAIL_MAX_AGE_HOURS`) are
+  skipped. `list_body` is shared with the deadline alerts. No separate switch: `TRIPTYCH_NOTIFY=off`
+  covers both. Tests: `tests/it/notify.rs` (`mail_*`), suite scenario `notify_new_mail_alert`. Open:
+  TUI-open only (the LaunchAgent runs `check_once` and never syncs mail); `App`-initiated syncs (`s`,
+  view entry) store mail first, so the worker's pass then sees nothing new and does not alert for it.
 - 2026-09-30 (canvas links): Canvas tasks carry links. New `tasks.links` (JSON array, `add_links`
   migration): the assignment page built from the feed `URL` (course and assignment ids), then the
   `href`s in `X-ALT-DESC`. `canvas::upsert` refreshes them on every known task, finished or not. Todo

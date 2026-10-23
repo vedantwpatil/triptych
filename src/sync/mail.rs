@@ -3,7 +3,10 @@ use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 
-use crate::email::{EmailConfig, IdleOutcome, ImapMailSource, MailSource, sync::sync_account};
+use crate::email::{
+    EmailConfig, IdleOutcome, ImapMailSource, MailSource, store as email_store, sync::sync_account,
+};
+use crate::notify;
 
 /// How long one IDLE call blocks before giving up and running a sync pass anyway, in case the
 /// server never pushes anything unsolicited (some don't, silently) — comfortably under the
@@ -61,11 +64,7 @@ async fn account_sync_loop(
 ) {
     let source = ImapMailSource::new(config.clone());
 
-    // `include_archive: false` — see `sync_account`'s doc for why the background worker must
-    // never sweep the archive folder on its own.
-    if let Err(e) = sync_account(&db, &config, false).await {
-        tracing::warn!("[Mail] sync failed for account '{}': {}", config.account, e);
-    }
+    sync_pass(&db, &config).await;
 
     loop {
         tokio::select! {
@@ -87,10 +86,32 @@ async fn account_sync_loop(
                     }
                 }
 
-                if let Err(e) = sync_account(&db, &config, false).await {
-                    tracing::warn!("[Mail] sync failed for account '{}': {}", config.account, e);
-                }
+                sync_pass(&db, &config).await;
             }
         }
+    }
+}
+
+/// One ambient sync pass, then a desktop alert for the unread mail it stored. `include_archive:
+/// false` — see `sync_account`'s doc for why the background worker must never sweep the archive
+/// folder on its own.
+async fn sync_pass(db: &SqlitePool, config: &EmailConfig) {
+    let before = email_store::max_id(db).await.ok();
+    let report = match sync_account(db, config, false).await {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!("[Mail] sync failed for account '{}': {}", config.account, e);
+            return;
+        }
+    };
+    let (true, Some(before)) = (report.new > 0 && notify::enabled(), before) else {
+        return;
+    };
+    match notify::new_mail_alert(db, &config.account, before, crate::clock::now()).await {
+        Ok(Some(alert)) => {
+            notify::send(&alert).await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("[Mail] new-mail alert failed for '{}': {e}", config.account),
     }
 }

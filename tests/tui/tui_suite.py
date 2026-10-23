@@ -805,6 +805,29 @@ def _(c: Ctx):
     c.eq(log.read_text().count("\n"), 1, "alerts after restart")
 
 
+@scenario("notify_new_mail_alert")
+def _(c: Ctx):
+    mb = c.imap()
+    mb.add("Already there")
+    log = c.sb.dir / "alerts.log"
+    script = c.sb.dir / "alert.sh"
+    script.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$1" "$2" >> "' + str(log) + '"\n')
+    script.chmod(0o755)
+    c.t = td.Term([str(td.BIN)], c.sb.dir, c.sb.env({"TRIPTYCH_NOTIFY_CMD": str(script)}), 42, 130)
+    c.t.spawn()
+    c.check(c.t.wait_for("To-Do", 10), "TUI did not show 'To-Do' at startup")  # schema exists once it draws
+    c.wait_db("select count(*) from email_messages", [(1,)])
+    mb.add("Fresh hello", sender="Bob Boss <bob@corp.example>")
+    mb.add("Weekly newsletter")  # bulk mail never alerts
+    end = time.time() + 15
+    while time.time() < end and "Fresh hello" not in (log.read_text() if log.exists() else ""):
+        c.t.pump(0.3)
+    text = log.read_text() if log.exists() else ""
+    c.check("New email|Bob Boss: Fresh hello" in text, f"no alert for the new mail: {text!r}")
+    c.check("newsletter" not in text.lower(), f"alerted for bulk mail: {text!r}")
+    c.t.press("q")
+
+
 @scenario("todo_nav_toggle_delete")
 def _(c: Ctx):
     for s in ("alpha", "bravo", "charlie"):

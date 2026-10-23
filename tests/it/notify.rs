@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use triptych::notify::agent::{db_file, plist};
-use triptych::notify::due_alerts;
+use triptych::notify::{due_alerts, new_mail_alert};
 
 async fn test_pool() -> SqlitePool {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -21,6 +21,9 @@ async fn test_pool() -> SqlitePool {
     triptych::migrations::run_calendar_migration(&pool)
         .await
         .expect("calendar schema");
+    triptych::migrations::run_email_migration(&pool)
+        .await
+        .expect("email schema");
     pool
 }
 
@@ -244,4 +247,89 @@ fn plist_runs_notify_check_with_pinned_paths_and_escapes_xml() {
     assert!(p.contains("<key>DATABASE_URL</key><string>sqlite:/a &amp; b/todo.db</string>"));
     assert!(p.contains("<key>StartInterval</key><integer>60</integer>"));
     assert!(p.contains("<key>RunAtLoad</key><true/>"));
+}
+
+fn at(hours_ago: i64) -> DateTime<Utc> {
+    now() - Duration::hours(hours_ago)
+}
+
+fn now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-03-10T12:00:00Z")
+        .expect("fixed time")
+        .with_timezone(&Utc)
+}
+
+async fn mail(
+    pool: &SqlitePool,
+    account: &str,
+    from_name: Option<&str>,
+    subject: &str,
+    snippet: &str,
+    date: DateTime<Utc>,
+    read: bool,
+) {
+    sqlx::query(
+        "INSERT INTO email_messages \
+         (uid, message_id, account, from_addr, from_name, subject, snippet, date_utc, is_read) \
+         VALUES (abs(random()), hex(randomblob(8)), ?, 'who@example.com', ?, ?, ?, ?, ?)",
+    )
+    .bind(account)
+    .bind(from_name)
+    .bind(subject)
+    .bind(snippet)
+    .bind(date)
+    .bind(read)
+    .execute(pool)
+    .await
+    .expect("insert email");
+}
+
+#[tokio::test]
+async fn one_mail_alert_names_the_sender_and_falls_back_to_the_address() {
+    let pool = test_pool().await;
+    mail(&pool, "a", Some("Ada"), "Lunch?", "", at(1), false).await;
+    let alert = new_mail_alert(&pool, "a", 0, now()).await.unwrap().unwrap();
+    assert_eq!(alert.title, "New email");
+    assert_eq!(alert.body, "Ada: Lunch?");
+
+    let pool = test_pool().await;
+    mail(&pool, "a", Some("  "), "Hi", "", at(1), false).await;
+    let alert = new_mail_alert(&pool, "a", 0, now()).await.unwrap().unwrap();
+    assert_eq!(alert.body, "who@example.com: Hi");
+}
+
+#[tokio::test]
+async fn mail_alerts_are_grouped_newest_first_and_capped() {
+    let pool = test_pool().await;
+    for h in 1..=5 {
+        mail(&pool, "a", Some("Ada"), &format!("m{h}"), "", at(h), false).await;
+    }
+    let alert = new_mail_alert(&pool, "a", 0, now()).await.unwrap().unwrap();
+    assert_eq!(alert.title, "5 new emails");
+    assert_eq!(alert.body, "Ada: m1\nAda: m2\nAda: m3\n+2 more");
+}
+
+#[tokio::test]
+async fn mail_alerts_skip_read_old_bulk_other_account_and_already_seen_mail() {
+    let pool = test_pool().await;
+    mail(&pool, "a", None, "already seen", "", at(1), false).await;
+    let seen: i64 = sqlx::query_scalar("SELECT MAX(id) FROM email_messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    mail(&pool, "a", None, "read", "", at(1), true).await;
+    mail(&pool, "a", None, "stale", "", at(7), false).await;
+    mail(&pool, "a", None, "Weekly newsletter", "", at(1), false).await;
+    mail(
+        &pool,
+        "a",
+        None,
+        "digest",
+        "click to unsubscribe",
+        at(1),
+        false,
+    )
+    .await;
+    mail(&pool, "b", None, "other account", "", at(1), false).await;
+    assert_eq!(new_mail_alert(&pool, "a", seen, now()).await.unwrap(), None);
 }
