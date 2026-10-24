@@ -98,9 +98,9 @@ pub async fn scan(
 
         for (email_id, body, stored_links) in digests {
             let anchors = links::from_json(stored_links.as_deref());
-            let mut fresh: Vec<_> = parse_digest(&body, &anchors)
+            let mut fresh: Vec<_> = unseen(pool, &mut known, parse_digest(&body, &anchors))
+                .await?
                 .into_iter()
-                .filter(|p| known.insert(p.key()))
                 .map(|p| {
                     let verdict = score::score(&p, profile);
                     (p, verdict)
@@ -173,6 +173,36 @@ pub async fn scan(
         }
     }
     Ok(created)
+}
+
+/// The postings whose key is new, now remembered in `known`. A posting stored without a page (its
+/// digest's links were missing or cut off) gets the page found for it now, and so does its task if
+/// that still has no links. Both fill once and never change.
+async fn unseen(
+    pool: &SqlitePool,
+    known: &mut HashSet<String>,
+    postings: Vec<Posting>,
+) -> sqlx::Result<Vec<Posting>> {
+    let (fresh, seen): (Vec<_>, Vec<_>) = postings.into_iter().partition(|p| known.insert(p.key()));
+    for (key, url) in seen.iter().filter_map(|p| Some((p.key(), p.url.as_ref()?))) {
+        let filled = sqlx::query("UPDATE job_postings SET url = ? WHERE key = ? AND url IS NULL")
+            .bind(url)
+            .bind(&key)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        if filled == 1 {
+            sqlx::query(
+                "UPDATE tasks SET links = ? WHERE links IS NULL \
+                 AND id = (SELECT task_id FROM job_postings WHERE key = ?)",
+            )
+            .bind(serde_json::json!([url]).to_string())
+            .bind(&key)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(fresh)
 }
 
 /// One stored posting: score, company, role, status, reason.

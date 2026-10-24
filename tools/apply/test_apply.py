@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Self-check for apply.py: `python3 tools/apply/test_apply.py`. The browser part runs only when
 Playwright and a Chromium are installed; it uses a local page, never a real site."""
+import contextlib
+import io
+import json
 import os
 import sys
 import tempfile
@@ -29,6 +32,14 @@ def test_pure() -> None:
     assert apply.detect_ats("https://evilgreenhouse.io/x") is None, "suffix must sit on a dot boundary"
     assert apply.detect_ats("https://greenhouse.io.evil.com/x") is None
     assert apply.detect_ats("not a url") is None
+
+    uuid = "95437628-8de3-4f6f-ba65-44f3b0ed0be8"
+    click = f"https://simplify.jobs/jobs/click/{uuid}"
+    assert apply.entry(f"https://simplify.jobs/p/{uuid}?utm_source=swelist") == click
+    assert apply.entry(f"https://simplify.jobs/p/{uuid}/Software-Engineer-Intern") == click
+    assert apply.entry("https://boards.greenhouse.io/acme/jobs/1") == "https://boards.greenhouse.io/acme/jobs/1"
+    evil = f"https://simplify.jobs.evil.test/p/{uuid}"
+    assert apply.entry(evil) == evil, "only simplify.jobs itself is rewritten"
 
     keys = lambda text: [k for _, pat, k in apply.FIELDS if pat.match(text)]
     assert keys("First name *") == ["first_name"]
@@ -82,6 +93,22 @@ def test_browser() -> None:
             assert page.input_value("#n") == "", "an unlisted field must stay untouched"
             open_ = page.evaluate(apply.OPEN_REQUIRED_JS)
             assert sorted(open_) == ["Are you authorized to work in the US?", "I agree", "Why do you want to work here?"], open_
+
+            # A careers page embedding the form in a Greenhouse iframe (served locally, no network).
+            embed = browser.new_page()
+            embed.route("https://job-boards.greenhouse.io/**", lambda r: r.fulfill(body=PAGE, content_type="text/html"))
+            embed.set_content('<h1>Careers</h1><iframe src="https://job-boards.greenhouse.io/embed/job_app"></iframe>')
+            form, ats = apply.find_form(embed, tries=10)
+            assert ats == "greenhouse" and form is not embed.main_frame, (ats, form)
+            assert apply.fill_form(form, applicant) == done
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                apply.review(form, ats, done)
+            event = json.loads(out.getvalue())
+            assert event["event"] == "filled" and "I agree" in event["unanswered"], event
+            plain = browser.new_page()
+            plain.set_content("<h1>No form here</h1>")
+            assert apply.find_form(plain, tries=2) == (None, None)
     finally:
         browser.close()
         pw.stop()

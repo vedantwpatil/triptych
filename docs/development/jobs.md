@@ -7,6 +7,20 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 
 ## Changelog
 
+- 2026-10-23 (links fixed): every `Apply:` task said "No apply link on this posting". The one digest with
+  stored anchors showed the real shape: the anchor text is the role alone (the company is plain text
+  beside it) and the target is a Simplify page, `simplify.jobs/p/<uuid>`, so the company-plus-role match
+  never hit; the 100-anchor cap also cut a 110-posting digest. `parse_digest` now walks the lines in body
+  order with a cursor into the anchors and pairs each posting with the next anchor whose text is its role
+  (a collapsed repeat uses up its own anchor; a role with no anchor leaves the cursor alone), `MAX_LINKS`
+  is 400, and `scan` (`unseen`) fills `job_postings.url`, and an empty `tasks.links`, for postings stored
+  earlier once their digest yields a link. On a copy of the real DB: 91 postings paired, and 6 of 6 sampled
+  matched their Simplify page's company and role, four of them the shared "Software Engineer Intern".
+  Sidecar: `entry` turns a Simplify job page (its Apply button is script-driven and only opens a login
+  dialog) into the `/jobs/click/<uuid>` redirect to the employer, and `find_form` looks for the ATS form
+  in the page or an iframe on it (MongoDB's careers page embeds Greenhouse). A read-only probe of that
+  posting found the iframe and matched the First/Last name, Email, Phone, LinkedIn, GitHub and Website
+  labels. Tests: `tests/it/jobs.rs` (role-only pairing, backfill, 150 anchors), `tools/apply/test_apply.py`.
 - 2026-10-23 (apply flow): `A` on an `Apply:` task runs the sidecar named by `TRIPTYCH_APPLY_CMD` (setup:
   [`../APPLY.md`](../APPLY.md)); unset, or no `job_postings` row, it opens the link like `o`. `src/app/apply.rs`
   spawns it (`tokio::process`, `kill_on_drop`), talks line-delimited JSON (protocol in the file header) and
@@ -43,7 +57,8 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
   `notify::shortlist_alert`; digest senders are left out of the plain new-mail alert. `triptych jobs
   [--all]` runs the same scan and prints the stored postings (`--all` adds skipped, with the rule hits).
   `email_messages.links` (JSON `[{text, href}]`, `email/links.rs`, filled by `parse_raw` from the HTML
-  part) lets a posting take the `href` of the anchor whose text equals its `Company: Role` line; that
+  part) lets a posting take the `href` of the anchor whose text equals its `Company: Role` line (wrong for
+  real digests, replaced by role-only pairing, see above); that
   URL becomes the task's `tasks.links`, so `o` opens it. `NewTask` gained `links`. Tests:
   `tests/it/jobs.rs`, `tests/it/cli.rs` (`jobs_turns_a_digest_...`), suite scenario `jobs_digest_to_task`.
   Checked on a copy of the real `todo.db` with `max_age_days = 3650`: 572 postings from 10 digests, 90
@@ -51,9 +66,11 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 
 ## Known issues and open questions
 
-- Open: the digest HTML has never been seen (the local `todo.db` holds `body_text` only, `links` is NULL
-  for every stored digest), so anchor pairing is unverified against a real digest. A posting with no
-  matching anchor still gets its task, with no link. Needs one saved raw digest `.eml`.
+- Resolved 2026-10-23: the digest HTML had never been seen, so anchor pairing was unverified (and wrong:
+  see "links fixed"). A posting with no matching anchor still gets its task, with no link.
+- Open: digests stored before 2026-10-23 have no `links` (the HTML was never kept), so their postings and
+  tasks have no page; only a re-fetch of those messages could recover them. A task the user deleted stays
+  deleted (the tombstone), links or not.
 - Open: scoring reads the role only, so `Data` and `AI` hits shortlist some weak fits (business or
   governance roles); the `down` list is the knob (`TRIPTYCH_JOBS_PROFILE`).
 - Open: a posting stored without a rating (Ollama down, or past the 30-rating budget) is never rated
@@ -61,9 +78,9 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
   say for those postings. The real model's quality on titles alone is unmeasured: only the fake has run.
 - Open: the cap drops a good posting for good (its `skipped` row is a tombstone). `triptych jobs --all`
   shows it with `(over cap)`.
-- Open: the Playwright adapters have never run against a live form (no saved Greenhouse, Lever or Ashby
-  page, no Chromium installed here); label matching, the required-field scan and the confirmation text
-  are guesses until `tools/apply/test_apply.py` runs its browser part and one real `A` run is checked.
+- Open: the Playwright adapters have filled only a local page (`test_apply.py`) and been probed read-only
+  on one live Greenhouse embed (labels matched, nothing filled or uploaded). Lever and Ashby, the file
+  upload and the confirmation text on a real form are unchecked until one real `A` run is reviewed.
 - Open: `TRIPTYCH_APPLY_CMD` is split on whitespace (no quoted paths), and killing the TUI abruptly can
   leave the sidecar's browser open, and so can quitting mid-review (`kill_on_drop` kills the sidecar,
   not the Chromium it started); `n`/`Esc` closes it cleanly.

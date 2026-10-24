@@ -152,29 +152,40 @@ fn parse_digest_fails_closed_when_a_marker_is_missing() {
 }
 
 #[test]
-fn parse_digest_pairs_a_posting_with_the_anchor_of_the_same_text() {
+fn parse_digest_pairs_postings_with_role_only_anchors_in_body_order() {
+    let anchor = |text: &str, id: &str| Link {
+        text: text.into(),
+        href: format!("https://simplify.test/p/{id}"),
+    };
+    // The real shape: header anchors first, then one per line with the role alone as text.
     let links = [
-        Link {
-            text: "Click here to Unsubscribe".into(),
-            href: "https://x.test/unsub".into(),
-        },
-        Link {
-            text: "Initech: ML Engineer Intern".into(),
-            href: "https://boards.greenhouse.io/initech/jobs/1".into(),
-        },
+        anchor("swelist", "head"),
+        anchor("Link to Simplify", "cta"),
+        anchor("Software Engineer Intern", "acme"),
+        anchor("Software Engineer Intern", "acme-repeat"),
+        anchor("Software Engineer Intern", "globex"),
     ];
-    let found = parse_digest(&digest(&POSTINGS), &links);
+    let body = digest(&[
+        "Acme:Software Engineer Intern",
+        "Acme:Software Engineer Intern",
+        "Globex: Software Engineer Intern",
+        "Umbrella: PhD Research Intern",
+    ]);
+    let found = parse_digest(&body, &links);
     let url = |company: &str| {
         found
             .iter()
             .find(|p| p.company == company)
             .and_then(|p| p.url.clone())
     };
+    assert_eq!(url("Acme").as_deref(), Some("https://simplify.test/p/acme"));
     assert_eq!(
-        url("Initech").as_deref(),
-        Some("https://boards.greenhouse.io/initech/jobs/1")
+        url("Globex").as_deref(),
+        Some("https://simplify.test/p/globex"),
+        "the collapsed repeat used up its own anchor"
     );
-    assert_eq!(url("Acme Corp"), None);
+    assert_eq!(url("Umbrella"), None, "no anchor, no url");
+    assert_eq!(found.len(), 3);
 }
 
 #[test]
@@ -206,7 +217,7 @@ async fn scan_makes_tasks_for_good_fits_once_and_never_recreates_deleted_ones() 
     let pool = test_pool().await;
     let now = Utc::now();
     let links = to_json(&[Link {
-        text: "Initech: ML Engineer Intern".into(),
+        text: "ML Engineer Intern".into(),
         href: "https://boards.greenhouse.io/initech/jobs/1".into(),
     }]);
     seed(&pool, SENDER, &digest(&POSTINGS), links.as_deref(), now).await;
@@ -263,6 +274,46 @@ async fn scan_makes_tasks_for_good_fits_once_and_never_recreates_deleted_ones() 
 }
 
 #[tokio::test]
+async fn scan_gives_a_stored_posting_and_its_task_a_link_that_was_missing_the_first_time() {
+    let pool = test_pool().await;
+    let now = Utc::now();
+    let id = seed(&pool, SENDER, &digest(&POSTINGS), None, now).await;
+    scan(&pool, &Profile::default(), now, None).await.unwrap();
+
+    let url = "https://simplify.test/p/initech";
+    let links = to_json(&[Link {
+        text: "ML Engineer Intern".into(),
+        href: url.into(),
+    }]);
+    sqlx::query("UPDATE email_messages SET links = ? WHERE id = ?")
+        .bind(links)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        scan(&pool, &Profile::default(), now, None)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a link makes no new task"
+    );
+
+    let (stored, task_links): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT p.url, t.links FROM job_postings p JOIN tasks t ON t.id = p.task_id \
+         WHERE p.company = 'Initech'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some(url));
+    assert_eq!(
+        task_links.as_deref(),
+        Some(r#"["https://simplify.test/p/initech"]"#)
+    );
+}
+
+#[tokio::test]
 async fn scan_caps_tasks_per_digest_and_ignores_stale_digests_and_other_senders() {
     let pool = test_pool().await;
     let now = Utc::now();
@@ -304,6 +355,15 @@ async fn scan_caps_tasks_per_digest_and_ignores_stale_digests_and_other_senders(
         .await
         .unwrap();
     assert_eq!(stored, 5, "no row for the stale digest or the other sender");
+}
+
+#[test]
+fn anchors_keep_every_posting_of_a_long_digest() {
+    let html = (0..150)
+        .map(|i| format!(r#"<a href="https://x.test/{i}">Role {i}</a>"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(anchors(&html).len(), 150);
 }
 
 #[test]

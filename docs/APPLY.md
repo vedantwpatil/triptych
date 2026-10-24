@@ -43,8 +43,10 @@ TRIPTYCH_APPLICANT=/Users/ada/.config/triptych/applicant.toml
 
 ## Flow
 
-1. Select an `Apply:` task and press `A`. The browser opens the posting and fills what the applicant
-   file maps (name, email, phone, links, resume upload). Nothing else is touched.
+1. Select an `Apply:` task and press `A`. Digest links are Simplify job pages; the browser follows
+   Simplify's own redirect to the employer, finds the application form (in the page or an embedded
+   Greenhouse/Lever/Ashby iframe) and fills what the applicant file maps (name, email, phone, links,
+   resume upload). Nothing else is touched.
 2. A popup lists what was filled and every required field still empty, with a screenshot path.
 3. Answer the open fields in the browser, then `r` rechecks the page. `y` submits, `n`/`Esc` cancels
    and closes the browser. Idle for 15 minutes cancels too.
@@ -63,8 +65,9 @@ for you: when required they stay in the open list until you fill them.
 
 ## Limits
 
-- Greenhouse, Lever and Ashby only, detected from the final URL. Anything else (Workday, ...) opens the
-  link instead.
+- Greenhouse, Lever and Ashby only, detected from the host of the page or of an iframe on it, for up to
+  15 seconds after the page loads. Anything else (Workday, ...) opens the link instead.
+- Postings from digests stored before 2026-10-23 have no link at all; `A` then says so.
 - The page selectors are unverified against live forms and will need upkeep as those sites change.
   `python3 tools/apply/test_apply.py` checks the matching logic, and the fill and scan code against a
   local page when Chromium is installed.

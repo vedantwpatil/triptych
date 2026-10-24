@@ -8,6 +8,9 @@ TRIPTYCH_APPLICANT file. Work authorisation, sponsorship, demographic, consent a
 are never answered: when required they come back in `unanswered` for the user to answer in the browser.
 Submitting is a separate command the app sends only after the user approves.
 
+A digest links a Simplify job page; `entry` turns it into Simplify's redirect to the employer's own page, and
+`find_form` looks for the application form in that page or in an iframe on it (a careers page embedding Greenhouse).
+
 shortcut: Greenhouse, Lever and Ashby only, matched by field label; the selectors are unverified against
 live pages, upgrade by saving a form per ATS and adding a test fixture.
 """
@@ -21,6 +24,7 @@ import tomllib
 from urllib.parse import urlparse
 
 ATS_HOSTS = {"greenhouse.io": "greenhouse", "lever.co": "lever", "ashbyhq.com": "ashby"}
+SIMPLIFY_JOB = re.compile(r"^https://simplify\.jobs/p/([0-9a-f-]{36})", re.I)
 REQUIRED_KEYS = ("first_name", "last_name", "email", "resume")
 
 # (name shown in the review, label regex, applicant key). Labels often carry a trailing "*".
@@ -62,6 +66,23 @@ def detect_ats(url: str) -> str | None:
     return next((ats for suffix, ats in ATS_HOSTS.items() if host == suffix or host.endswith("." + suffix)), None)
 
 
+def entry(url: str) -> str:
+    """Simplify's job page applies through a script-driven button; its /jobs/click/ address is the plain redirect to the employer."""
+    job = SIMPLIFY_JOB.match(url)
+    return f"https://simplify.jobs/jobs/click/{job.group(1)}" if job else url
+
+
+def find_form(page, tries: int = 30):
+    """The frame holding a supported ATS form, and which ATS: the page itself or an iframe on it, which loads after `load`."""
+    for _ in range(tries):
+        for frame in page.frames:  # the main frame comes first
+            ats = detect_ats(frame.url)
+            if ats:
+                return frame, ats
+        page.wait_for_timeout(500)
+    return None, None
+
+
 def load_applicant(path: str) -> dict:
     if not path:
         raise ValueError("TRIPTYCH_APPLICANT is not set")
@@ -93,23 +114,23 @@ def fill_form(page, applicant: dict) -> list[str]:
     return done
 
 
-def review(page, ats: str, filled: list[str]) -> None:
+def review(form, ats: str, filled: list[str]) -> None:
     shot = os.path.join(tempfile.gettempdir(), "triptych-apply.png")
-    page.screenshot(path=shot, full_page=True)
-    unanswered = list(dict.fromkeys(page.evaluate(OPEN_REQUIRED_JS)))
+    form.page.screenshot(path=shot, full_page=True)
+    unanswered = list(dict.fromkeys(form.evaluate(OPEN_REQUIRED_JS)))
     logging.info("review %s: filled %s, unanswered %s", ats, filled, unanswered)
     say("filled", ats=ats, filled=filled, unanswered=unanswered, screenshot=shot)
 
 
-def submit(page) -> None:
-    page.get_by_role("button", name=re.compile(r"^\s*submit", re.I)).first.click()
-    page.get_by_text(CONFIRMED).first.wait_for(timeout=30_000)  # no confirmation: error, never "submitted"
+def submit(form) -> None:
+    form.get_by_role("button", name=re.compile(r"^\s*submit", re.I)).first.click()
+    form.get_by_text(CONFIRMED).first.wait_for(timeout=30_000)  # no confirmation: error, never "submitted"
     say("submitted")
 
 
 def main() -> None:
     logging.basicConfig(filename=os.path.join(tempfile.gettempdir(), "triptych-apply.log"), level=logging.INFO)
-    pw = browser = page = None
+    pw = browser = form = None
     ats, filled = "", []
     try:
         for line in sys.stdin:
@@ -122,17 +143,17 @@ def main() -> None:
                 pw = sync_playwright().start()
                 browser = pw.chromium.launch(headless=False)
                 page = browser.new_page()
-                page.goto(msg["url"], wait_until="load")
-                ats = detect_ats(page.url)
-                if not ats:
+                page.goto(entry(msg["url"]), wait_until="load")
+                form, ats = find_form(page)
+                if not form:
                     say("unsupported", ats=urlparse(page.url).hostname or "")
                     return
-                filled = fill_form(page, applicant)
-                review(page, ats, filled)
+                filled = fill_form(form, applicant)
+                review(form, ats, filled)
             elif cmd == "recheck":
-                review(page, ats, filled)
+                review(form, ats, filled)
             elif cmd == "submit":
-                submit(page)
+                submit(form)
             elif cmd == "abort":
                 return
     except Exception as e:  # whatever went wrong, the app needs to hear it and mark the posting failed

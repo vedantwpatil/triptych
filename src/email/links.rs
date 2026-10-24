@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::is_web_url;
 
-/// Most anchors kept per message, and the longest anchor text kept.
-const MAX_LINKS: usize = 100;
+/// Most anchors kept per message, and the longest anchor text kept. A 110-posting digest carries
+/// over 110 anchors, so 100 cut off its last postings.
+const MAX_LINKS: usize = 400;
 const MAX_TEXT: usize = 160;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
