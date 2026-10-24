@@ -72,3 +72,4 @@ logs/
 *.claude
 schedule.toml
 __pycache__/
+.venv/
