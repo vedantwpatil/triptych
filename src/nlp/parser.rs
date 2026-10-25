@@ -2,6 +2,7 @@ use crate::nlp::ollama_client::{JobFit, OllamaClient, OllamaError, bulk_mail_heu
 use crate::nlp::rules::RuleParser;
 use crate::nlp::types::{ParseResult, ParseStrategy, ParsedItem};
 use crate::recurrence;
+use chrono::Datelike;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -90,7 +91,7 @@ impl NLPParser {
     ///
     /// Returns [`ParseError`] for unusable input. The current layers always fall back to a plain task, so no path returns it yet.
     pub async fn parse(&self, input: &str) -> Result<ParseResult, ParseError> {
-        let phrase = recurrence::extract(input);
+        let phrase = recurrence::extract(input, crate::clock::local_now().weekday());
         let text = phrase.as_ref().map_or(input, |(_, text)| text.as_str());
         let mut result = self.parse_layers(text).await?;
         result.recurrence = phrase.map(|(rule, _)| rule);

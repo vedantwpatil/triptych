@@ -7,6 +7,22 @@ Related: [`nlp.md`](./nlp.md), [`calendar.md`](./calendar.md), [`tui-ux.md`](./t
 
 ## Changelog
 
+- 2026-10-25 (repeat intervals, day lists): `every 2 days|weeks|months`, `every other day|week|month`,
+  `every other friday`, trailing `biweekly`, and weekday lists (`every mon, wed and fri`, `every tue/thu`,
+  `every 2 weeks on fri`). `Recurrence` in `src/recurrence.rs` is now `{ every, unit }` (1..=999) with
+  `Unit::{Day, Week, Month, On(WeekdaySet)}`; `extract(input, today)` leaves the long name of the
+  soonest listed day after today for the date parser, which never resolves a weekday name to today
+  (`every weekday` leaves nothing). A joining `and`
+  counts only before a weekday ("every fri and buy milk" repeats on fri). The stored key reuses the
+  phrase grammar (`fri`, `mon,wed,fri`, `every 2 weeks on mon,wed`; interval 1 keeps the old
+  `daily`/`weekly`/`monthly`/`weekdays`), so `from_key` is the same parser, serde writes the key string
+  and existing rows read unchanged (no migration). An interval day list skips the extra weeks only when
+  the next day wraps into a new Monday-start week: `every 2 weeks on mon,wed` goes Mon, Wed (+2 days),
+  Mon two weeks on (+12). Tests: `tests/it/recurrence.rs` (`intervals_and_day_lists_parse`,
+  `extract_leaves_the_soonest_day_from_today`, `interval_day_lists_skip_whole_weeks_only_when_wrapping`,
+  `serde_is_the_key_string`), scenarios `todo_repeat_interval`, `todo_repeat_day_list`. Open: no end
+  date (delete the open copy to end a series); monthly drift after a short-month clamp (31 Jan, 28 Feb,
+  28 Mar); reopening a task leaves its spawned copy; an undated first task stays undated.
 - 2026-09-30 (recurring tasks): `every day|weekday|week|month|<weekday>` in a task. Rules are pure in
   `src/recurrence.rs` (`Recurrence`, `extract`, `next_after`, `next_dates`); `NLPParser::parse` strips
   the phrase first (`every fri` becomes `friday`, since the date parser only knows full names) and

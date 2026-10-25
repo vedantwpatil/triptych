@@ -37,7 +37,7 @@ characters; `--marks` also lists highlighted spans (the calendar cursor cell is 
 
 ## tui_suite.py: scenario suite
 
-199 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
+201 scenarios (plus 3 `real=True`, see below), each in its own child process and sandbox, run in parallel. About 1 minute at `-j 4`.
 
 ```
 python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-j 4] [--build] [-v] [--strict] [--real-ollama]
@@ -49,7 +49,7 @@ python3 tests/tui/tui_suite.py [--list] [--only 'cal_*,todo_add_edit_cancel'] [-
 | `daemon_*`| 6     | start/status/stop, add through the socket, second instance                    |
 | `nlp_*`   | 17    | dates, weekdays, times, ranges, durations, tags, priorities                   |
 | `sched_*` | 9     | schedule import/export/show/clear/reallocate, overlaps, bad input             |
-| `todo_*`  | 20    | add/cancel/toggle/delete, `v` visual delete, linked-email delete, badges, persist, `s`, view cycle |
+| `todo_*`  | 24    | add/cancel/toggle/delete, `v` visual delete, linked-email delete, badges, persist, `s`, view cycle, repeat rules |
 | `cal_*`   | 30    | grid, cursor, week nav, block form, task picker, move, deadlines, stacking, `T` to-do panel, small-terminal scroll |
 | `email_*` | 26    | list, popup, mark read, convert, compose/reply/forward/send, `s` sync, priority order, AI summaries |
 | `imap_*`  | 19    | real `email sync` and TUI sync/delete/archive (incl. no-`MOVE` fallback) against the fake IMAP server |

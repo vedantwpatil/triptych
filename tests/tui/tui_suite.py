@@ -1247,6 +1247,26 @@ def _(c: Ctx):
     c.eq(c.db("select count(*) from tasks"), [(2,)], "done, reopen, done must not add a third copy")
 
 
+@scenario("todo_repeat_interval")
+def _(c: Ctx):
+    t = c.tui()
+    c.add("review every 2 weeks on fri 9am")
+    c.eq(c.db("select description, recurrence from tasks"), [("review", "every 2 weeks on fri")], "stored row")
+    c.check(t.has("↻ every 2 weeks on fri"), "interval repeat mark not rendered")
+    t.press("ENTER")
+    c.see("Repeats every 2 weeks on fri", msg="no status line after completing an interval task")
+    gap = c.db("select julianday(n.scheduled_at) - julianday(d.scheduled_at) from tasks d, tasks n where d.completed = 1 and n.completed = 0")
+    c.eq(gap, [(14.0,)], "next copy is two weeks after the done one")
+
+
+@scenario("todo_repeat_day_list")
+def _(c: Ctx):
+    t = c.tui()
+    c.add("standup every mon, wed and fri")
+    c.eq(c.db("select description, recurrence from tasks"), [("standup", "mon,wed,fri")], "stored row")
+    c.check(t.has("↻ mon,wed,fri"), "day-list repeat mark not rendered")
+
+
 @scenario("todo_fuzzy_cache")
 def _(c: Ctx):
     c.tui()

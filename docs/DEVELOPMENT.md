@@ -45,6 +45,8 @@ feature file below, then leave one line here under Recent changes.
 
 ## Recent changes
 
+- 2026-10-25 (repeat intervals, day lists): `every 2 weeks`, `every other friday`, `every mon, wed and fri`.
+  [`todo.md`](./development/todo.md).
 - 2026-10-23 (job triage, apply): SWE List digests scored (rules, Ollama for the undecided) into `Apply:` tasks;
   `A` drives a browser sidecar, approval-gated ([`APPLY.md`](./APPLY.md), [`jobs.md`](./development/jobs.md)).
 - 2026-10-23 (new-mail alerts): grouped desktop alert per background mail sync (unread, non-bulk, under 6h).
@@ -59,8 +61,6 @@ feature file below, then leave one line here under Recent changes.
   [`code-health.md`](./development/code-health.md).
 - 2026-10-21 (email follow-ups): cursor row, compose separator, chunked IMAP sync, drained triage.
   [`email-messages.md`](./development/email-messages.md).
-- 2026-10-21 (UX fixes, perf): `?` help, delete undo, confirmed email delete, `DbWatch` reload.
-  [`tui-ux.md`](./development/tui-ux.md).
 
 - 2026-10-22 (binary size): release build 21.0 to 9.3 MiB (`[profile.release]`, reqwest without `http2`).
   [`code-health.md`](./development/code-health.md).

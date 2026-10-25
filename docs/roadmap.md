@@ -74,9 +74,10 @@ a backlog, not a goal. Core todo and calendar work comes first.
   highlighted one at the grid cursor, `x` completes it (`src/app/calendar_todo.rs`,
   `src/tui/ui/calendar_todo.rs`, see [`USAGE.md`](./USAGE.md)). Open: no drag/reorder, no
   unscheduled-only filter, fixed 30% width.
-- **Recurring tasks** — built: `every day|weekday|week|month|<weekday>` in the task text; finishing one
-  adds the next copy (`src/recurrence.rs`, `src/app/repeat.rs`, see [`USAGE.md`](./USAGE.md)). Open:
-  `every 2 weeks`, several weekdays, an end date. Separate from the TOML recurring *schedule blocks*.
+- **Recurring tasks** — built: `every [N|other] day|week|month`, `every <weekday list>` and
+  `every 2 weeks on fri` in the task text; finishing one adds the next copy (`src/recurrence.rs`,
+  `src/app/repeat.rs`, see [`USAGE.md`](./USAGE.md)). Open: an end date (`until ...`), monthly drift
+  after a short-month clamp. Separate from the TOML recurring *schedule blocks*.
 - **Full-text search** — search across task descriptions (and, once built, email bodies).
   Likely SQLite FTS5 virtual table given the existing SQLite-only storage layer.
 - **Task dependencies** — blocking/blocked-by relationships between tasks, feeding into the
