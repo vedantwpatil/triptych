@@ -81,9 +81,17 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 - Open: the Playwright adapters have filled only a local page (`test_apply.py`) and been probed read-only
   on one live Greenhouse embed (labels matched, nothing filled or uploaded). Lever and Ashby, the file
   upload and the confirmation text on a real form are unchecked until one real `A` run is reviewed.
-- Open: `TRIPTYCH_APPLY_CMD` is split on whitespace (no quoted paths), and killing the TUI abruptly can
-  leave the sidecar's browser open, and so can quitting mid-review (`kill_on_drop` kills the sidecar,
-  not the Chromium it started); `n`/`Esc` closes it cleanly.
+- Open: `TRIPTYCH_APPLY_CMD` is split on whitespace (no quoted paths).
+- Resolved 2026-10-25, no code change: the claim that killing the TUI or quitting mid-review (Ctrl+C;
+  `q` is ignored while applying) leaves the browser open was wrong. Measured with Playwright 1.64.1 on
+  macOS (headless shell and Chrome for Testing; a headed window was not tried): SIGKILL (`kill_on_drop`)
+  or SIGTERM to the sidecar, SIGKILL to the TUI, and SIGHUP or SIGTERM to the whole process group
+  (terminal closed) all end with no Chromium left. The Playwright node driver sees its stdin close, or
+  catches the signal, and closes the browser. Chromium runs in its own process group, so group signals
+  never reach it directly. Two limits: a TUI killed while the sidecar is inside a Playwright call leaves
+  the browser up until that call returns (at most the 30s submit confirmation wait), and SIGKILL to the
+  driver itself (`kill -9` on the group, or an out-of-memory kill) leaves Chrome for Testing running.
+  Nothing in-process can catch that.
 - Open: the daily cap is checked only when `A` is pressed, so it counts finished applications, not the
   one in review. One session at a time makes that safe.
 - Open: `scan` runs on any sync that stores mail, not only digest mail; it is cheap (a key lookup per
