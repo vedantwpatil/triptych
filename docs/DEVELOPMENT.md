@@ -45,6 +45,9 @@ feature file below, then leave one line here under Recent changes.
 
 ## Recent changes
 
+- 2026-10-27 (apply and email keys): apply popup says what to do next, `Enter` records a hand-submitted
+  application; email `Enter` opens, `T` converts to a task. [`jobs.md`](./development/jobs.md),
+  [`email-triage.md`](./development/email-triage.md).
 - 2026-10-25 (repeat intervals, day lists): `every 2 weeks`, `every other friday`, `every mon, wed and fri`.
   [`todo.md`](./development/todo.md).
 - 2026-10-23 (job triage, apply): SWE List digests scored (rules, Ollama for the undecided) into `Apply:` tasks;

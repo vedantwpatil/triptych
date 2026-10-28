@@ -15,7 +15,7 @@ Select    v range (j/k extend, d delete, Esc cancel)
 Plan      s auto-schedule
 Find      / search  n/N next/previous
 Links     o open first  O list (Enter or 1-9 opens)
-Apply     A fill a job application (y submit, r recheck, n cancel)
+Apply     A fill a job application (Enter I applied, y submit, r recheck, n cancel)
 Views     c calendar  m email  Tab/Shift-Tab cycle  q quit";
 
 const CALENDAR: &str = "\
@@ -28,9 +28,9 @@ Views     t/Esc to-do  Tab/Shift-Tab cycle  q quit";
 
 const EMAIL: &str = "\
 Move      j/k  gg/G  / search  n/N  o sort  s sync
-Read      v open  r read  u unread  f star  t category
+Read      Enter/v open  r read  u unread  f star  t category
 Message   R reply  A reply-all  F forward  s save attachments
-Act       c compose  Enter to task  M meeting to task  a archive  d delete (twice)
+Act       c compose  T to task  M meeting to task  a archive  d delete (twice)
 Filters   A account  F folder  I focus  H attach  U unread  S starred  @ domain
 Mailbox   B folders  D drafts  R rules  z snooze  Z snoozed  x unsnooze
 Compose   Tab field  Ctrl-S send  Ctrl-D draft  Ctrl-N/P contacts  Esc cancel

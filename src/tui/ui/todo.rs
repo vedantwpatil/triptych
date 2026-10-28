@@ -255,65 +255,71 @@ pub(super) fn render_todo_view(f: &mut Frame, app: &mut App) {
 }
 
 /// The job application popup (`A`): progress while the sidecar works, then the review to approve.
+/// The application popup: what was filled, which required fields are open, and the one next step.
+/// Sized to its content; the bottom title lists only the keys that act in the current stage.
 fn render_apply_popup(f: &mut Frame, session: &ApplySession) {
-    let area = centered_rect(80, 60, f.area());
-    f.render_widget(Clear, area);
-
     let mut lines = vec![Line::from(Span::styled(
         session.label.clone(),
         Style::default().add_modifier(Modifier::BOLD),
     ))];
-    let hint = match &session.stage {
+    let keys = match &session.stage {
         ApplyStage::Working => {
             lines.push(Line::from("Working in the browser..."));
-            "Esc: cancel"
+            "Esc cancel".to_string()
         }
         ApplyStage::Submitting => {
             lines.push(Line::from("Submitting..."));
-            "wait"
+            "wait".to_string()
         }
         ApplyStage::Review {
             ats,
             filled,
             unanswered,
-            screenshot,
         } => {
-            lines.push(Line::from(format!("Site: {ats}")));
-            lines.push(Line::from(format!(
-                "Filled ({}): {}",
-                filled.len(),
-                filled.join(", ")
-            )));
-            if unanswered.is_empty() {
+            lines.push(Line::from(format!("Filled in the browser ({ats}):")));
+            if !filled.is_empty() {
                 lines.push(Line::styled(
-                    "No required field left open",
+                    format!("  ✓ {}", filled.join(", ")),
                     Style::default().fg(Color::Green),
                 ));
+            }
+            let open = Style::default().fg(Color::Yellow);
+            lines.extend(
+                unanswered
+                    .iter()
+                    .map(|q| Line::styled(format!("  ▲ {q}"), open)),
+            );
+            let can_submit = unanswered.is_empty() && submit_enabled();
+            let next = if !unanswered.is_empty() {
+                "answer ▲ in the browser, then press r"
+            } else if can_submit {
+                "press y to submit"
             } else {
-                lines.push(Line::styled(
-                    format!("Required, answer in the browser ({}):", unanswered.len()),
-                    Style::default().fg(Color::Yellow),
-                ));
-                lines.extend(unanswered.iter().map(|q| Line::from(format!("  ▲ {q}"))));
-            }
-            if let Some(path) = screenshot {
-                lines.push(Line::from(format!("Screenshot: {path}")));
-            }
-            if !submit_enabled() {
-                lines.push(Line::styled(
-                    "Submit is off: set TRIPTYCH_APPLY_SUBMIT=1",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            "y: submit, r: recheck, n: cancel"
+                "click Submit in the browser, then press Enter"
+            };
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                format!("Next: {next}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            let submit = if can_submit { "y submit  " } else { "" };
+            format!("{submit}Enter I applied  r recheck  n cancel (closes browser)")
         }
     };
     let popup = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("Apply ({hint})"))
+            .title("Apply")
+            .title_bottom(keys)
             .style(Style::default().bg(Color::Black)),
     );
+    let width = 72.min(f.area().width);
+    // Wrap at the inner width; `line_count` adds the borders.
+    let height = u16::try_from(popup.line_count(width.saturating_sub(2))).unwrap_or(u16::MAX);
+    let area = f
+        .area()
+        .centered(Constraint::Length(width), Constraint::Length(height));
+    f.render_widget(Clear, area);
     f.render_widget(popup, area);
 }
 

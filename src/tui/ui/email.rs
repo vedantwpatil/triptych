@@ -178,7 +178,7 @@ pub(super) fn render_email_view(f: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Email (j/k: move, v: view, c: compose, d: delete, /: search, ?: help)")
+                .title("Email (j/k: move, Enter: view, T: task, c: compose, /: search, ?: help)")
                 .title_bottom(
                     Line::from(format!(
                         "sorted by {}{}{}{}{}{}{}{}{} ",
@@ -534,7 +534,7 @@ fn render_email_detail_popup(f: &mut Frame, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(email.subject.as_str())
-                .title_bottom("Esc/v: close, R: reply, A: all, F: fwd, ?: help")
+                .title_bottom("Esc/v: close, R: reply, A: all, F: fwd, T: task, ?: help")
                 .style(Style::default().bg(Color::Black)),
         )
         .wrap(Wrap { trim: false });

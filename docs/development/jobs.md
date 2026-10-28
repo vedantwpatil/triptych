@@ -7,6 +7,12 @@ Hub, workflow and open issues: [`../DEVELOPMENT.md`](../DEVELOPMENT.md). Code:
 
 ## Changelog
 
+- 2026-10-27 (apply popup UX): with submit off (the default) an application had no ending: `y` was
+  refused and `n` closed the browser and put the posting back to `new`, so a form submitted by hand was
+  never recorded. `Enter` now records it (`App::mark_applied`: `applied`, `applied_at`, task ticked, browser
+  closed), sharing `record_applied` with the sidecar's `submitted`. The popup is sized to its content,
+  shows `✓` filled and `▲` open fields, a `Next:` line for the current state, and a bottom key list without
+  `y` unless it would act. The screenshot path moved to the log. Scenario: `apply_marked_applied_by_hand`.
 - 2026-10-23 (links fixed): every `Apply:` task said "No apply link on this posting". The one digest with
   stored anchors showed the real shape: the anchor text is the role alone (the company is plain text
   beside it) and the target is a Simplify page, `simplify.jobs/p/<uuid>`, so the company-plus-role match

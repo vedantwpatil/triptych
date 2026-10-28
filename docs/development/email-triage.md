@@ -7,6 +7,9 @@ Related: [`email-messages.md`](./email-messages.md), [`nlp.md`](./nlp.md), [`../
 
 ## Changelog
 
+- 2026-10-27 (email to task key): `Enter` in the list converted the email to a task, surprising anyone
+  expecting it to open. `Enter` now opens the message (like `v`) and `T` converts, in the list or the
+  open message. Scenario: `email_enter_opens`.
 - 2026-10-21 (audit fixes, rules and triage): each item has a test.
   - Rules: a `delete` rule acts only on mail that arrives after it (also the first rule; it used to
     sweep every stored message, a permanent server delete). `rule_applied` is 0 new, 1 checked,

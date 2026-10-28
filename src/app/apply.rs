@@ -131,7 +131,6 @@ pub enum ApplyStage {
         ats: String,
         filled: Vec<String>,
         unanswered: Vec<String>,
-        screenshot: Option<String>,
     },
     /// `submit` was sent and the click may already have happened, so it can no longer be cancelled.
     Submitting,
@@ -276,36 +275,20 @@ impl App {
                 unanswered,
                 screenshot,
             } => {
+                if let Some(path) = screenshot {
+                    tracing::info!("[Apply] posting {id}: screenshot {path}");
+                }
                 session.stage = ApplyStage::Review {
                     ats,
                     filled,
                     unanswered,
-                    screenshot,
                 };
                 self.apply = Some(session);
                 self.set_posting_status(id, "filled").await;
             }
             ApplyEvent::Submitted => {
                 tracing::info!("[Apply] posting {id} ({}): submitted", session.label);
-                let marked = sqlx::query(
-                    "UPDATE job_postings SET status = 'applied', applied_at = ? WHERE id = ?",
-                )
-                .bind(crate::clock::now())
-                .bind(id)
-                .execute(&self.db_pool)
-                .await;
-                if let Err(e) = marked {
-                    tracing::warn!("[Apply] posting {id} submitted but not recorded: {e}");
-                }
-                let _ = sqlx::query(
-                    "UPDATE tasks SET completed = true \
-                     WHERE id = (SELECT task_id FROM job_postings WHERE id = ?)",
-                )
-                .bind(id)
-                .execute(&self.db_pool)
-                .await;
-                let _ = self.reload_tasks_keep_selection().await;
-                self.notify(&format!("Applied: {}", session.label));
+                self.record_applied(id, &session.label).await;
             }
             ApplyEvent::Unsupported { ats } => {
                 tracing::info!("[Apply] posting {id}: unsupported site {ats}");
@@ -320,6 +303,45 @@ impl App {
                 self.notify(&format!("Apply failed: {message}"));
             }
         }
+    }
+
+    /// `Enter` in the review popup: the user submitted in the browser. Dropping the session closes it.
+    pub async fn mark_applied(&mut self) {
+        let Some(session) = self
+            .apply
+            .take_if(|s| matches!(s.stage, ApplyStage::Review { .. }))
+        else {
+            return;
+        };
+        tracing::info!(
+            "[Apply] posting {} ({}): marked applied by hand",
+            session.posting_id,
+            session.label
+        );
+        self.record_applied(session.posting_id, &session.label)
+            .await;
+    }
+
+    /// Marks the posting `applied` (so the daily cap counts it) and ticks off its task.
+    async fn record_applied(&mut self, id: i64, label: &str) {
+        let marked =
+            sqlx::query("UPDATE job_postings SET status = 'applied', applied_at = ? WHERE id = ?")
+                .bind(crate::clock::now())
+                .bind(id)
+                .execute(&self.db_pool)
+                .await;
+        if let Err(e) = marked {
+            tracing::warn!("[Apply] posting {id} applied but not recorded: {e}");
+        }
+        let _ = sqlx::query(
+            "UPDATE tasks SET completed = true \
+             WHERE id = (SELECT task_id FROM job_postings WHERE id = ?)",
+        )
+        .bind(id)
+        .execute(&self.db_pool)
+        .await;
+        let _ = self.reload_tasks_keep_selection().await;
+        self.notify(&format!("Applied: {label}"));
     }
 
     async fn set_posting_status(&self, id: i64, status: &str) {

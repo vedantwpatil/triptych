@@ -954,8 +954,8 @@ def _opener(c: Ctx):
 def _(c: Ctx):
     log = _apply_tui(c, "https://boards.example/acme/1", TRIPTYCH_APPLY_SUBMIT="1")
     c.t.press("A")
-    c.check(c.t.wait_for("Apply (y: submit", 10), "review popup never opened")
-    c.check("Filled (3): First name, Last name, Email" in c.t.text(), "filled fields not shown")
+    c.check(c.t.wait_for("Next: press y to submit", 10), "review popup never opened")
+    c.check("✓ First name, Last name, Email" in c.t.text(), "filled fields not shown")
     c.eq(c.db("select status from job_postings"), [("filled",)], "status while in review")
     c.t.press("y")
     c.check(c.t.wait_for("Applied: Acme - Engineer", 10), "no confirmation after y")
@@ -969,13 +969,13 @@ def _(c: Ctx):
 def _(c: Ctx):
     log = _apply_tui(c, "https://boards.example/acme/1")
     c.t.press("A")
-    c.check(c.t.wait_for("Apply (y: submit", 10), "review popup never opened")
-    c.check("Submit is off" in c.t.text(), "popup does not say submitting is off")
+    c.check(c.t.wait_for("Next: click Submit in the browser, then press Enter", 10), "review popup never opened")
+    c.check("y submit" not in c.t.text(), "popup offers y while submitting is off")
     c.t.press("y")
     c.check(c.t.wait_for("to allow it", 5), "y gave no reason")
     c.check("submit" not in _sent(log), "submit reached the sidecar while off")
     c.t.press("n")
-    c.check(c.t.wait_for("Apply (y: submit", 5, gone=True), "n did not close the popup")
+    c.check(c.t.wait_for("Next:", 5, gone=True), "n did not close the popup")
     c.eq(c.db("select status from job_postings"), [("new",)], "status after cancel")
     _await_sent(c, log, "abort")
     c.t.press("q")
@@ -985,14 +985,15 @@ def _(c: Ctx):
 def _(c: Ctx):
     log = _apply_tui(c, "https://boards.example/unanswered/1", TRIPTYCH_APPLY_SUBMIT="1")
     c.t.press("A")
-    c.check(c.t.wait_for("Required, answer in the browser (1)", 10), "open required field not listed")
-    c.check("Why do you want to work here?" in c.t.text(), "field label missing")
+    c.check(c.t.wait_for("Next: answer ▲ in the browser, then press r", 10), "open required field not listed")
+    c.check("▲ Why do you want to work here?" in c.t.text(), "field label missing")
+    c.check("y submit" not in c.t.text(), "popup offers y with a field open")
     c.t.press("y")
     c.check(c.t.wait_for("required field(s) open", 5), "y not refused with a field open")
     c.check("submit" not in _sent(log), "submit sent with a required field open")
     Path(str(log) + ".answered").write_text("")
     c.t.press("r")
-    c.check(c.t.wait_for("No required field left open", 10), "recheck did not clear the field")
+    c.check(c.t.wait_for("Next: press y to submit", 10), "recheck did not clear the field")
     c.t.press("y")
     c.check(c.t.wait_for("Applied: Acme", 10), "no submit after the recheck")
     c.eq(_sent(log)[:3], ["fill", "recheck", "submit"], "commands the sidecar received")
@@ -1019,7 +1020,7 @@ def _(c: Ctx):
     c.t.press("A")
     c.check(c.t.wait_for("not supported", 10), "unsupported site not reported")
     c.eq(opened(), ["https://boards.example/unsupported/1"], "the link should open instead")
-    c.check(c.t.wait_for("Apply (", 3, gone=True), "popup still open")
+    c.check(c.t.wait_for("in the browser", 3, gone=True), "popup still open")
     c.eq(c.db("select status from job_postings"), [("new",)], "status after unsupported")
     c.t.press("q")
 
@@ -1029,7 +1030,7 @@ def _(c: Ctx):
     _apply_tui(c, "https://boards.example/error/1")
     c.t.press("A")
     c.check(c.t.wait_for("Apply failed: form not found", 10), "error not reported")
-    c.check(c.t.wait_for("Apply (", 3, gone=True), "popup still open")
+    c.check(c.t.wait_for("in the browser", 3, gone=True), "popup still open")
     c.eq(c.db("select status from job_postings"), [("failed",)], "status after error")
     c.t.press("q")
 
@@ -1040,8 +1041,23 @@ def _(c: Ctx):
     log = _apply_tui(c, "https://boards.example/acme/1", cmd=False, TRIPTYCH_OPEN_CMD=script)
     c.t.press("A")
     c.eq(opened(), ["https://boards.example/acme/1"], "A without TRIPTYCH_APPLY_CMD should open the link")
-    c.check("Apply (" not in c.t.text(), "popup opened without a sidecar command")
+    c.check("in the browser" not in c.t.text(), "popup opened without a sidecar command")
     c.check(not log.exists(), "a sidecar ran without a command")
+    c.t.press("q")
+
+
+@scenario("apply_marked_applied_by_hand")
+def _(c: Ctx):
+    log = _apply_tui(c, "https://boards.example/acme/1")
+    c.t.press("A")
+    c.check(c.t.wait_for("then press Enter", 10), "review popup never opened")
+    c.t.press("ENTER")
+    c.check(c.t.wait_for("Applied: Acme - Engineer", 10), "Enter did not record the application")
+    c.check("Next:" not in c.t.text(), "popup still open after Enter")
+    c.eq(c.db("select status, applied_at is not null from job_postings"), [("applied", 1)], "posting after Enter")
+    c.eq(c.db("select completed from tasks"), [(1,)], "task not ticked off")
+    _await_sent(c, log, "abort")
+    c.check("submit" not in _sent(log), "Enter sent a submit")
     c.t.press("q")
 
 
@@ -1124,7 +1140,7 @@ def _(c: Ctx):
 def _(c: Ctx):
     c.seed_emails(1, subject="Pay invoice tomorrow")
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
     t.press("m")
     t.press("x")
@@ -1875,7 +1891,7 @@ def _(c: Ctx):
 def _(c: Ctx):
     c.seed_emails(1, subject="Pay invoice tomorrow")
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
     c.check(c.descs() and "invoice" in c.descs()[0].lower(), f"task descriptions {c.descs()}")
     c.check(c.db("select task_id from email_messages")[0][0] is not None, "email not linked to task")
@@ -1884,13 +1900,26 @@ def _(c: Ctx):
     c.check(t.has("invoice") or t.has("Pay"), "converted task not in todo list")
 
 
+@scenario("email_enter_opens")
+def _(c: Ctx):
+    c.seed_emails(1, subject="Pay invoice tomorrow")
+    t = c.tui()
+    t.press("m", "ENTER")
+    c.see("Esc/v: close")
+    c.eq(c.tasks(), [], "Enter made a task")
+    t.press("T")  # converts from inside the message too
+    c.see("Email converted to task")
+    c.check(t.has("Esc/v: close"), "T closed the message")
+    c.eq(len(c.tasks()), 1, "tasks after T")
+
+
 @scenario("email_stray_output")
 def _(c: Ctx):
     c.seed_emails(2, subject="Pay invoice tomorrow")
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
-    t.press("g", "g", "ENTER")  # a converted email sinks in priority order, so the other one is now on top
+    t.press("g", "g", "T")  # a converted email sinks in priority order, so the other one is now on top
     c.wait_db("select count(*) from tasks", [(2,)])
     c.check("cache hit" not in t.text() and "»" not in t.text(), "NLP eprintln! text leaked onto the TUI screen")
 
@@ -1899,9 +1928,9 @@ def _(c: Ctx):
 def _(c: Ctx):
     c.seed_emails(1, subject="Pay invoice tomorrow")
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
-    t.press("ENTER")
+    t.press("T")
     c.eq(len(c.tasks()), 1, "tasks after converting the same email twice")
 
 
@@ -1911,7 +1940,7 @@ def _(c: Ctx):
     still pick up a deadline from it, but its title stays the bare subject, not body prose."""
     c.seed_emails(1, subject="project update", snippet="please finish this by tomorrow")
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
     c.eq(c.descs(), ["project update"], "title must stay the subject, not the body snippet")
     t.press("m")
@@ -1929,7 +1958,7 @@ def _(c: Ctx):
         body_text="Hey team,\n\nJust a heads up this needs to be finished by next friday.\n\nThanks.",
     )
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
     c.eq(c.descs(), ["quarterly report"], "title must stay the subject, not body prose")
     t.press("m")
@@ -1949,7 +1978,7 @@ def _(c: Ctx):
         "> Please respond due tomorrow at the latest.\n> Thanks!",
     )
     t = c.tui()
-    t.press("m", "ENTER")
+    t.press("m", "T")
     c.see("Email converted to task")
     c.eq(c.descs(), ["quick question"], "title must stay the subject")
     t.press("m")
@@ -2116,7 +2145,7 @@ def _(c: Ctx):
     t.press("m")  # entering the view spawns a sync
     c.wait_db("select count(*) from email_messages", [(2,)])
     c.see("Arrived later", 5, msg="synced mail missing from the Email view after the sync finished")
-    t.press("j", "ENTER")
+    t.press("j", "T")
     c.see("Email converted to task")
     c.check(any("arrived" in d.lower() for d in c.descs()), f"convert-to-task on synced mail: {c.descs()}")
 

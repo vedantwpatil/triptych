@@ -47,10 +47,14 @@ TRIPTYCH_APPLICANT=/Users/ada/.config/triptych/applicant.toml
    Simplify's own redirect to the employer, finds the application form (in the page or an embedded
    Greenhouse/Lever/Ashby iframe) and fills what the applicant file maps (name, email, phone, links,
    resume upload). Nothing else is touched.
-2. A popup lists what was filled and every required field still empty, with a screenshot path.
-3. Answer the open fields in the browser, then `r` rechecks the page. `y` submits, `n`/`Esc` cancels
-   and closes the browser. Idle for 15 minutes cancels too.
-4. On success the posting becomes `applied` and the task is ticked off.
+2. A popup lists what was filled (`✓`) and every required field still empty (`▲`), then a `Next:` line,
+   and only the keys that act right now. The screenshot path goes to `$TMPDIR/triptych.log`.
+3. Answer the `▲` fields in the browser, then `r` rechecks the page. Then either click Submit in the
+   browser and press `Enter` (the default, review-only flow), or press `y` to submit (only offered with
+   `TRIPTYCH_APPLY_SUBMIT=1`). `n`/`Esc` cancels and closes the browser, losing anything typed there.
+   Idle for 15 minutes cancels too.
+4. After `Enter` or a successful `y` the posting becomes `applied` (counted by the daily cap), the task is
+   ticked off and the browser closes.
 
 Questions about work authorisation, sponsorship, demographics, consent and free text are never answered
 for you: when required they stay in the open list until you fill them.

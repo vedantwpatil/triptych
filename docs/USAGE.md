@@ -106,9 +106,10 @@ down it keeps its rule score.
 (`TRIPTYCH_JOBS_PROFILE`, see [`SETUP.md`](./SETUP.md)).
 
 `A` on an `Apply:` task fills the application in a browser and shows what it filled and which required
-fields are still empty; `y` submits, `r` rechecks after you answer them, `n`/`Esc` cancels. Needs
-`TRIPTYCH_APPLY_CMD`, and `y` needs `TRIPTYCH_APPLY_SUBMIT=1` ([`APPLY.md`](./APPLY.md)). Without the
-command, `A` opens the link like `o`.
+fields are still empty, with a `Next:` line saying what to do. `r` rechecks after you answer them,
+`Enter` records an application you submitted in the browser yourself, `y` submits for you,
+`n`/`Esc` cancels and closes the browser. Needs `TRIPTYCH_APPLY_CMD`, and `y` needs
+`TRIPTYCH_APPLY_SUBMIT=1` ([`APPLY.md`](./APPLY.md)). Without the command, `A` opens the link like `o`.
 
 ## Calendar
 
@@ -151,10 +152,10 @@ Press `m`. Set up accounts first ([`SETUP.md`](./SETUP.md#email)). Sync runs in 
 
 | Key                         | Action                                                                               |
 | --------------------------- | ------------------------------------------------------------------------------------ |
-| `v` / `Esc`                 | Open / close a message                                                               |
+| `Enter`/`v`, `Esc`          | Open / close a message                                                               |
 | `c`, `R`, `A`, `F`          | Compose; reply, reply-all, forward (in a message)                                    |
 | `Ctrl-N`/`Ctrl-P`, `Enter`  | In To/Cc: pick a suggested contact (from mail you have received), accept it as `Name <addr>, ` (ready for the next recipient) |
-| `Enter`                     | Turn the email into a task (finds a deadline in the text)                            |
+| `T`                         | Turn the email into a task (finds a deadline in the text), in the list or a message  |
 | `M`                         | Accept a meeting invite as a task                                                    |
 | `r`/`u`, `f`, `t`           | Read/unread, star, cycle color category                                              |
 | `a`, `d`                    | Archive; delete from the server for good (press `d` twice, any other key cancels)    |

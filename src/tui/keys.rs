@@ -316,11 +316,13 @@ fn handle_links_key(app: &mut App, code: KeyCode) -> KeyOutcome {
 }
 
 /// Keys while a job application is open (`A` on an `Apply:` task): it owns the keyboard, so even
-/// `q` does nothing. In the review stage `y` submits (guarded in `App::submit_apply`), `r` makes the
-/// sidecar rescan the page, `n`/`Esc` cancel.
+/// `q` does nothing. In the review stage `y` submits (guarded in `App::submit_apply`), `Enter` records
+/// an application the user submitted in the browser, `r` makes the sidecar rescan the page,
+/// `n`/`Esc` cancel.
 async fn handle_apply_key(app: &mut App, code: KeyCode) -> KeyOutcome {
     match code {
         KeyCode::Char('y') => app.submit_apply(),
+        KeyCode::Enter => app.mark_applied().await,
         KeyCode::Char('r') => app.recheck_apply(),
         KeyCode::Char('n') | KeyCode::Esc => app.cancel_apply().await,
         _ => {}
@@ -554,14 +556,12 @@ async fn handle_email_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::Char('/') => app.start_search(),
         KeyCode::Char('n') => app.search_step(true).await,
         KeyCode::Char('N') => app.search_step(false).await,
-        KeyCode::Char('v') => {
+        KeyCode::Enter | KeyCode::Char('v') => {
             if let Err(e) = app.open_selected_email().await {
                 set_error(app, e);
             }
         }
-        KeyCode::Enter => {
-            app.convert_selected_email_to_task().await;
-        }
+        KeyCode::Char('T') => app.convert_selected_email_to_task().await,
         KeyCode::Char('s') => app.start_email_sync(true),
         KeyCode::Char('o') => {
             if let Err(e) = app.toggle_email_sort().await {
@@ -748,6 +748,7 @@ async fn handle_email_detail_key(app: &mut App, code: KeyCode) -> KeyOutcome {
         KeyCode::Char('d') => app.confirm_delete_selected_email(),
         KeyCode::Char('a') => app.archive_selected_email(),
         KeyCode::Char('s') => app.save_selected_attachments(),
+        KeyCode::Char('T') => app.convert_selected_email_to_task().await,
         KeyCode::Char('M') => {
             if let Err(e) = app.accept_meeting_invite().await {
                 set_error(app, e);
