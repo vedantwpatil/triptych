@@ -41,7 +41,16 @@ pub async fn run() -> Result<(), BoxError> {
     // sourced `.env` itself; a fresh terminal or process launched without
     // that meant `EmailConfig::all_from_env()` silently returned empty and
     // mail sync no-op'd, with no error surfaced anywhere obvious.
-    let _ = dotenvy::dotenv();
+    // Run outside the repo (no `.env` above the cwd), fall back to the one
+    // beside the database, so a shell-exported `DATABASE_URL` carries the
+    // config too. Test sandboxes point `DATABASE_URL` at their own dir.
+    if dotenvy::dotenv().is_err_and(|e| e.not_found())
+        && let Some(db) = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| notify::agent::db_file(&app::db_url(), &cwd))
+    {
+        let _ = dotenvy::from_path(db.with_file_name(".env"));
+    }
 
     let cli_args = Cli::parse();
 

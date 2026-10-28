@@ -19,8 +19,10 @@ Without Ollama, task input still works through the regex parser; only fuzzy phra
 
 Run `triptych` from the directory where you want the data. The database `todo.db` is created there
 and migrated automatically (a new one prints `Creating a new database at <path>`; set `DATABASE_URL` to
-pin the location). Config is read from a `.env` file in the working directory (plain
-`KEY=value` or `export KEY=value` lines) and from the process environment.
+pin the location). Config is read from a `.env` file in the working directory or a parent (plain
+`KEY=value` or `export KEY=value` lines), else from a `.env` beside the database file, and from the
+process environment. With `DATABASE_URL` exported in your shell, put (or symlink) `.env` next to the
+database to run `triptych` from any directory.
 
 ## Configuration
 
