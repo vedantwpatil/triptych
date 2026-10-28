@@ -8,6 +8,11 @@ Related: [`testing.md`](./testing.md), [`canvas-notify.md`](./canvas-notify.md).
 
 ## Changelog
 
+- 2026-10-27 (`.env` outside the repo): `triptych canvas sync` run from `$HOME` said `Canvas not
+  configured` although `DATABASE_URL` (exported in the shell) found the data: `dotenvy::dotenv()` only
+  looks in the cwd and its parents. With none found, `run()` now loads the `.env` beside the database
+  file. Test sandboxes point `DATABASE_URL` at their own dir, so they never reach the real one.
+
 - 2026-10-21 (`list --all`): `triptych list` now hides completed tasks; `--all`/`-a` shows them
   (`Commands::List { all }`, filtered in `cli/commands.rs`; `load_tasks` and the TUI are unchanged).
   Tests: `list_hides_completed_tasks_unless_all`, `list_with_only_completed_tasks_points_at_all`.
